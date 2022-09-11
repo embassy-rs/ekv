@@ -1,4 +1,5 @@
 #![feature(generic_associated_types)]
+#![deny(unused_must_use)]
 
 pub mod backend;
 pub mod backends;
@@ -34,43 +35,46 @@ pub struct ReadTransaction<'a, B: Backend + 'a> {
 impl<'a, B: Backend + 'a> ReadTransaction<'a, B> {
     pub fn read(&mut self, key: &[u8], value: &mut [u8]) -> usize {
         loop {
-            let got_key_len = self.read_leb128() as usize;
+            let got_key_len = match self.read_leb128() {
+                Ok(x) => x as usize,
+                Err(ReadError::Eof) => return 0, // key not present.
+            };
             println!("got_key_len {}", got_key_len);
             assert!(got_key_len <= KEY_MAX_SIZE);
             let mut got_key = [0u8; KEY_MAX_SIZE];
-            self.reader.read(&mut got_key[..got_key_len]);
+            self.reader.read(&mut got_key[..got_key_len]).unwrap();
             let got_key = &got_key[..got_key_len];
-            let got_value_len = self.read_leb128() as usize;
+            let got_value_len = self.read_leb128().unwrap() as usize;
             println!("got_value_len {}", got_value_len);
 
             if got_key == key {
                 assert!(value.len() >= got_value_len);
-                self.reader.read(&mut value[..got_value_len]);
+                self.reader.read(&mut value[..got_value_len]).unwrap();
                 return got_value_len;
             }
 
-            self.reader.skip(got_value_len);
+            self.reader.skip(got_value_len).unwrap();
         }
     }
 
-    fn read_u8(&mut self) -> u8 {
+    fn read_u8(&mut self) -> Result<u8, ReadError> {
         let mut buf = [0u8; 1];
-        self.reader.read(&mut buf);
-        buf[0]
+        self.reader.read(&mut buf)?;
+        Ok(buf[0])
     }
 
-    fn read_leb128(&mut self) -> u32 {
+    fn read_leb128(&mut self) -> Result<u32, ReadError> {
         let mut res = 0;
         let mut shift = 0;
         loop {
-            let x = self.read_u8();
+            let x = self.read_u8()?;
             res |= (x as u32 & 0x7F) << shift;
             if x & 0x80 == 0 {
                 break;
             }
             shift += 7;
         }
-        res
+        Ok(res)
     }
 }
 
@@ -129,5 +133,7 @@ mod tests {
         assert_eq!(&buf[..n], b"1234");
         let n = rtx.read(b"bar", &mut buf);
         assert_eq!(&buf[..n], b"4321");
+        let n = rtx.read(b"baz", &mut buf);
+        assert_eq!(&buf[..n], b"");
     }
 }

@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 use std::mem;
 use std::rc::Rc;
 
-use crate::backend;
+use crate::backend::{self, ReadError};
 
 struct Run {
     records: Vec<Vec<u8>>,
@@ -70,11 +70,13 @@ impl<'a> RunReader<'a> {
 }
 
 impl<'a> backend::RunReader for RunReader<'a> {
-    fn skip(&mut self, mut len: usize) {
+    fn skip(&mut self, mut len: usize) -> Result<(), backend::ReadError> {
+        let run = self.run.borrow();
         while len != 0 {
-            let run = self.run.borrow();
+            if self.record >= run.records.len() {
+                return Err(ReadError::Eof);
+            }
 
-            assert!(self.record < run.records.len());
             let record = &run.records[self.record];
             assert!(self.pos < record.len());
             let n = len.min(record.len() - self.pos);
@@ -85,13 +87,16 @@ impl<'a> backend::RunReader for RunReader<'a> {
                 self.record += 1;
             }
         }
+        Ok(())
     }
 
-    fn read(&mut self, mut data: &mut [u8]) {
+    fn read(&mut self, mut data: &mut [u8]) -> Result<(), backend::ReadError> {
+        let run = self.run.borrow();
         while !data.is_empty() {
-            let run = self.run.borrow();
+            if self.record >= run.records.len() {
+                return Err(ReadError::Eof);
+            }
 
-            assert!(self.record < run.records.len());
             let record = &run.records[self.record];
             assert!(self.pos < record.len());
             let n = data.len().min(record.len() - self.pos);
@@ -103,6 +108,7 @@ impl<'a> backend::RunReader for RunReader<'a> {
                 self.record += 1;
             }
         }
+        Ok(())
     }
 }
 

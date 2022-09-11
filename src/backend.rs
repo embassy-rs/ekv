@@ -15,7 +15,12 @@ pub trait RunWriter {
     fn record_end(&mut self);
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ReadError {
+    Eof,
+}
+
 pub trait RunReader {
-    fn read(&mut self, data: &mut [u8]);
-    fn skip(&mut self, len: usize);
+    fn read(&mut self, data: &mut [u8]) -> Result<(), ReadError>;
+    fn skip(&mut self, len: usize) -> Result<(), ReadError>;
 }
