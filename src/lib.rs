@@ -6,6 +6,8 @@ pub mod backends;
 
 use std::cell::Cell;
 
+use heapless::Vec;
+
 use crate::backend::*;
 
 pub const KEY_MAX_SIZE: usize = 64;
@@ -32,7 +34,10 @@ impl<B: Backend> Database<B> {
         self.runs.set(run_id + 1);
 
         let writer = self.backend.write_run(run_id);
-        WriteTransaction { writer }
+        WriteTransaction {
+            writer,
+            last_key: Vec::new(),
+        }
     }
 }
 
@@ -99,10 +104,20 @@ impl<'a, B: Backend + 'a> ReadTransaction<'a, B> {
 
 pub struct WriteTransaction<'a, B: Backend + 'a> {
     writer: B::RunWriter<'a>,
+    last_key: Vec<u8, KEY_MAX_SIZE>,
 }
 
 impl<'a, B: Backend + 'a> WriteTransaction<'a, B> {
     pub fn write(&mut self, key: &[u8], value: &[u8]) {
+        if key.len() > KEY_MAX_SIZE {
+            panic!("key too long.")
+        }
+
+        if key <= &self.last_key {
+            panic!("writes within a transaction must be sorted.");
+        }
+        self.last_key = Vec::from_slice(key).unwrap();
+
         let key_len: u32 = key.len().try_into().unwrap();
         let value_len: u32 = value.len().try_into().unwrap();
 
@@ -144,8 +159,8 @@ mod tests {
         let mut buf = [0u8; 1024];
 
         let mut wtx = db.write_transaction();
-        wtx.write(b"foo", b"1234");
         wtx.write(b"bar", b"4321");
+        wtx.write(b"foo", b"1234");
 
         let mut rtx = db.read_transaction();
         let n = rtx.read(b"foo", &mut buf);
@@ -156,9 +171,9 @@ mod tests {
         assert_eq!(&buf[..n], b"");
 
         let mut wtx = db.write_transaction();
-        wtx.write(b"foo", b"5678");
         wtx.write(b"bar", b"8765");
         wtx.write(b"baz", b"4242");
+        wtx.write(b"foo", b"5678");
 
         let mut rtx = db.read_transaction();
         let n = rtx.read(b"foo", &mut buf);
