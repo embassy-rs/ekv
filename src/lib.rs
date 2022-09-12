@@ -57,28 +57,43 @@ impl<'a, B: Backend + 'a> ReadTransaction<'a, B> {
     }
 
     fn read_in_run(&mut self, run_id: u32, key: &[u8], value: &mut [u8]) -> usize {
-        let mut reader = self.db.backend.read_run(run_id);
+        let reader = &mut self.db.backend.read_run(run_id);
+
+        let mut key_buf = Vec::new();
+
+        // Linear search
         loop {
-            let got_key_len = match Self::read_leb128(&mut reader) {
-                Ok(x) => x as usize,
+            match Self::read_key(reader, &mut key_buf) {
+                Ok(x) => {}
                 Err(ReadError::Eof) => return 0, // key not present.
             };
-            println!("got_key_len {}", got_key_len);
-            assert!(got_key_len <= KEY_MAX_SIZE);
-            let mut got_key = [0u8; KEY_MAX_SIZE];
-            reader.read(&mut got_key[..got_key_len]).unwrap();
-            let got_key = &got_key[..got_key_len];
-            let got_value_len = Self::read_leb128(&mut reader).unwrap() as usize;
-            println!("got_value_len {}", got_value_len);
 
-            if got_key == key {
-                assert!(value.len() >= got_value_len);
-                reader.read(&mut value[..got_value_len]).unwrap();
-                return got_value_len;
+            if key_buf == key {
+                return Self::read_value(reader, value);
             }
 
-            reader.skip(got_value_len).unwrap();
+            Self::skip_value(reader);
         }
+    }
+
+    fn read_key(reader: &mut B::RunReader<'_>, buf: &mut Vec<u8, KEY_MAX_SIZE>) -> Result<(), ReadError> {
+        let len = Self::read_leb128(reader)? as usize;
+        assert!(len <= KEY_MAX_SIZE);
+        unsafe { buf.set_len(len) };
+        reader.read(buf).unwrap();
+        Ok(())
+    }
+
+    fn read_value(reader: &mut B::RunReader<'_>, value: &mut [u8]) -> usize {
+        let len = Self::read_leb128(reader).unwrap() as usize;
+        assert!(value.len() >= len);
+        reader.read(&mut value[..len]).unwrap();
+        len
+    }
+
+    fn skip_value(reader: &mut B::RunReader<'_>) {
+        let len = Self::read_leb128(reader).unwrap() as usize;
+        reader.skip(len).unwrap();
     }
 
     fn read_u8(reader: &mut B::RunReader<'_>) -> Result<u8, ReadError> {
