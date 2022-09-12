@@ -73,13 +73,18 @@ impl<'a> RunReader<'a> {
 
             record_l: 0,
             record_r: nrecords,
-            record: nrecords / 2,
+            record: 0,
             pos: 0,
         }
     }
 }
 
 impl<'a> backend::RunReader for RunReader<'a> {
+    fn binary_search_start(&mut self) {
+        self.record = self.record_r / 2;
+        self.pos = 0;
+    }
+
     fn binary_search_seek(&mut self, direction: SeekDirection) -> bool {
         if self.record_l + 1 >= self.record_r {
             return false;
