@@ -5,6 +5,7 @@ pub mod backend;
 pub mod backends;
 
 use std::cell::Cell;
+use std::cmp::Ordering;
 
 use heapless::Vec;
 
@@ -61,13 +62,37 @@ impl<'a, B: Backend + 'a> ReadTransaction<'a, B> {
 
         let mut key_buf = Vec::new();
 
-        // Linear search
+        // Binary search
         loop {
             match Self::read_key(reader, &mut key_buf) {
-                Ok(x) => {}
+                Ok(()) => {}
                 Err(ReadError::Eof) => return 0, // key not present.
             };
 
+            // Found?
+            let dir = match key_buf[..].cmp(key) {
+                Ordering::Equal => return Self::read_value(reader, value),
+                Ordering::Less => SeekDirection::Right,
+                Ordering::Greater => SeekDirection::Left,
+            };
+
+            // Not found, do a binary search step.
+            if !reader.binary_search_seek(dir) {
+                // Can't seek anymore. In this case, the read pointer wasn't moved.
+                // Skip the value from the key we read above, then go do linear search.
+                Self::skip_value(reader);
+                break;
+            }
+        }
+
+        // Linear search
+        loop {
+            match Self::read_key(reader, &mut key_buf) {
+                Ok(()) => {}
+                Err(ReadError::Eof) => return 0, // key not present.
+            };
+
+            // Found?
             if key_buf == key {
                 return Self::read_value(reader, value);
             }
@@ -197,5 +222,18 @@ mod tests {
         assert_eq!(&buf[..n], b"8765");
         let n = rtx.read(b"baz", &mut buf);
         assert_eq!(&buf[..n], b"4242");
+
+        let mut wtx = db.write_transaction();
+        wtx.write(b"lol", b"9999");
+
+        let mut rtx = db.read_transaction();
+        let n = rtx.read(b"foo", &mut buf);
+        assert_eq!(&buf[..n], b"5678");
+        let n = rtx.read(b"bar", &mut buf);
+        assert_eq!(&buf[..n], b"8765");
+        let n = rtx.read(b"baz", &mut buf);
+        assert_eq!(&buf[..n], b"4242");
+        let n = rtx.read(b"lol", &mut buf);
+        assert_eq!(&buf[..n], b"9999");
     }
 }

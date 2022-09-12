@@ -20,7 +20,14 @@ pub enum ReadError {
     Eof,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SeekDirection {
+    Left,
+    Right,
+}
+
 pub trait RunReader {
+    fn binary_search_seek(&mut self, direction: SeekDirection) -> bool;
     fn read(&mut self, data: &mut [u8]) -> Result<(), ReadError>;
     fn skip(&mut self, len: usize) -> Result<(), ReadError>;
 }

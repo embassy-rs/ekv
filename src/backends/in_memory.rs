@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 use std::mem;
 use std::rc::Rc;
 
-use crate::backend::{self, ReadError};
+use crate::backend::{self, ReadError, SeekDirection};
 
 struct Run {
     records: Vec<Vec<u8>>,
@@ -53,23 +53,51 @@ impl backend::Backend for InMemory {
 
 pub struct RunReader<'a> {
     run: Rc<RefCell<Run>>,
+    phantom: PhantomData<&'a ()>,
+
+    // for binary search
+    record_l: usize,
+    record_r: usize,
+
+    // current read pointer
     record: usize,
     pos: usize,
-    phantom: PhantomData<&'a ()>,
 }
 
 impl<'a> RunReader<'a> {
     fn new(run: Rc<RefCell<Run>>) -> Self {
+        let nrecords = run.borrow().records.len();
         Self {
             run,
-            record: 0,
-            pos: 0,
             phantom: PhantomData,
+
+            record_l: 0,
+            record_r: nrecords,
+            record: nrecords / 2,
+            pos: 0,
         }
     }
 }
 
 impl<'a> backend::RunReader for RunReader<'a> {
+    fn binary_search_seek(&mut self, direction: SeekDirection) -> bool {
+        if self.record_l + 1 >= self.record_r {
+            return false;
+        }
+
+        let m = (self.record_l + self.record_r) / 2;
+
+        match direction {
+            SeekDirection::Left => self.record_r = m,
+            SeekDirection::Right => self.record_l = m,
+        }
+
+        self.record = (self.record_l + self.record_r) / 2;
+        self.pos = 0;
+
+        true
+    }
+
     fn skip(&mut self, mut len: usize) -> Result<(), backend::ReadError> {
         let run = self.run.borrow();
         while len != 0 {
