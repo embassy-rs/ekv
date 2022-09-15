@@ -1,8 +1,12 @@
 #![feature(generic_associated_types)]
 #![deny(unused_must_use)]
 
+// MUST go first.
+pub mod macros;
+
 pub mod backend;
 pub mod backends;
+pub mod flash;
 
 use std::cell::Cell;
 use std::cmp::Ordering;
