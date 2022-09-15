@@ -11,7 +11,7 @@ use heapless::Vec;
 
 use crate::backend::*;
 
-pub const KEY_MAX_SIZE: usize = 64;
+pub const MAX_KEY_SIZE: usize = 64;
 
 pub struct Database<B: Backend> {
     backend: B,
@@ -54,7 +54,7 @@ impl<B: Backend> Database<B> {
         let r2 = &mut self.backend.read_run(start + 1);
         let w = &mut self.backend.write_run(start + 2);
 
-        fn read_key_or_empty(r: &mut impl RunReader, buf: &mut Vec<u8, KEY_MAX_SIZE>) {
+        fn read_key_or_empty(r: &mut impl RunReader, buf: &mut Vec<u8, MAX_KEY_SIZE>) {
             match read_key(r, buf) {
                 Ok(()) => {}
                 Err(ReadError::Eof) => buf.truncate(0),
@@ -159,7 +159,7 @@ impl<'a, B: Backend + 'a> ReadTransaction<'a, B> {
 
 pub struct WriteTransaction<'a, B: Backend + 'a> {
     w: B::RunWriter<'a>,
-    last_key: Vec<u8, KEY_MAX_SIZE>,
+    last_key: Vec<u8, MAX_KEY_SIZE>,
 }
 
 impl<'a, B: Backend + 'a> WriteTransaction<'a, B> {
@@ -167,7 +167,7 @@ impl<'a, B: Backend + 'a> WriteTransaction<'a, B> {
         if key.is_empty() {
             panic!("key cannot be empty.")
         }
-        if key.len() > KEY_MAX_SIZE {
+        if key.len() > MAX_KEY_SIZE {
             panic!("key too long.")
         }
 
@@ -230,9 +230,9 @@ fn write_leb128(w: &mut impl RunWriter, mut val: u32) {
     }
 }
 
-fn read_key(r: &mut impl RunReader, buf: &mut Vec<u8, KEY_MAX_SIZE>) -> Result<(), ReadError> {
+fn read_key(r: &mut impl RunReader, buf: &mut Vec<u8, MAX_KEY_SIZE>) -> Result<(), ReadError> {
     let len = read_leb128(r)? as usize;
-    assert!(len <= KEY_MAX_SIZE);
+    assert!(len <= MAX_KEY_SIZE);
     unsafe { buf.set_len(len) };
     r.read(buf).unwrap();
     Ok(())
