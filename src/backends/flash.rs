@@ -11,12 +11,14 @@ const PAGE_HEADER_MAGIC: u32 = 0xc4e21c75;
 
 type RunID = u16;
 type PageID = u16;
-const INVALID_PAGE_ID: PageID = PageID::MAX;
+
+const HEADER_FLAG_COMMITTED: u32 = 0x01;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(C)]
 struct PageHeader {
     magic: u32,
+    flags: u32,
     run_id: RunID,
     index: u16,
     previous_page_id: PageID,
@@ -25,13 +27,14 @@ struct PageHeader {
 }
 impl_bytes!(PageHeader);
 
-struct Run {
-    last_page_id: PageID,
+enum RunState {
+    Empty,
+    Written { last_page_id: PageID },
 }
 
 pub struct Backend<F: Flash> {
     flash: F,
-    runs: [Run; MAX_RUN_COUNT],
+    runs: [RunState; MAX_RUN_COUNT],
 
     // Page allocator
     used_pages: [bool; PAGE_COUNT], // TODO use a bitfield
@@ -40,14 +43,26 @@ pub struct Backend<F: Flash> {
 
 impl<F: Flash> Backend<F> {
     pub fn new(flash: F) -> Self {
-        const DUMMY_RUN: Run = Run {
-            last_page_id: INVALID_PAGE_ID,
-        };
-        Self {
+        const DUMMY_RUN: RunState = RunState::Empty;
+        let mut this = Self {
             flash,
             runs: [DUMMY_RUN; MAX_RUN_COUNT],
             used_pages: [false; PAGE_COUNT],
             next_page_id: 0, // TODO make random to spread out wear
+        };
+        this.mount();
+        this
+    }
+
+    fn mount(&mut self) {
+        for page_id in 0..PAGE_COUNT {
+            if let Some(h) = self.read_header(page_id as _) {
+                if h.flags & HEADER_FLAG_COMMITTED != 0 {
+                    self.runs[h.run_id as usize] = RunState::Written {
+                        last_page_id: page_id as _,
+                    }
+                }
+            }
         }
     }
 
@@ -85,15 +100,24 @@ impl<F: Flash> Backend<F> {
     }
 
     fn get_run_page(&mut self, run_id: usize, page_index: usize) -> Option<PageID> {
-        let mut page_id = self.runs[run_id].last_page_id;
-        while page_id != INVALID_PAGE_ID {
-            let h = self.read_header(page_id).unwrap();
-            if h.index as usize == page_index {
-                return Some(page_id);
+        match self.runs[run_id] {
+            RunState::Empty => None,
+            RunState::Written { last_page_id } => {
+                let mut page_id = last_page_id;
+                loop {
+                    let h = self.read_header(page_id).unwrap();
+                    if h.index as usize == page_index {
+                        break Some(page_id);
+                    }
+
+                    // TODO avoid infinite loops, checking the index in the header decreases.
+                    page_id = h.previous_page_id;
+                    if page_id == PageID::MAX {
+                        break None;
+                    }
+                }
             }
-            page_id = h.previous_page_id
         }
-        None
     }
 
     fn read_run(&mut self, run_id: usize) -> RunReader<'_, F> {
@@ -111,7 +135,15 @@ pub struct RunReader<'a, F: Flash> {
     backend: &'a mut Backend<F>,
     run_id: usize,
 
-    // Current cursor
+    state: ReaderState,
+}
+
+enum ReaderState {
+    Created,
+    Reading(ReaderStateReading),
+    Finished,
+}
+struct ReaderStateReading {
     page_index: usize,
     page_id: PageID,
     offset: usize,
@@ -122,9 +154,7 @@ impl<'a, F: Flash> RunReader<'a, F> {
         Self {
             backend,
             run_id,
-            page_id: INVALID_PAGE_ID,
-            page_index: 0,
-            offset: 0,
+            state: ReaderState::Created,
         }
     }
 
@@ -143,26 +173,39 @@ impl<'a, F: Flash> RunReader<'a, F> {
      */
 
     fn next_page(&mut self) {
-        if self.page_id == INVALID_PAGE_ID {
-            self.page_id = 0;
-        } else {
-            self.page_id += 1;
-        }
-
-        self.offset = PageHeader::SIZE;
+        let index = match &self.state {
+            ReaderState::Created => 0,
+            ReaderState::Reading(s) => s.page_index,
+            ReaderState::Finished => unreachable!(),
+        };
+        self.state = match self.backend.get_run_page(self.run_id, index) {
+            Some(page_id) => ReaderState::Reading(ReaderStateReading {
+                page_index: index + 1,
+                page_id,
+                offset: PageHeader::SIZE,
+            }),
+            None => ReaderState::Finished,
+        };
     }
 
     fn read(&mut self, mut data: &mut [u8]) -> Result<(), ReadError> {
         while !data.is_empty() {
-            assert!(self.offset <= PAGE_SIZE);
-            if self.page_id == INVALID_PAGE_ID || self.offset == PAGE_SIZE {
-                self.next_page();
+            match &mut self.state {
+                ReaderState::Finished => return Err(ReadError::Eof),
+                ReaderState::Created => {
+                    self.next_page();
+                    continue;
+                }
+                ReaderState::Reading(s) => {
+                    let n = data.len().min(PAGE_SIZE - s.offset);
+                    self.backend.flash.read(s.page_id as _, s.offset, &mut data[..n]);
+                    data = &mut data[n..];
+                    s.offset += n;
+                    if s.offset == PAGE_SIZE {
+                        self.next_page();
+                    }
+                }
             }
-
-            let n = data.len().min(PAGE_SIZE - self.offset);
-            self.backend.flash.read(self.page_id as _, self.offset, &mut data[..n]);
-            data = &mut data[n..];
-            self.offset += n;
         }
         Ok(())
     }
@@ -172,12 +215,25 @@ pub struct RunWriter<'a, F: Flash> {
     backend: &'a mut Backend<F>,
     run_id: usize,
 
-    // Current write cursor
-    page_id: PageID,
-    page_index: usize,
-    offset: usize,
+    state: WriterState,
+}
 
-    previous_page_id: PageID,
+enum WriterState {
+    Created,
+    Writing(WriterStateWriting),
+}
+
+struct WriterStateWriting {
+    page_index: usize,
+    page_id: PageID,
+    offset: usize,
+    previous_page_id: Option<PageID>,
+}
+
+impl<'a, F: Flash> Drop for RunWriter<'a, F> {
+    fn drop(&mut self) {
+        // TODO mark pages for the non-committed run as freed.
+    }
 }
 
 impl<'a, F: Flash> RunWriter<'a, F> {
@@ -185,57 +241,67 @@ impl<'a, F: Flash> RunWriter<'a, F> {
         Self {
             backend,
             run_id,
-
-            previous_page_id: INVALID_PAGE_ID,
-            page_id: INVALID_PAGE_ID,
-            page_index: 0,
-            offset: 0,
+            state: WriterState::Created,
         }
     }
 
     fn next_page(&mut self) {
         // Flush header for the page we're done writing.
-        if self.page_id != INVALID_PAGE_ID {
-            let h = PageHeader {
-                magic: PAGE_HEADER_MAGIC,
-                run_id: self.run_id as _,
-                index: self.page_index as _,
-                previous_page_id: self.previous_page_id as _,
-            };
-            self.backend.write_header(self.page_id, h);
-        }
+        self.flush_header(0);
+        let (page_index, previous_page_id) = match &self.state {
+            WriterState::Created => (0, None),
+            WriterState::Writing(s) => (s.page_index + 1, Some(s.page_id)),
+        };
 
-        self.previous_page_id = self.page_id;
-
-        self.page_id = self.backend.allocate_page();
-        self.page_index += 1;
-        self.offset = PageHeader::SIZE;
+        let page_id = self.backend.allocate_page();
+        self.state = WriterState::Writing(WriterStateWriting {
+            page_index,
+            page_id,
+            offset: PageHeader::SIZE,
+            previous_page_id,
+        });
     }
 
     fn write(&mut self, mut data: &[u8]) {
         while !data.is_empty() {
-            assert!(self.offset <= PAGE_SIZE);
-            if self.page_id == INVALID_PAGE_ID || self.offset == PAGE_SIZE {
-                self.next_page();
+            match &mut self.state {
+                WriterState::Created => {
+                    self.next_page();
+                    continue;
+                }
+                WriterState::Writing(s) => {
+                    let n = data.len().min(PAGE_SIZE - s.offset);
+                    self.backend.flash.write(s.page_id as _, s.offset, &data[..n]);
+                    data = &data[n..];
+                    s.offset += n;
+                    if s.offset == PAGE_SIZE {
+                        self.next_page();
+                    }
+                }
             }
-
-            let n = data.len().min(PAGE_SIZE - self.offset);
-            self.backend.flash.write(self.page_id as _, self.offset, &data[..n]);
-            data = &data[n..];
-            self.offset += n;
         }
     }
 
-    fn commit(self) {
-        let h = PageHeader {
-            magic: PAGE_HEADER_MAGIC,
-            run_id: self.run_id.try_into().unwrap(),
-            index: self.page_index.try_into().unwrap(),
-            previous_page_id: self.previous_page_id.try_into().unwrap(),
-        };
-        self.backend.write_header(self.page_id, h);
+    fn flush_header(&mut self, flags: u32) {
+        if let WriterState::Writing(s) = &self.state {
+            let h = PageHeader {
+                magic: PAGE_HEADER_MAGIC,
+                flags,
+                run_id: self.run_id.try_into().unwrap(),
+                index: s.page_index.try_into().unwrap(),
+                previous_page_id: s.previous_page_id.unwrap_or(PageID::MAX),
+            };
+            self.backend.write_header(s.page_id, h);
+        }
+    }
 
-        self.backend.runs[self.run_id].last_page_id = self.page_id;
+    fn commit(mut self) {
+        self.flush_header(HEADER_FLAG_COMMITTED);
+        if let WriterState::Writing(s) = &self.state {
+            self.backend.runs[self.run_id] = RunState::Written {
+                last_page_id: s.page_id,
+            };
+        }
 
         forget(self);
     }
@@ -258,6 +324,7 @@ mod tests {
             index: 1,
             run_id: 3,
             previous_page_id: 5,
+            flags: 1234,
         };
         b.write_header(0, h);
         let h2 = b.read_header(0).unwrap();
@@ -273,7 +340,7 @@ mod tests {
 
         let mut w = b.write_run(0);
         w.write(&data);
-        drop(w);
+        w.commit();
 
         let mut r = b.read_run(0);
         let mut buf = vec![0; data.len()];
