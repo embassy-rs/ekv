@@ -8,6 +8,8 @@ pub mod backend;
 pub mod backends;
 pub mod flash;
 
+mod page;
+
 use std::cell::Cell;
 use std::cmp::Ordering;
 
