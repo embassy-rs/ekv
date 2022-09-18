@@ -1,3 +1,6 @@
+use std::marker::PhantomData;
+
+use crate::file::Header;
 use crate::flash::*;
 
 pub type PageID = u16;
@@ -12,20 +15,9 @@ pub struct PageHeader {
     len: u32,
 
     // Higher layer data
-    file_header: FilePageHeader,
+    file_header: Header,
 }
 impl_bytes!(PageHeader);
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[repr(C)]
-pub struct FilePageHeader {
-    // TODO
-}
-
-impl FilePageHeader {
-    #[cfg(test)]
-    pub const DUMMY: Self = Self {};
-}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ReadError {
@@ -33,22 +25,22 @@ pub enum ReadError {
 }
 
 pub struct PageManager<F: Flash> {
-    flash: F,
+    _phantom: PhantomData<F>,
 }
 
 impl<F: Flash> PageManager<F> {
-    pub fn new(flash: F) -> Self {
-        Self { flash }
+    pub fn new() -> Self {
+        Self { _phantom: PhantomData }
     }
 
-    fn write_header(&mut self, page_id: PageID, h: PageHeader) {
+    fn write_page_header(flash: &mut F, page_id: PageID, h: PageHeader) {
         let mut buf = h.to_bytes();
-        self.flash.write(page_id as _, 0, &buf);
+        flash.write(page_id as _, 0, &buf);
     }
 
-    fn read_header(&mut self, page_id: PageID) -> Result<PageHeader, ReadError> {
+    fn read_page_header(flash: &mut F, page_id: PageID) -> Result<PageHeader, ReadError> {
         let mut buf = [0u8; PageHeader::SIZE];
-        self.flash.read(page_id as _, 0, &mut buf);
+        flash.read(page_id as _, 0, &mut buf);
         let h = PageHeader::from_bytes(buf);
         if h.magic != PAGE_HEADER_MAGIC {
             return Err(ReadError::Eof);
@@ -57,12 +49,17 @@ impl<F: Flash> PageManager<F> {
         Ok(h)
     }
 
-    fn read(&mut self, page_id: PageID) -> Result<(FilePageHeader, PageReader<'_, F>), ReadError> {
-        let header = self.read_header(page_id)?;
+    pub fn read_header(&mut self, flash: &mut F, page_id: PageID) -> Result<Header, ReadError> {
+        let h = Self::read_page_header(flash, page_id)?;
+        Ok(h.file_header)
+    }
+
+    pub fn read(&mut self, flash: &mut F, page_id: PageID) -> Result<(Header, PageReader<F>), ReadError> {
+        let header = Self::read_page_header(flash, page_id)?;
         Ok((
             header.file_header,
             PageReader {
-                backend: self,
+                _phantom: PhantomData,
                 page_id,
                 len: header.len as _,
                 offset: 0,
@@ -70,54 +67,63 @@ impl<F: Flash> PageManager<F> {
         ))
     }
 
-    fn write(&mut self, page_id: PageID) -> PageWriter<'_, F> {
+    pub fn write(&mut self, flash: &mut F, page_id: PageID) -> PageWriter<F> {
         PageWriter {
-            backend: self,
+            _phantom: PhantomData,
             page_id,
             offset: 0,
         }
     }
 }
 
-pub struct PageReader<'a, F: Flash> {
-    backend: &'a mut PageManager<F>,
+pub struct PageReader<F: Flash> {
+    _phantom: PhantomData<F>,
     page_id: PageID,
     offset: usize,
     len: usize,
 }
 
-impl<'a, F: Flash> PageReader<'a, F> {
-    fn seek(&mut self, offset: usize) {
+impl<F: Flash> PageReader<F> {
+    pub fn page_id(&self) -> PageID {
+        self.page_id
+    }
+
+    pub fn seek(&mut self, offset: usize) {
         assert!(offset <= self.len);
         self.offset = offset;
     }
 
-    fn read(&mut self, data: &mut [u8]) -> usize {
+    pub fn read(&mut self, flash: &mut F, data: &mut [u8]) -> usize {
         let n = data.len().min(self.len - self.offset);
         let offset = PageHeader::SIZE + self.offset;
-        self.backend.flash.read(self.page_id as _, offset, &mut data[..n]);
+        flash.read(self.page_id as _, offset, &mut data[..n]);
         self.offset += n;
         n
     }
 }
 
-pub struct PageWriter<'a, F: Flash> {
-    backend: &'a mut PageManager<F>,
+pub struct PageWriter<F: Flash> {
+    _phantom: PhantomData<F>,
     page_id: PageID,
     offset: usize,
 }
 
-impl<'a, F: Flash> PageWriter<'a, F> {
-    fn write(&mut self, data: &[u8]) -> usize {
+impl<F: Flash> PageWriter<F> {
+    pub fn page_id(&self) -> PageID {
+        self.page_id
+    }
+
+    pub fn write(&mut self, flash: &mut F, data: &[u8]) -> usize {
         let n = data.len().min(MAX_PAYLOAD_SIZE - self.offset);
         let offset = PageHeader::SIZE + self.offset;
-        self.backend.flash.write(self.page_id as _, offset, &data[..n]);
+        flash.write(self.page_id as _, offset, &data[..n]);
         self.offset += n;
         n
     }
 
-    fn commit(mut self, header: FilePageHeader) {
-        self.backend.write_header(
+    pub fn commit(mut self, flash: &mut F, header: Header) {
+        PageManager::write_page_header(
+            flash,
             self.page_id,
             PageHeader {
                 magic: PAGE_HEADER_MAGIC,
@@ -134,164 +140,173 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_rw_header() {
-        let mut b = PageManager::new(MemFlash::new());
+    fn test_header() {
+        let mut f = &mut MemFlash::new();
+
         let h = PageHeader {
             magic: PAGE_HEADER_MAGIC,
             len: 1234,
-            file_header: FilePageHeader::DUMMY,
+            file_header: Header::DUMMY,
         };
-        b.write_header(0, h);
-        let h2 = b.read_header(0).unwrap();
+        PageManager::write_page_header(f, 0, h);
+        let h2 = PageManager::read_page_header(f, 0).unwrap();
         assert_eq!(h, h2)
     }
 
     #[test]
+    fn test_header_read_unwritten() {
+        let mut f = &mut MemFlash::new();
+
+        let res = PageManager::read_page_header(f, 0);
+        assert!(matches!(res, Err(ReadError::Eof)))
+    }
+
+    #[test]
     fn test_read_unwritten() {
-        let mut f = MemFlash::new();
-        let mut b = PageManager::new(&mut f);
+        let mut f = &mut MemFlash::new();
+        let mut b = PageManager::new();
 
         // Read
-        let res = b.read(0);
+        let res = b.read(f, 0);
         assert!(matches!(res, Err(ReadError::Eof)));
     }
 
     #[test]
     fn test_read_uncommitted() {
-        let mut f = MemFlash::new();
-        let mut b = PageManager::new(&mut f);
+        let mut f = &mut MemFlash::new();
+        let mut b = PageManager::new();
 
         let data = dummy_data(13);
 
         // Write
-        let mut w = b.write(0);
-        w.write(&data);
+        let mut w = b.write(f, 0);
+        w.write(f, &data);
         drop(w); // don't commit
 
         // Read
-        let res = b.read(0);
+        let res = b.read(f, 0);
         assert!(matches!(res, Err(ReadError::Eof)));
     }
 
     #[test]
     fn test_write_short() {
-        let mut f = MemFlash::new();
-        let mut b = PageManager::new(&mut f);
+        let mut f = &mut MemFlash::new();
+        let mut b = PageManager::new();
 
         let data = dummy_data(13);
 
         // Write
-        let mut w = b.write(0);
-        let n = w.write(&data);
+        let mut w = b.write(f, 0);
+        let n = w.write(f, &data);
         assert_eq!(n, 13);
-        w.commit(FilePageHeader::DUMMY);
+        w.commit(f, Header::DUMMY);
 
         // Read
-        let (h, mut r) = b.read(0).unwrap();
-        assert_eq!(h, FilePageHeader::DUMMY);
+        let (h, mut r) = b.read(f, 0).unwrap();
+        assert_eq!(h, Header::DUMMY);
         let mut buf = vec![0; data.len()];
-        let n = r.read(&mut buf);
+        let n = r.read(f, &mut buf);
         assert_eq!(n, 13);
         assert_eq!(data, buf);
 
         // Remount
-        let mut b = PageManager::new(&mut f);
+        let mut b = PageManager::new();
 
         // Read
-        let (h, mut r) = b.read(0).unwrap();
-        assert_eq!(h, FilePageHeader::DUMMY);
+        let (h, mut r) = b.read(f, 0).unwrap();
+        assert_eq!(h, Header::DUMMY);
         let mut buf = vec![0; data.len()];
-        let n = r.read(&mut buf);
+        let n = r.read(f, &mut buf);
         assert_eq!(n, 13);
         assert_eq!(data, buf);
     }
 
     #[test]
     fn test_overread() {
-        let mut f = MemFlash::new();
-        let mut b = PageManager::new(&mut f);
+        let mut f = &mut MemFlash::new();
+        let mut b = PageManager::new();
 
         let data = dummy_data(13);
 
         // Write
-        let mut w = b.write(0);
-        w.write(&data);
-        w.commit(FilePageHeader::DUMMY);
+        let mut w = b.write(f, 0);
+        w.write(f, &data);
+        w.commit(f, Header::DUMMY);
 
         // Read
-        let (h, mut r) = b.read(0).unwrap();
-        assert_eq!(h, FilePageHeader::DUMMY);
+        let (h, mut r) = b.read(f, 0).unwrap();
+        assert_eq!(h, Header::DUMMY);
         let mut buf = vec![0; 1024];
-        let n = r.read(&mut buf);
+        let n = r.read(f, &mut buf);
         assert_eq!(n, 13);
         assert_eq!(data, buf[..13]);
     }
 
     #[test]
     fn test_overwrite() {
-        let mut f = MemFlash::new();
-        let mut b = PageManager::new(&mut f);
+        let mut f = &mut MemFlash::new();
+        let mut b = PageManager::new();
 
         let data = dummy_data(65536);
 
         // Write
-        let mut w = b.write(0);
-        let n = w.write(&data);
+        let mut w = b.write(f, 0);
+        let n = w.write(f, &data);
         assert_eq!(n, MAX_PAYLOAD_SIZE);
-        w.commit(FilePageHeader::DUMMY);
+        w.commit(f, Header::DUMMY);
 
         // Read
-        let (h, mut r) = b.read(0).unwrap();
-        assert_eq!(h, FilePageHeader::DUMMY);
+        let (h, mut r) = b.read(f, 0).unwrap();
+        assert_eq!(h, Header::DUMMY);
         let mut buf = vec![0; MAX_PAYLOAD_SIZE];
-        let n = r.read(&mut buf);
+        let n = r.read(f, &mut buf);
         assert_eq!(n, MAX_PAYLOAD_SIZE);
         assert_eq!(data[..13], buf[..13]);
     }
 
     #[test]
     fn test_write_many() {
-        let mut f = MemFlash::new();
-        let mut b = PageManager::new(&mut f);
+        let mut f = &mut MemFlash::new();
+        let mut b = PageManager::new();
 
         // Write
-        let mut w = b.write(0);
-        let n = w.write(&[1, 2, 3]);
+        let mut w = b.write(f, 0);
+        let n = w.write(f, &[1, 2, 3]);
         assert_eq!(n, 3);
-        let n = w.write(&[4, 5, 6, 7, 8, 9]);
+        let n = w.write(f, &[4, 5, 6, 7, 8, 9]);
         assert_eq!(n, 6);
-        w.commit(FilePageHeader::DUMMY);
+        w.commit(f, Header::DUMMY);
 
         // Read
-        let (h, mut r) = b.read(0).unwrap();
-        assert_eq!(h, FilePageHeader::DUMMY);
+        let (h, mut r) = b.read(f, 0).unwrap();
+        assert_eq!(h, Header::DUMMY);
         let mut buf = vec![0; MAX_PAYLOAD_SIZE];
-        let n = r.read(&mut buf);
+        let n = r.read(f, &mut buf);
         assert_eq!(n, 9);
         assert_eq!(buf[..9], [1, 2, 3, 4, 5, 6, 7, 8, 9]);
     }
 
     #[test]
     fn test_read_many() {
-        let mut f = MemFlash::new();
-        let mut b = PageManager::new(&mut f);
+        let mut f = &mut MemFlash::new();
+        let mut b = PageManager::new();
 
         // Write
-        let mut w = b.write(0);
-        let n = w.write(&[1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        let mut w = b.write(f, 0);
+        let n = w.write(f, &[1, 2, 3, 4, 5, 6, 7, 8, 9]);
         assert_eq!(n, 9);
-        w.commit(FilePageHeader::DUMMY);
+        w.commit(f, Header::DUMMY);
 
         // Read
-        let (h, mut r) = b.read(0).unwrap();
-        assert_eq!(h, FilePageHeader::DUMMY);
+        let (h, mut r) = b.read(f, 0).unwrap();
+        assert_eq!(h, Header::DUMMY);
         let mut buf = vec![0; MAX_PAYLOAD_SIZE];
 
-        let n = r.read(&mut buf[..3]);
+        let n = r.read(f, &mut buf[..3]);
         assert_eq!(n, 3);
         assert_eq!(buf[..3], [1, 2, 3]);
 
-        let n = r.read(&mut buf);
+        let n = r.read(f, &mut buf);
         assert_eq!(n, 6);
         assert_eq!(buf[..6], [4, 5, 6, 7, 8, 9]);
     }

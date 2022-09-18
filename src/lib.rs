@@ -6,9 +6,15 @@ pub mod macros;
 
 pub mod backend;
 pub mod backends;
+
+// Layer 0: flash access
 pub mod flash;
 
+// Layer 1: page
 mod page;
+
+// Layer 2: file
+mod file;
 
 use std::cell::Cell;
 use std::cmp::Ordering;

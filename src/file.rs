@@ -1,52 +1,58 @@
-use std::mem::forget;
+use core::mem;
 
-use crate::backend::{ReadError, SeekDirection};
 use crate::flash::*;
+use crate::page::{PageID, PageManager, PageReader, PageWriter, ReadError};
 
 const BRANCHING_FACTOR: usize = 3;
 const LEVEL_COUNT: usize = 3;
-const MAX_RUN_COUNT: usize = BRANCHING_FACTOR * LEVEL_COUNT + 1; // TODO maybe it is +2
+const MAX_FILE_COUNT: usize = BRANCHING_FACTOR * LEVEL_COUNT + 1; // TODO maybe it is +2
 
-const PAGE_HEADER_MAGIC: u32 = 0xc4e21c75;
-
-type RunID = u16;
-type PageID = u16;
+type FileID = u16;
 
 const HEADER_FLAG_COMMITTED: u32 = 0x01;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(C)]
-struct PageHeader {
-    magic: u32,
+pub struct Header {
     flags: u32,
-    run_id: RunID,
+    file_id: FileID,
     index: u16,
     previous_page_id: PageID,
     // TODO add a skiplist for previous pages, instead of just storing the immediately previous one.
-    // TODO some kind of "this is the last page in the run, so the run is complete"
 }
-impl_bytes!(PageHeader);
 
-enum RunState {
+impl Header {
+    #[cfg(test)]
+    pub const DUMMY: Self = Self {
+        flags: 0,
+        file_id: 1,
+        index: 2,
+        previous_page_id: 3,
+    };
+}
+
+enum FileState {
     Empty,
     Written { last_page_id: PageID },
 }
 
-pub struct Backend<F: Flash> {
+pub struct FileManager<F: Flash> {
     flash: F,
-    runs: [RunState; MAX_RUN_COUNT],
+    pages: PageManager<F>,
+    files: [FileState; MAX_FILE_COUNT],
 
     // Page allocator
     used_pages: [bool; PAGE_COUNT], // TODO use a bitfield
     next_page_id: PageID,
 }
 
-impl<F: Flash> Backend<F> {
+impl<F: Flash> FileManager<F> {
     pub fn new(flash: F) -> Self {
-        const DUMMY_RUN: RunState = RunState::Empty;
+        const DUMMY_FILE: FileState = FileState::Empty;
         let mut this = Self {
             flash,
-            runs: [DUMMY_RUN; MAX_RUN_COUNT],
+            pages: PageManager::new(),
+            files: [DUMMY_FILE; MAX_FILE_COUNT],
             used_pages: [false; PAGE_COUNT],
             next_page_id: 0, // TODO make random to spread out wear
         };
@@ -56,9 +62,9 @@ impl<F: Flash> Backend<F> {
 
     fn mount(&mut self) {
         for page_id in 0..PAGE_COUNT {
-            if let Some(h) = self.read_header(page_id as _) {
+            if let Ok(h) = self.pages.read_header(&mut self.flash, page_id as _) {
                 if h.flags & HEADER_FLAG_COMMITTED != 0 {
-                    self.runs[h.run_id as usize] = RunState::Written {
+                    self.files[h.file_id as usize] = FileState::Written {
                         last_page_id: page_id as _,
                     }
                 }
@@ -83,29 +89,13 @@ impl<F: Flash> Backend<F> {
         }
     }
 
-    fn write_header(&mut self, page_id: PageID, h: PageHeader) {
-        let mut buf = h.to_bytes();
-        self.flash.write(page_id as _, 0, &buf);
-    }
-
-    fn read_header(&mut self, page_id: PageID) -> Option<PageHeader> {
-        let mut buf = [0u8; PageHeader::SIZE];
-        self.flash.read(page_id as _, 0, &mut buf);
-        let h = PageHeader::from_bytes(buf);
-        if h.magic != PAGE_HEADER_MAGIC {
-            return None;
-        }
-
-        Some(h)
-    }
-
-    fn get_run_page(&mut self, run_id: usize, page_index: usize) -> Option<PageID> {
-        match self.runs[run_id] {
-            RunState::Empty => None,
-            RunState::Written { last_page_id } => {
+    fn get_file_page(&mut self, file_id: usize, page_index: usize) -> Option<PageID> {
+        match self.files[file_id] {
+            FileState::Empty => None,
+            FileState::Written { last_page_id } => {
                 let mut page_id = last_page_id;
                 loop {
-                    let h = self.read_header(page_id).unwrap();
+                    let h = self.pages.read_header(&mut self.flash, page_id).unwrap();
                     if h.index as usize == page_index {
                         break Some(page_id);
                     }
@@ -120,40 +110,47 @@ impl<F: Flash> Backend<F> {
         }
     }
 
-    fn read_run(&mut self, run_id: usize) -> RunReader<'_, F> {
-        // TODO
-        RunReader::new(self, run_id)
+    fn read_page(&mut self, page_id: PageID) -> Result<(Header, PageReader<F>), ReadError> {
+        self.pages.read(&mut self.flash, page_id)
     }
 
-    fn write_run(&mut self, run_id: usize) -> RunWriter<'_, F> {
+    fn write_page(&mut self, page_id: PageID) -> PageWriter<F> {
+        self.pages.write(&mut self.flash, page_id)
+    }
+
+    pub fn read(&mut self, file_id: usize) -> FileReader<'_, F> {
         // TODO
-        RunWriter::new(self, run_id)
+        FileReader::new(self, file_id)
+    }
+
+    pub fn write(&mut self, file_id: usize) -> FileWriter<'_, F> {
+        // TODO
+        FileWriter::new(self, file_id)
     }
 }
 
-pub struct RunReader<'a, F: Flash> {
-    backend: &'a mut Backend<F>,
-    run_id: usize,
+pub struct FileReader<'a, F: Flash> {
+    backend: &'a mut FileManager<F>,
+    file_id: usize,
 
-    state: ReaderState,
+    state: ReaderState<F>,
 }
 
-enum ReaderState {
+enum ReaderState<F: Flash> {
     Created,
-    Reading(ReaderStateReading),
+    Reading(ReaderStateReading<F>),
     Finished,
 }
-struct ReaderStateReading {
+struct ReaderStateReading<F: Flash> {
     page_index: usize,
-    page_id: PageID,
-    offset: usize,
+    reader: PageReader<F>,
 }
 
-impl<'a, F: Flash> RunReader<'a, F> {
-    fn new(backend: &'a mut Backend<F>, run_id: usize) -> Self {
+impl<'a, F: Flash> FileReader<'a, F> {
+    fn new(backend: &'a mut FileManager<F>, file_id: usize) -> Self {
         Self {
             backend,
-            run_id,
+            file_id,
             state: ReaderState::Created,
         }
     }
@@ -178,11 +175,10 @@ impl<'a, F: Flash> RunReader<'a, F> {
             ReaderState::Reading(s) => s.page_index,
             ReaderState::Finished => unreachable!(),
         };
-        self.state = match self.backend.get_run_page(self.run_id, index) {
+        self.state = match self.backend.get_file_page(self.file_id, index) {
             Some(page_id) => ReaderState::Reading(ReaderStateReading {
                 page_index: index + 1,
-                page_id,
-                offset: PageHeader::SIZE,
+                reader: self.backend.read_page(page_id).unwrap().1,
             }),
             None => ReaderState::Finished,
         };
@@ -197,11 +193,9 @@ impl<'a, F: Flash> RunReader<'a, F> {
                     continue;
                 }
                 ReaderState::Reading(s) => {
-                    let n = data.len().min(PAGE_SIZE - s.offset);
-                    self.backend.flash.read(s.page_id as _, s.offset, &mut data[..n]);
+                    let n = s.reader.read(&mut self.backend.flash, data);
                     data = &mut data[n..];
-                    s.offset += n;
-                    if s.offset == PAGE_SIZE {
+                    if n == 0 {
                         self.next_page();
                     }
                 }
@@ -211,54 +205,63 @@ impl<'a, F: Flash> RunReader<'a, F> {
     }
 }
 
-pub struct RunWriter<'a, F: Flash> {
-    backend: &'a mut Backend<F>,
-    run_id: usize,
+pub struct FileWriter<'a, F: Flash> {
+    backend: &'a mut FileManager<F>,
+    file_id: usize,
 
-    state: WriterState,
+    state: WriterState<F>,
 }
 
-enum WriterState {
+enum WriterState<F: Flash> {
     Created,
-    Writing(WriterStateWriting),
+    Writing(WriterStateWriting<F>),
 }
 
-struct WriterStateWriting {
+struct WriterStateWriting<F: Flash> {
     page_index: usize,
-    page_id: PageID,
-    offset: usize,
     previous_page_id: Option<PageID>,
+    writer: PageWriter<F>,
 }
 
-impl<'a, F: Flash> Drop for RunWriter<'a, F> {
+impl<'a, F: Flash> Drop for FileWriter<'a, F> {
     fn drop(&mut self) {
-        // TODO mark pages for the non-committed run as freed.
+        // TODO mark pages for the non-committed file as freed.
     }
 }
 
-impl<'a, F: Flash> RunWriter<'a, F> {
-    fn new(backend: &'a mut Backend<F>, run_id: usize) -> Self {
+impl<'a, F: Flash> FileWriter<'a, F> {
+    fn new(backend: &'a mut FileManager<F>, file_id: usize) -> Self {
         Self {
             backend,
-            run_id,
+            file_id,
             state: WriterState::Created,
         }
     }
 
     fn next_page(&mut self) {
-        // Flush header for the page we're done writing.
-        self.flush_header(0);
-        let (page_index, previous_page_id) = match &self.state {
+        let (page_index, previous_page_id) = match mem::replace(&mut self.state, WriterState::Created) {
             WriterState::Created => (0, None),
-            WriterState::Writing(s) => (s.page_index + 1, Some(s.page_id)),
+            WriterState::Writing(s) => {
+                let page_id = s.writer.page_id();
+
+                // Flush header for the page we're done writing.
+                let header = Header {
+                    flags: 0,
+                    file_id: self.file_id.try_into().unwrap(),
+                    index: s.page_index.try_into().unwrap(),
+                    previous_page_id: s.previous_page_id.unwrap_or(PageID::MAX),
+                };
+                s.writer.commit(&mut self.backend.flash, header);
+
+                (s.page_index + 1, Some(page_id))
+            }
         };
 
         let page_id = self.backend.allocate_page();
         self.state = WriterState::Writing(WriterStateWriting {
             page_index,
-            page_id,
-            offset: PageHeader::SIZE,
             previous_page_id,
+            writer: self.backend.write_page(page_id),
         });
     }
 
@@ -270,11 +273,9 @@ impl<'a, F: Flash> RunWriter<'a, F> {
                     continue;
                 }
                 WriterState::Writing(s) => {
-                    let n = data.len().min(PAGE_SIZE - s.offset);
-                    self.backend.flash.write(s.page_id as _, s.offset, &data[..n]);
+                    let n = s.writer.write(&mut self.backend.flash, data);
                     data = &data[n..];
-                    s.offset += n;
-                    if s.offset == PAGE_SIZE {
+                    if n == 0 {
                         self.next_page();
                     }
                 }
@@ -282,28 +283,21 @@ impl<'a, F: Flash> RunWriter<'a, F> {
         }
     }
 
-    fn flush_header(&mut self, flags: u32) {
-        if let WriterState::Writing(s) = &self.state {
-            let h = PageHeader {
-                magic: PAGE_HEADER_MAGIC,
-                flags,
-                run_id: self.run_id.try_into().unwrap(),
-                index: s.page_index.try_into().unwrap(),
-                previous_page_id: s.previous_page_id.unwrap_or(PageID::MAX),
-            };
-            self.backend.write_header(s.page_id, h);
-        }
-    }
-
     fn commit(mut self) {
-        self.flush_header(HEADER_FLAG_COMMITTED);
-        if let WriterState::Writing(s) = &self.state {
-            self.backend.runs[self.run_id] = RunState::Written {
-                last_page_id: s.page_id,
-            };
-        }
-
-        forget(self);
+        match mem::replace(&mut self.state, WriterState::Created) {
+            WriterState::Created => {}
+            WriterState::Writing(s) => {
+                let page_id = s.writer.page_id();
+                let header = Header {
+                    flags: HEADER_FLAG_COMMITTED,
+                    file_id: self.file_id.try_into().unwrap(),
+                    index: s.page_index.try_into().unwrap(),
+                    previous_page_id: s.previous_page_id.unwrap_or(PageID::MAX),
+                };
+                s.writer.commit(&mut self.backend.flash, header);
+                self.backend.files[self.file_id] = FileState::Written { last_page_id: page_id };
+            }
+        };
     }
 
     fn record_end(&mut self) {
@@ -317,39 +311,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_rw_header() {
-        let mut b = Backend::new(MemFlash::new());
-        let h = PageHeader {
-            magic: PAGE_HEADER_MAGIC,
-            index: 1,
-            run_id: 3,
-            previous_page_id: 5,
-            flags: 1234,
-        };
-        b.write_header(0, h);
-        let h2 = b.read_header(0).unwrap();
-        assert_eq!(h, h2)
-    }
-
-    #[test]
-    fn test_write_run() {
+    fn test_read_write() {
         let mut f = MemFlash::new();
-        let mut b = Backend::new(&mut f);
+        let mut b = FileManager::new(&mut f);
 
         let data = dummy_data(65201);
 
-        let mut w = b.write_run(0);
+        let mut w = b.write(0);
         w.write(&data);
         w.commit();
 
-        let mut r = b.read_run(0);
+        let mut r = b.read(0);
         let mut buf = vec![0; data.len()];
         r.read(&mut buf).unwrap();
         assert_eq!(data, buf);
 
-        let mut b = Backend::new(&mut f);
+        // Remount
+        let mut b = FileManager::new(&mut f);
 
-        let mut r = b.read_run(0);
+        let mut r = b.read(0);
         let mut buf = vec![0; data.len()];
         r.read(&mut buf).unwrap();
         assert_eq!(data, buf);
