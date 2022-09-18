@@ -1,4 +1,6 @@
 use core::mem;
+use std::borrow::BorrowMut;
+use std::cell::RefCell;
 
 use crate::flash::*;
 use crate::page::{PageID, PageManager, PageReader, PageWriter, ReadError};
@@ -37,6 +39,10 @@ enum FileState {
 }
 
 pub struct FileManager<F: Flash> {
+    inner: RefCell<Inner<F>>,
+}
+
+struct Inner<F: Flash> {
     flash: F,
     pages: PageManager<F>,
     files: [FileState; MAX_FILE_COUNT],
@@ -49,17 +55,30 @@ pub struct FileManager<F: Flash> {
 impl<F: Flash> FileManager<F> {
     pub fn new(flash: F) -> Self {
         const DUMMY_FILE: FileState = FileState::Empty;
-        let mut this = Self {
+        let mut inner = Inner {
             flash,
             pages: PageManager::new(),
             files: [DUMMY_FILE; MAX_FILE_COUNT],
             used_pages: [false; PAGE_COUNT],
             next_page_id: 0, // TODO make random to spread out wear
         };
-        this.mount();
-        this
+        inner.mount();
+
+        Self {
+            inner: RefCell::new(inner),
+        }
     }
 
+    pub fn read(&self, file_id: usize) -> FileReader<'_, F> {
+        FileReader::new(self, file_id)
+    }
+
+    pub fn write(&self, file_id: usize) -> FileWriter<'_, F> {
+        FileWriter::new(self, file_id)
+    }
+}
+
+impl<F: Flash> Inner<F> {
     fn mount(&mut self) {
         for page_id in 0..PAGE_COUNT {
             if let Ok(h) = self.pages.read_header(&mut self.flash, page_id as _) {
@@ -117,20 +136,10 @@ impl<F: Flash> FileManager<F> {
     fn write_page(&mut self, page_id: PageID) -> PageWriter<F> {
         self.pages.write(&mut self.flash, page_id)
     }
-
-    pub fn read(&mut self, file_id: usize) -> FileReader<'_, F> {
-        // TODO
-        FileReader::new(self, file_id)
-    }
-
-    pub fn write(&mut self, file_id: usize) -> FileWriter<'_, F> {
-        // TODO
-        FileWriter::new(self, file_id)
-    }
 }
 
 pub struct FileReader<'a, F: Flash> {
-    backend: &'a mut FileManager<F>,
+    m: &'a FileManager<F>,
     file_id: usize,
 
     state: ReaderState<F>,
@@ -147,9 +156,9 @@ struct ReaderStateReading<F: Flash> {
 }
 
 impl<'a, F: Flash> FileReader<'a, F> {
-    fn new(backend: &'a mut FileManager<F>, file_id: usize) -> Self {
+    fn new(m: &'a FileManager<F>, file_id: usize) -> Self {
         Self {
-            backend,
+            m,
             file_id,
             state: ReaderState::Created,
         }
@@ -169,34 +178,35 @@ impl<'a, F: Flash> FileReader<'a, F> {
     }
      */
 
-    fn next_page(&mut self) {
+    fn next_page(&mut self, m: &mut Inner<F>) {
         let index = match &self.state {
             ReaderState::Created => 0,
             ReaderState::Reading(s) => s.page_index,
             ReaderState::Finished => unreachable!(),
         };
-        self.state = match self.backend.get_file_page(self.file_id, index) {
+        self.state = match m.get_file_page(self.file_id, index) {
             Some(page_id) => ReaderState::Reading(ReaderStateReading {
                 page_index: index + 1,
-                reader: self.backend.read_page(page_id).unwrap().1,
+                reader: m.read_page(page_id).unwrap().1,
             }),
             None => ReaderState::Finished,
         };
     }
 
     fn read(&mut self, mut data: &mut [u8]) -> Result<(), ReadError> {
+        let m = &mut *self.m.inner.borrow_mut();
         while !data.is_empty() {
             match &mut self.state {
                 ReaderState::Finished => return Err(ReadError::Eof),
                 ReaderState::Created => {
-                    self.next_page();
+                    self.next_page(m);
                     continue;
                 }
                 ReaderState::Reading(s) => {
-                    let n = s.reader.read(&mut self.backend.flash, data);
+                    let n = s.reader.read(&mut m.flash, data);
                     data = &mut data[n..];
                     if n == 0 {
-                        self.next_page();
+                        self.next_page(m);
                     }
                 }
             }
@@ -206,7 +216,7 @@ impl<'a, F: Flash> FileReader<'a, F> {
 }
 
 pub struct FileWriter<'a, F: Flash> {
-    backend: &'a mut FileManager<F>,
+    m: &'a FileManager<F>,
     file_id: usize,
 
     state: WriterState<F>,
@@ -230,15 +240,15 @@ impl<'a, F: Flash> Drop for FileWriter<'a, F> {
 }
 
 impl<'a, F: Flash> FileWriter<'a, F> {
-    fn new(backend: &'a mut FileManager<F>, file_id: usize) -> Self {
+    fn new(m: &'a FileManager<F>, file_id: usize) -> Self {
         Self {
-            backend,
+            m,
             file_id,
             state: WriterState::Created,
         }
     }
 
-    fn next_page(&mut self) {
+    fn next_page(&mut self, m: &mut Inner<F>) {
         let (page_index, previous_page_id) = match mem::replace(&mut self.state, WriterState::Created) {
             WriterState::Created => (0, None),
             WriterState::Writing(s) => {
@@ -251,32 +261,33 @@ impl<'a, F: Flash> FileWriter<'a, F> {
                     index: s.page_index.try_into().unwrap(),
                     previous_page_id: s.previous_page_id.unwrap_or(PageID::MAX),
                 };
-                s.writer.commit(&mut self.backend.flash, header);
+                s.writer.commit(&mut m.flash, header);
 
                 (s.page_index + 1, Some(page_id))
             }
         };
 
-        let page_id = self.backend.allocate_page();
+        let page_id = m.allocate_page();
         self.state = WriterState::Writing(WriterStateWriting {
             page_index,
             previous_page_id,
-            writer: self.backend.write_page(page_id),
+            writer: m.write_page(page_id),
         });
     }
 
     fn write(&mut self, mut data: &[u8]) {
+        let m = &mut *self.m.inner.borrow_mut();
         while !data.is_empty() {
             match &mut self.state {
                 WriterState::Created => {
-                    self.next_page();
+                    self.next_page(m);
                     continue;
                 }
                 WriterState::Writing(s) => {
-                    let n = s.writer.write(&mut self.backend.flash, data);
+                    let n = s.writer.write(&mut m.flash, data);
                     data = &data[n..];
                     if n == 0 {
-                        self.next_page();
+                        self.next_page(m);
                     }
                 }
             }
@@ -284,6 +295,7 @@ impl<'a, F: Flash> FileWriter<'a, F> {
     }
 
     fn commit(mut self) {
+        let m = &mut *self.m.inner.borrow_mut();
         match mem::replace(&mut self.state, WriterState::Created) {
             WriterState::Created => {}
             WriterState::Writing(s) => {
@@ -294,8 +306,8 @@ impl<'a, F: Flash> FileWriter<'a, F> {
                     index: s.page_index.try_into().unwrap(),
                     previous_page_id: s.previous_page_id.unwrap_or(PageID::MAX),
                 };
-                s.writer.commit(&mut self.backend.flash, header);
-                self.backend.files[self.file_id] = FileState::Written { last_page_id: page_id };
+                s.writer.commit(&mut m.flash, header);
+                m.files[self.file_id] = FileState::Written { last_page_id: page_id };
             }
         };
     }
@@ -313,23 +325,23 @@ mod tests {
     #[test]
     fn test_read_write() {
         let mut f = MemFlash::new();
-        let mut b = FileManager::new(&mut f);
+        let m = FileManager::new(&mut f);
 
         let data = dummy_data(65201);
 
-        let mut w = b.write(0);
+        let mut w = m.write(0);
         w.write(&data);
         w.commit();
 
-        let mut r = b.read(0);
+        let mut r = m.read(0);
         let mut buf = vec![0; data.len()];
         r.read(&mut buf).unwrap();
         assert_eq!(data, buf);
 
         // Remount
-        let mut b = FileManager::new(&mut f);
+        let m = FileManager::new(&mut f);
 
-        let mut r = b.read(0);
+        let mut r = m.read(0);
         let mut buf = vec![0; data.len()];
         r.read(&mut buf).unwrap();
         assert_eq!(data, buf);
