@@ -1,5 +1,4 @@
 use core::mem;
-use std::borrow::BorrowMut;
 use std::cell::RefCell;
 
 use crate::flash::*;
@@ -9,9 +8,15 @@ const BRANCHING_FACTOR: usize = 3;
 const LEVEL_COUNT: usize = 3;
 const MAX_FILE_COUNT: usize = BRANCHING_FACTOR * LEVEL_COUNT + 1; // TODO maybe it is +2
 
-type FileID = u16;
+pub type FileID = u16;
 
 const HEADER_FLAG_COMMITTED: u32 = 0x01;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SeekDirection {
+    Left,
+    Right,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(C)]
@@ -69,11 +74,11 @@ impl<F: Flash> FileManager<F> {
         }
     }
 
-    pub fn read(&self, file_id: usize) -> FileReader<'_, F> {
+    pub fn read(&self, file_id: FileID) -> FileReader<'_, F> {
         FileReader::new(self, file_id)
     }
 
-    pub fn write(&self, file_id: usize) -> FileWriter<'_, F> {
+    pub fn write(&self, file_id: FileID) -> FileWriter<'_, F> {
         FileWriter::new(self, file_id)
     }
 }
@@ -108,8 +113,8 @@ impl<F: Flash> Inner<F> {
         }
     }
 
-    fn get_file_page(&mut self, file_id: usize, page_index: usize) -> Option<PageID> {
-        match self.files[file_id] {
+    fn get_file_page(&mut self, file_id: FileID, page_index: usize) -> Option<PageID> {
+        match self.files[file_id as usize] {
             FileState::Empty => None,
             FileState::Written { last_page_id } => {
                 let mut page_id = last_page_id;
@@ -140,7 +145,7 @@ impl<F: Flash> Inner<F> {
 
 pub struct FileReader<'a, F: Flash> {
     m: &'a FileManager<F>,
-    file_id: usize,
+    file_id: FileID,
 
     state: ReaderState<F>,
 }
@@ -156,7 +161,7 @@ struct ReaderStateReading<F: Flash> {
 }
 
 impl<'a, F: Flash> FileReader<'a, F> {
-    fn new(m: &'a FileManager<F>, file_id: usize) -> Self {
+    fn new(m: &'a FileManager<F>, file_id: FileID) -> Self {
         Self {
             m,
             file_id,
@@ -164,19 +169,13 @@ impl<'a, F: Flash> FileReader<'a, F> {
         }
     }
 
-    /*
-    fn binary_search_start(&mut self) {
+    pub fn binary_search_start(&mut self) {
         todo!()
     }
 
-    fn binary_search_seek(&mut self, direction: SeekDirection) -> bool {
+    pub fn binary_search_seek(&mut self, direction: SeekDirection) -> bool {
         todo!()
     }
-
-    fn skip(&mut self, mut len: usize) -> Result<(), ReadError> {
-        todo!()
-    }
-     */
 
     fn next_page(&mut self, m: &mut Inner<F>) {
         let index = match &self.state {
@@ -193,7 +192,7 @@ impl<'a, F: Flash> FileReader<'a, F> {
         };
     }
 
-    fn read(&mut self, mut data: &mut [u8]) -> Result<(), ReadError> {
+    pub fn read(&mut self, mut data: &mut [u8]) -> Result<(), ReadError> {
         let m = &mut *self.m.inner.borrow_mut();
         while !data.is_empty() {
             match &mut self.state {
@@ -213,11 +212,32 @@ impl<'a, F: Flash> FileReader<'a, F> {
         }
         Ok(())
     }
+
+    pub fn skip(&mut self, mut len: usize) -> Result<(), ReadError> {
+        let m = &mut *self.m.inner.borrow_mut();
+        while len != 0 {
+            match &mut self.state {
+                ReaderState::Finished => return Err(ReadError::Eof),
+                ReaderState::Created => {
+                    self.next_page(m);
+                    continue;
+                }
+                ReaderState::Reading(s) => {
+                    let n = s.reader.skip(len);
+                    len -= n;
+                    if n == 0 {
+                        self.next_page(m);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 pub struct FileWriter<'a, F: Flash> {
     m: &'a FileManager<F>,
-    file_id: usize,
+    file_id: FileID,
 
     state: WriterState<F>,
 }
@@ -240,7 +260,7 @@ impl<'a, F: Flash> Drop for FileWriter<'a, F> {
 }
 
 impl<'a, F: Flash> FileWriter<'a, F> {
-    fn new(m: &'a FileManager<F>, file_id: usize) -> Self {
+    fn new(m: &'a FileManager<F>, file_id: FileID) -> Self {
         Self {
             m,
             file_id,
@@ -248,22 +268,27 @@ impl<'a, F: Flash> FileWriter<'a, F> {
         }
     }
 
+    fn flush_header(&mut self, m: &mut Inner<F>, s: WriterStateWriting<F>, flags: u32) {
+        let header = Header {
+            flags: flags,
+            file_id: self.file_id.try_into().unwrap(),
+            index: s.page_index.try_into().unwrap(),
+            previous_page_id: s.previous_page_id.unwrap_or(PageID::MAX),
+        };
+        s.writer.commit(&mut m.flash, header);
+    }
+
     fn next_page(&mut self, m: &mut Inner<F>) {
         let (page_index, previous_page_id) = match mem::replace(&mut self.state, WriterState::Created) {
             WriterState::Created => (0, None),
             WriterState::Writing(s) => {
                 let page_id = s.writer.page_id();
+                let page_index = s.page_index;
 
                 // Flush header for the page we're done writing.
-                let header = Header {
-                    flags: 0,
-                    file_id: self.file_id.try_into().unwrap(),
-                    index: s.page_index.try_into().unwrap(),
-                    previous_page_id: s.previous_page_id.unwrap_or(PageID::MAX),
-                };
-                s.writer.commit(&mut m.flash, header);
+                self.flush_header(m, s, 0);
 
-                (s.page_index + 1, Some(page_id))
+                (page_index + 1, Some(page_id))
             }
         };
 
@@ -275,7 +300,7 @@ impl<'a, F: Flash> FileWriter<'a, F> {
         });
     }
 
-    fn write(&mut self, mut data: &[u8]) {
+    pub fn write(&mut self, mut data: &[u8]) {
         let m = &mut *self.m.inner.borrow_mut();
         while !data.is_empty() {
             match &mut self.state {
@@ -294,25 +319,19 @@ impl<'a, F: Flash> FileWriter<'a, F> {
         }
     }
 
-    fn commit(mut self) {
+    pub fn commit(mut self) {
         let m = &mut *self.m.inner.borrow_mut();
         match mem::replace(&mut self.state, WriterState::Created) {
             WriterState::Created => {}
             WriterState::Writing(s) => {
                 let page_id = s.writer.page_id();
-                let header = Header {
-                    flags: HEADER_FLAG_COMMITTED,
-                    file_id: self.file_id.try_into().unwrap(),
-                    index: s.page_index.try_into().unwrap(),
-                    previous_page_id: s.previous_page_id.unwrap_or(PageID::MAX),
-                };
-                s.writer.commit(&mut m.flash, header);
-                m.files[self.file_id] = FileState::Written { last_page_id: page_id };
+                self.flush_header(m, s, HEADER_FLAG_COMMITTED);
+                m.files[self.file_id as usize] = FileState::Written { last_page_id: page_id };
             }
         };
     }
 
-    fn record_end(&mut self) {
+    pub fn record_end(&mut self) {
         todo!();
     }
 }

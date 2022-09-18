@@ -100,6 +100,12 @@ impl<F: Flash> PageReader<F> {
         self.offset += n;
         n
     }
+
+    pub fn skip(&mut self, len: usize) -> usize {
+        let n = len.min(self.len - self.offset);
+        self.offset += n;
+        n
+    }
 }
 
 pub struct PageWriter<F: Flash> {
