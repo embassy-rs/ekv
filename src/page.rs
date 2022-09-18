@@ -121,7 +121,7 @@ impl<F: Flash> PageWriter<F> {
         n
     }
 
-    pub fn commit(mut self, flash: &mut F, header: Header) {
+    pub fn commit(self, flash: &mut F, header: Header) {
         PageManager::write_page_header(
             flash,
             self.page_id,
@@ -141,7 +141,7 @@ mod tests {
 
     #[test]
     fn test_header() {
-        let mut f = &mut MemFlash::new();
+        let f = &mut MemFlash::new();
 
         let h = PageHeader {
             magic: PAGE_HEADER_MAGIC,
@@ -155,7 +155,7 @@ mod tests {
 
     #[test]
     fn test_header_read_unwritten() {
-        let mut f = &mut MemFlash::new();
+        let f = &mut MemFlash::new();
 
         let res = PageManager::read_page_header(f, 0);
         assert!(matches!(res, Err(ReadError::Eof)))
@@ -163,7 +163,7 @@ mod tests {
 
     #[test]
     fn test_read_unwritten() {
-        let mut f = &mut MemFlash::new();
+        let f = &mut MemFlash::new();
         let mut b = PageManager::new();
 
         // Read
@@ -173,7 +173,7 @@ mod tests {
 
     #[test]
     fn test_read_uncommitted() {
-        let mut f = &mut MemFlash::new();
+        let f = &mut MemFlash::new();
         let mut b = PageManager::new();
 
         let data = dummy_data(13);
@@ -190,7 +190,7 @@ mod tests {
 
     #[test]
     fn test_write_short() {
-        let mut f = &mut MemFlash::new();
+        let f = &mut MemFlash::new();
         let mut b = PageManager::new();
 
         let data = dummy_data(13);
@@ -223,7 +223,7 @@ mod tests {
 
     #[test]
     fn test_overread() {
-        let mut f = &mut MemFlash::new();
+        let f = &mut MemFlash::new();
         let mut b = PageManager::new();
 
         let data = dummy_data(13);
@@ -244,7 +244,7 @@ mod tests {
 
     #[test]
     fn test_overwrite() {
-        let mut f = &mut MemFlash::new();
+        let f = &mut MemFlash::new();
         let mut b = PageManager::new();
 
         let data = dummy_data(65536);
@@ -266,7 +266,7 @@ mod tests {
 
     #[test]
     fn test_write_many() {
-        let mut f = &mut MemFlash::new();
+        let f = &mut MemFlash::new();
         let mut b = PageManager::new();
 
         // Write
@@ -288,7 +288,7 @@ mod tests {
 
     #[test]
     fn test_read_many() {
-        let mut f = &mut MemFlash::new();
+        let f = &mut MemFlash::new();
         let mut b = PageManager::new();
 
         // Write
