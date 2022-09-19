@@ -1,12 +1,10 @@
 use std::marker::PhantomData;
 
+use crate::config::*;
 use crate::file::Header;
-use crate::flash::*;
-
-pub type PageID = u16;
+use crate::flash::Flash;
 
 const PAGE_HEADER_MAGIC: u32 = 0xc4e21c75;
-const MAX_PAYLOAD_SIZE: usize = PAGE_SIZE - PageHeader::SIZE;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(C)]
@@ -34,7 +32,7 @@ impl<F: Flash> PageManager<F> {
     }
 
     fn write_page_header(flash: &mut F, page_id: PageID, h: PageHeader) {
-        let mut buf = h.to_bytes();
+        let buf = h.to_bytes();
         flash.write(page_id as _, 0, &buf);
     }
 
@@ -67,7 +65,7 @@ impl<F: Flash> PageManager<F> {
         ))
     }
 
-    pub fn write(&mut self, flash: &mut F, page_id: PageID) -> PageWriter<F> {
+    pub fn write(&mut self, _flash: &mut F, page_id: PageID) -> PageWriter<F> {
         PageWriter {
             _phantom: PhantomData,
             page_id,
@@ -120,7 +118,7 @@ impl<F: Flash> PageWriter<F> {
     }
 
     pub fn write(&mut self, flash: &mut F, data: &[u8]) -> usize {
-        let n = data.len().min(MAX_PAYLOAD_SIZE - self.offset);
+        let n = data.len().min(PAGE_MAX_PAYLOAD_SIZE - self.offset);
         let offset = PageHeader::SIZE + self.offset;
         flash.write(self.page_id as _, offset, &data[..n]);
         self.offset += n;
@@ -144,6 +142,7 @@ impl<F: Flash> PageWriter<F> {
 mod tests {
 
     use super::*;
+    use crate::flash::MemFlash;
 
     #[test]
     fn test_header() {
@@ -258,15 +257,15 @@ mod tests {
         // Write
         let mut w = b.write(f, 0);
         let n = w.write(f, &data);
-        assert_eq!(n, MAX_PAYLOAD_SIZE);
+        assert_eq!(n, PAGE_MAX_PAYLOAD_SIZE);
         w.commit(f, Header::DUMMY);
 
         // Read
         let (h, mut r) = b.read(f, 0).unwrap();
         assert_eq!(h, Header::DUMMY);
-        let mut buf = vec![0; MAX_PAYLOAD_SIZE];
+        let mut buf = vec![0; PAGE_MAX_PAYLOAD_SIZE];
         let n = r.read(f, &mut buf);
-        assert_eq!(n, MAX_PAYLOAD_SIZE);
+        assert_eq!(n, PAGE_MAX_PAYLOAD_SIZE);
         assert_eq!(data[..13], buf[..13]);
     }
 
@@ -286,7 +285,7 @@ mod tests {
         // Read
         let (h, mut r) = b.read(f, 0).unwrap();
         assert_eq!(h, Header::DUMMY);
-        let mut buf = vec![0; MAX_PAYLOAD_SIZE];
+        let mut buf = vec![0; PAGE_MAX_PAYLOAD_SIZE];
         let n = r.read(f, &mut buf);
         assert_eq!(n, 9);
         assert_eq!(buf[..9], [1, 2, 3, 4, 5, 6, 7, 8, 9]);
@@ -306,7 +305,7 @@ mod tests {
         // Read
         let (h, mut r) = b.read(f, 0).unwrap();
         assert_eq!(h, Header::DUMMY);
-        let mut buf = vec![0; MAX_PAYLOAD_SIZE];
+        let mut buf = vec![0; PAGE_MAX_PAYLOAD_SIZE];
 
         let n = r.read(f, &mut buf[..3]);
         assert_eq!(n, 3);

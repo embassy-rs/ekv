@@ -3,7 +3,8 @@ use std::cmp::Ordering;
 
 use heapless::Vec;
 
-use crate::file::{FileID, FileManager, FileReader, FileWriter, SeekDirection};
+use crate::config::*;
+use crate::file::{FileManager, FileReader, FileWriter, SeekDirection};
 use crate::flash::Flash;
 use crate::page::ReadError;
 

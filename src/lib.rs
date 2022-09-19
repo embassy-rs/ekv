@@ -2,7 +2,10 @@
 #![deny(unused_must_use)]
 
 // MUST go first.
-pub mod macros;
+mod macros;
+
+mod alloc;
+mod config;
 
 // Layer 0: flash access
 pub mod flash;

@@ -1,8 +1,4 @@
-// Flash parameters -- TODO unhardcode
-pub const WRITE_SIZE: usize = 4;
-pub const PAGE_SIZE: usize = 4096;
-pub const PAGE_COUNT: usize = 256;
-pub const ERASE_VALUE: u8 = 0xFF;
+use crate::config::*;
 
 /// NOR flash memory trait
 /// TODO use embedded-storage

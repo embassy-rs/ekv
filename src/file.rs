@@ -1,14 +1,10 @@
 use core::mem;
 use std::cell::RefCell;
 
-use crate::flash::*;
-use crate::page::{PageID, PageManager, PageReader, PageWriter, ReadError};
-
-const BRANCHING_FACTOR: usize = 3;
-const LEVEL_COUNT: usize = 3;
-const MAX_FILE_COUNT: usize = BRANCHING_FACTOR * LEVEL_COUNT + 1; // TODO maybe it is +2
-
-pub type FileID = u16;
+use crate::alloc::Allocator;
+use crate::config::*;
+use crate::flash::Flash;
+use crate::page::{PageManager, PageReader, PageWriter, ReadError};
 
 const HEADER_FLAG_COMMITTED: u32 = 0x01;
 
@@ -52,9 +48,7 @@ struct Inner<F: Flash> {
     pages: PageManager<F>,
     files: [FileState; MAX_FILE_COUNT],
 
-    // Page allocator
-    used_pages: [bool; PAGE_COUNT], // TODO use a bitfield
-    next_page_id: PageID,
+    alloc: Allocator,
 }
 
 impl<F: Flash> FileManager<F> {
@@ -64,8 +58,7 @@ impl<F: Flash> FileManager<F> {
             flash,
             pages: PageManager::new(),
             files: [DUMMY_FILE; MAX_FILE_COUNT],
-            used_pages: [false; PAGE_COUNT],
-            next_page_id: 0, // TODO make random to spread out wear
+            alloc: Allocator::new(),
         };
         inner.mount();
 
@@ -92,23 +85,6 @@ impl<F: Flash> Inner<F> {
                         last_page_id: page_id as _,
                     }
                 }
-            }
-        }
-    }
-
-    fn allocate_page(&mut self) -> PageID {
-        let start = self.next_page_id;
-        loop {
-            let p = self.next_page_id;
-            self.next_page_id += 1;
-
-            if !self.used_pages[p as usize] {
-                self.used_pages[p as usize] = true;
-                return p;
-            }
-
-            if self.next_page_id == start {
-                panic!("No free pages"); // TODO
             }
         }
     }
@@ -173,7 +149,7 @@ impl<'a, F: Flash> FileReader<'a, F> {
         // TODO
     }
 
-    pub fn binary_search_seek(&mut self, direction: SeekDirection) -> bool {
+    pub fn binary_search_seek(&mut self, _direction: SeekDirection) -> bool {
         // TODO
         false
     }
@@ -293,7 +269,7 @@ impl<'a, F: Flash> FileWriter<'a, F> {
             }
         };
 
-        let page_id = m.allocate_page();
+        let page_id = m.alloc.allocate_page();
         self.state = WriterState::Writing(WriterStateWriting {
             page_index,
             previous_page_id,
@@ -341,6 +317,7 @@ impl<'a, F: Flash> FileWriter<'a, F> {
 mod tests {
 
     use super::*;
+    use crate::flash::MemFlash;
 
     #[test]
     fn test_read_write() {
@@ -365,6 +342,34 @@ mod tests {
         let mut buf = vec![0; data.len()];
         r.read(&mut buf).unwrap();
         assert_eq!(data, buf);
+    }
+
+    #[test]
+    fn test_read_unwritten() {
+        let mut f = MemFlash::new();
+        let m = FileManager::new(&mut f);
+
+        let mut r = m.read(0);
+        let mut buf = vec![0; 1024];
+        let res = r.read(&mut buf);
+        assert!(matches!(res, Err(ReadError::Eof)));
+    }
+
+    #[test]
+    fn test_read_uncommitted() {
+        let mut f = MemFlash::new();
+        let m = FileManager::new(&mut f);
+
+        let data = dummy_data(65201);
+
+        let mut w = m.write(0);
+        w.write(&data);
+        drop(w); // don't commit
+
+        let mut r = m.read(0);
+        let mut buf = vec![0; 1024];
+        let res = r.read(&mut buf);
+        assert!(matches!(res, Err(ReadError::Eof)));
     }
 
     fn dummy_data(len: usize) -> Vec<u8> {
