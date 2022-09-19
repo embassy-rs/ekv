@@ -34,13 +34,8 @@ impl Header {
     };
 }
 
-enum FileState {
-    Empty,
-    Written(WrittenFile),
-}
-
-struct WrittenFile {
-    last_page_id: PageID,
+struct FileState {
+    last: Option<PagePointer>,
 }
 
 pub struct FileManager<F: Flash> {
@@ -57,7 +52,7 @@ struct Inner<F: Flash> {
 
 impl<F: Flash> FileManager<F> {
     pub fn new(flash: F) -> Self {
-        const DUMMY_FILE: FileState = FileState::Empty;
+        const DUMMY_FILE: FileState = FileState { last: None };
         let mut inner = Inner {
             flash,
             pages: PageManager::new(),
@@ -85,45 +80,31 @@ impl<F: Flash> Inner<F> {
         for page_id in 0..PAGE_COUNT {
             if let Ok(h) = self.read_header(page_id as _) {
                 if h.flags & HEADER_FLAG_COMMITTED != 0 {
-                    self.files[h.file_id as usize] = FileState::Written(WrittenFile {
-                        last_page_id: page_id as _,
-                    })
+                    self.files[h.file_id as usize] = FileState {
+                        last: Some(PagePointer {
+                            page_id: page_id as _,
+                            header: h,
+                        }),
+                    };
                 }
             }
         }
 
         for file_id in 0..FILE_COUNT as FileID {
-            if let FileState::Written(wf) = &self.files[file_id as usize] {
-                let mut it = PageIter::new(self, file_id, wf.last_page_id);
-                loop {
-                    self.alloc.mark_allocated(it.page_id());
-                    if it.index() == 0 {
-                        break;
-                    }
-                    it.go_prev(self);
-                }
+            let mut p = self.files[file_id as usize].last;
+            while let Some(pp) = p {
+                self.alloc.mark_allocated(pp.page_id);
+                p = pp.prev(self);
             }
         }
     }
 
-    fn get_file_page(&mut self, file_id: FileID, page_index: usize) -> Option<PageID> {
-        match &self.files[file_id as usize] {
-            FileState::Empty => None,
-            FileState::Written(wf) => {
-                let mut page_id = wf.last_page_id;
-                loop {
-                    let h = self.read_header(page_id).unwrap();
-                    if h.index as usize == page_index {
-                        break Some(page_id);
-                    }
-
-                    // TODO avoid infinite loops, checking the index in the header decreases.
-                    page_id = h.previous_page_id;
-                    if page_id == PageID::MAX {
-                        break None;
-                    }
-                }
-            }
+    fn get_file_page(&mut self, file_id: FileID, index: usize) -> Option<PagePointer> {
+        let last = self.files[file_id as usize].last?;
+        if index > last.header.index as _ {
+            None
+        } else {
+            last.prev_index(self, index)
         }
     }
 
@@ -141,43 +122,36 @@ impl<F: Flash> Inner<F> {
 }
 
 /// "cursor" pointing to a page within a file.
-struct PageIter {
+#[derive(Clone, Copy, Debug)]
+struct PagePointer {
     page_id: PageID,
     header: Header,
 }
 
-impl PageIter {
-    fn new(m: &mut Inner<impl Flash>, file_id: FileID, page_id: PageID) -> Self {
-        let h = m.read_header(page_id).unwrap();
-        assert_eq!(h.file_id, file_id);
-        Self { page_id, header: h }
-    }
-
-    fn page_id(&self) -> PageID {
-        self.header.index as _
-    }
-
-    fn index(&self) -> usize {
-        self.header.index as _
-    }
-
-    fn go_prev(&mut self, m: &mut Inner<impl Flash>) -> PageID {
+impl PagePointer {
+    fn prev(self, m: &mut Inner<impl Flash>) -> Option<PagePointer> {
         let p2 = self.header.previous_page_id;
-        assert!(p2 != PageID::MAX);
-        let h2 = m.read_header(p2).unwrap();
-        assert_eq!(h2.file_id, self.header.file_id);
-        assert_eq!(h2.index, self.header.index - 1);
-        self.page_id = p2;
-        self.header = h2;
-        self.page_id
+        if p2 == PageID::MAX {
+            None
+        } else {
+            let h2 = m.read_header(p2).unwrap();
+            assert_eq!(h2.file_id, self.header.file_id);
+            assert_eq!(h2.index, self.header.index - 1);
+            Some(PagePointer {
+                page_id: p2,
+                header: h2,
+            })
+        }
     }
 
-    fn go(&mut self, m: &mut Inner<impl Flash>, index: usize) -> PageID {
-        assert!(index <= self.index());
-        while self.index() != index {
-            self.go_prev(m);
+    fn prev_index(self, m: &mut Inner<impl Flash>, index: usize) -> Option<PagePointer> {
+        assert!(index <= self.header.index as _);
+
+        let mut p = self;
+        while p.header.index as usize != index {
+            p = p.prev(m)?;
         }
-        self.page_id
+        Some(p)
     }
 }
 
@@ -223,9 +197,9 @@ impl<'a, F: Flash> FileReader<'a, F> {
             ReaderState::Finished => unreachable!(),
         };
         self.state = match m.get_file_page(self.file_id, index) {
-            Some(page_id) => ReaderState::Reading(ReaderStateReading {
+            Some(pp) => ReaderState::Reading(ReaderStateReading {
                 page_index: index + 1,
-                reader: m.read_page(page_id).unwrap().1,
+                reader: m.read_page(pp.page_id).unwrap().1,
             }),
             None => ReaderState::Finished,
         };
@@ -325,7 +299,7 @@ impl<'a, F: Flash> FileWriter<'a, F> {
         }
     }
 
-    fn flush_header(&mut self, m: &mut Inner<F>, s: WriterStateWriting<F>, flags: u32) {
+    fn flush_header(&mut self, m: &mut Inner<F>, s: WriterStateWriting<F>, flags: u32) -> Header {
         let header = Header {
             flags: flags,
             file_id: self.file_id.try_into().unwrap(),
@@ -333,6 +307,7 @@ impl<'a, F: Flash> FileWriter<'a, F> {
             previous_page_id: s.previous_page_id.unwrap_or(PageID::MAX),
         };
         s.writer.commit(&mut m.flash, header);
+        header
     }
 
     fn next_page(&mut self, m: &mut Inner<F>) {
@@ -382,8 +357,10 @@ impl<'a, F: Flash> FileWriter<'a, F> {
             WriterState::Created => {}
             WriterState::Writing(s) => {
                 let page_id = s.writer.page_id();
-                self.flush_header(m, s, HEADER_FLAG_COMMITTED);
-                m.files[self.file_id as usize] = FileState::Written(WrittenFile { last_page_id: page_id });
+                let header = self.flush_header(m, s, HEADER_FLAG_COMMITTED);
+                m.files[self.file_id as usize] = FileState {
+                    last: Some(PagePointer { page_id, header }),
+                };
             }
         };
     }
