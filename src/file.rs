@@ -232,7 +232,25 @@ struct WriterStateWriting<F: Flash> {
 
 impl<'a, F: Flash> Drop for FileWriter<'a, F> {
     fn drop(&mut self) {
-        // TODO mark pages for the non-committed file as freed.
+        let m = &mut *self.m.inner.borrow_mut();
+        if let WriterState::Writing(s) = &self.state {
+            // Free the page we're writing now (not yet committed)
+            let page_id = s.writer.page_id();
+            m.alloc.free(page_id);
+
+            // Free previous pages, if any
+            let mut pp = s.previous_page_id;
+            while let Some(page_id) = pp {
+                let h = m.pages.read_header(&mut m.flash, page_id).unwrap();
+                m.alloc.free(page_id);
+
+                // TODO check the index in the header to avoid infinite loops
+                pp = match h.previous_page_id {
+                    PageID::MAX => None,
+                    x => Some(x),
+                };
+            }
+        };
     }
 }
 
@@ -269,7 +287,7 @@ impl<'a, F: Flash> FileWriter<'a, F> {
             }
         };
 
-        let page_id = m.alloc.allocate_page();
+        let page_id = m.alloc.allocate();
         self.state = WriterState::Writing(WriterStateWriting {
             page_index,
             previous_page_id,
@@ -394,6 +412,77 @@ mod tests {
         w.commit();
         assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
         assert_eq!(m.inner.borrow().alloc.is_allocated(1), true);
+    }
+
+    #[test]
+    fn test_alloc_not_commit_1page() {
+        let mut f = MemFlash::new();
+        let m = FileManager::new(&mut f);
+
+        assert_eq!(m.inner.borrow().alloc.is_allocated(0), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
+
+        let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE);
+        let mut w = m.write(0);
+
+        w.write(&data);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
+
+        drop(w);
+
+        assert_eq!(m.inner.borrow().alloc.is_allocated(0), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
+    }
+
+    #[test]
+    fn test_alloc_not_commit_2page() {
+        let mut f = MemFlash::new();
+        let m = FileManager::new(&mut f);
+
+        assert_eq!(m.inner.borrow().alloc.is_allocated(0), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
+
+        let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE);
+        let mut w = m.write(0);
+
+        w.write(&data);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
+
+        w.write(&data);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(1), true);
+
+        drop(w);
+
+        assert_eq!(m.inner.borrow().alloc.is_allocated(0), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
+    }
+    #[test]
+    fn test_alloc_not_commit_3page() {
+        let mut f = MemFlash::new();
+        let m = FileManager::new(&mut f);
+
+        assert_eq!(m.inner.borrow().alloc.is_allocated(0), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(3), false);
+
+        let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE * 3);
+        let mut w = m.write(0);
+        w.write(&data);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(1), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(2), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(3), false);
+
+        drop(w);
+
+        assert_eq!(m.inner.borrow().alloc.is_allocated(0), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(3), false);
     }
 
     fn dummy_data(len: usize) -> Vec<u8> {

@@ -14,7 +14,7 @@ impl Allocator {
         }
     }
 
-    pub fn allocate_page(&mut self) -> PageID {
+    pub fn allocate(&mut self) -> PageID {
         let start = self.next_page_id;
         loop {
             let p = self.next_page_id;
@@ -29,6 +29,11 @@ impl Allocator {
                 panic!("No free pages"); // TODO
             }
         }
+    }
+
+    pub fn free(&mut self, page_id: PageID) {
+        assert!(self.used_pages[page_id as usize]);
+        self.used_pages[page_id as usize] = false;
     }
 
     #[cfg(test)]
