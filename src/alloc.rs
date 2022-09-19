@@ -31,6 +31,11 @@ impl Allocator {
         }
     }
 
+    pub fn mark_allocated(&mut self, page_id: PageID) {
+        assert!(!self.used_pages[page_id as usize]);
+        self.used_pages[page_id as usize] = true;
+    }
+
     pub fn free(&mut self, page_id: PageID) {
         assert!(self.used_pages[page_id as usize]);
         self.used_pages[page_id as usize] = false;

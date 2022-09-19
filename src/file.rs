@@ -36,7 +36,11 @@ impl Header {
 
 enum FileState {
     Empty,
-    Written { last_page_id: PageID },
+    Written(WrittenFile),
+}
+
+struct WrittenFile {
+    last_page_id: PageID,
 }
 
 pub struct FileManager<F: Flash> {
@@ -46,7 +50,7 @@ pub struct FileManager<F: Flash> {
 struct Inner<F: Flash> {
     flash: F,
     pages: PageManager<F>,
-    files: [FileState; MAX_FILE_COUNT],
+    files: [FileState; FILE_COUNT],
 
     alloc: Allocator,
 }
@@ -57,7 +61,7 @@ impl<F: Flash> FileManager<F> {
         let mut inner = Inner {
             flash,
             pages: PageManager::new(),
-            files: [DUMMY_FILE; MAX_FILE_COUNT],
+            files: [DUMMY_FILE; FILE_COUNT],
             alloc: Allocator::new(),
         };
         inner.mount();
@@ -79,23 +83,36 @@ impl<F: Flash> FileManager<F> {
 impl<F: Flash> Inner<F> {
     fn mount(&mut self) {
         for page_id in 0..PAGE_COUNT {
-            if let Ok(h) = self.pages.read_header(&mut self.flash, page_id as _) {
+            if let Ok(h) = self.read_header(page_id as _) {
                 if h.flags & HEADER_FLAG_COMMITTED != 0 {
-                    self.files[h.file_id as usize] = FileState::Written {
+                    self.files[h.file_id as usize] = FileState::Written(WrittenFile {
                         last_page_id: page_id as _,
+                    })
+                }
+            }
+        }
+
+        for file_id in 0..FILE_COUNT as FileID {
+            if let FileState::Written(wf) = &self.files[file_id as usize] {
+                let mut it = PageIter::new(self, file_id, wf.last_page_id);
+                loop {
+                    self.alloc.mark_allocated(it.page_id());
+                    if it.index() == 0 {
+                        break;
                     }
+                    it.go_prev(self);
                 }
             }
         }
     }
 
     fn get_file_page(&mut self, file_id: FileID, page_index: usize) -> Option<PageID> {
-        match self.files[file_id as usize] {
+        match &self.files[file_id as usize] {
             FileState::Empty => None,
-            FileState::Written { last_page_id } => {
-                let mut page_id = last_page_id;
+            FileState::Written(wf) => {
+                let mut page_id = wf.last_page_id;
                 loop {
-                    let h = self.pages.read_header(&mut self.flash, page_id).unwrap();
+                    let h = self.read_header(page_id).unwrap();
                     if h.index as usize == page_index {
                         break Some(page_id);
                     }
@@ -114,8 +131,53 @@ impl<F: Flash> Inner<F> {
         self.pages.read(&mut self.flash, page_id)
     }
 
+    fn read_header(&mut self, page_id: PageID) -> Result<Header, ReadError> {
+        self.pages.read_header(&mut self.flash, page_id)
+    }
+
     fn write_page(&mut self, page_id: PageID) -> PageWriter<F> {
         self.pages.write(&mut self.flash, page_id)
+    }
+}
+
+/// "cursor" pointing to a page within a file.
+struct PageIter {
+    page_id: PageID,
+    header: Header,
+}
+
+impl PageIter {
+    fn new(m: &mut Inner<impl Flash>, file_id: FileID, page_id: PageID) -> Self {
+        let h = m.read_header(page_id).unwrap();
+        assert_eq!(h.file_id, file_id);
+        Self { page_id, header: h }
+    }
+
+    fn page_id(&self) -> PageID {
+        self.header.index as _
+    }
+
+    fn index(&self) -> usize {
+        self.header.index as _
+    }
+
+    fn go_prev(&mut self, m: &mut Inner<impl Flash>) -> PageID {
+        let p2 = self.header.previous_page_id;
+        assert!(p2 != PageID::MAX);
+        let h2 = m.read_header(p2).unwrap();
+        assert_eq!(h2.file_id, self.header.file_id);
+        assert_eq!(h2.index, self.header.index - 1);
+        self.page_id = p2;
+        self.header = h2;
+        self.page_id
+    }
+
+    fn go(&mut self, m: &mut Inner<impl Flash>, index: usize) -> PageID {
+        assert!(index <= self.index());
+        while self.index() != index {
+            self.go_prev(m);
+        }
+        self.page_id
     }
 }
 
@@ -241,7 +303,7 @@ impl<'a, F: Flash> Drop for FileWriter<'a, F> {
             // Free previous pages, if any
             let mut pp = s.previous_page_id;
             while let Some(page_id) = pp {
-                let h = m.pages.read_header(&mut m.flash, page_id).unwrap();
+                let h = m.read_header(page_id).unwrap();
                 m.alloc.free(page_id);
 
                 // TODO check the index in the header to avoid infinite loops
@@ -321,7 +383,7 @@ impl<'a, F: Flash> FileWriter<'a, F> {
             WriterState::Writing(s) => {
                 let page_id = s.writer.page_id();
                 self.flush_header(m, s, HEADER_FLAG_COMMITTED);
-                m.files[self.file_id as usize] = FileState::Written { last_page_id: page_id };
+                m.files[self.file_id as usize] = FileState::Written(WrittenFile { last_page_id: page_id });
             }
         };
     }
@@ -404,14 +466,23 @@ mod tests {
         w.write(&data);
         assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
         assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
 
         w.write(&data);
         assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
         assert_eq!(m.inner.borrow().alloc.is_allocated(1), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
 
         w.commit();
         assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
         assert_eq!(m.inner.borrow().alloc.is_allocated(1), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
+
+        // Remount
+        let m = FileManager::new(&mut f);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(1), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
     }
 
     #[test]
@@ -430,7 +501,11 @@ mod tests {
         assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
 
         drop(w);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(0), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
 
+        // Remount
+        let m = FileManager::new(&mut f);
         assert_eq!(m.inner.borrow().alloc.is_allocated(0), false);
         assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
     }
@@ -449,16 +524,25 @@ mod tests {
         w.write(&data);
         assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
         assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
 
         w.write(&data);
         assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
         assert_eq!(m.inner.borrow().alloc.is_allocated(1), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
 
         drop(w);
-
         assert_eq!(m.inner.borrow().alloc.is_allocated(0), false);
         assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
+
+        // Remount
+        let m = FileManager::new(&mut f);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(0), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
     }
+
     #[test]
     fn test_alloc_not_commit_3page() {
         let mut f = MemFlash::new();
@@ -478,7 +562,13 @@ mod tests {
         assert_eq!(m.inner.borrow().alloc.is_allocated(3), false);
 
         drop(w);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(0), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(3), false);
 
+        // Remount
+        let m = FileManager::new(&mut f);
         assert_eq!(m.inner.borrow().alloc.is_allocated(0), false);
         assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
         assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
