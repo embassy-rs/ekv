@@ -372,6 +372,30 @@ mod tests {
         assert!(matches!(res, Err(ReadError::Eof)));
     }
 
+    #[test]
+    fn test_alloc_commit() {
+        let mut f = MemFlash::new();
+        let m = FileManager::new(&mut f);
+
+        assert_eq!(m.inner.borrow().alloc.is_allocated(0), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
+
+        let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE);
+        let mut w = m.write(0);
+
+        w.write(&data);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
+
+        w.write(&data);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(1), true);
+
+        w.commit();
+        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(1), true);
+    }
+
     fn dummy_data(len: usize) -> Vec<u8> {
         let mut res = vec![0; len];
         for (i, v) in res.iter_mut().enumerate() {

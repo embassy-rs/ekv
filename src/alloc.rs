@@ -30,4 +30,9 @@ impl Allocator {
             }
         }
     }
+
+    #[cfg(test)]
+    pub fn is_allocated(&self, page_id: PageID) -> bool {
+        self.used_pages[page_id as usize]
+    }
 }
