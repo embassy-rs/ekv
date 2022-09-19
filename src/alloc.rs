@@ -19,6 +19,9 @@ impl Allocator {
         loop {
             let p = self.next_page_id;
             self.next_page_id += 1;
+            if self.next_page_id == PAGE_COUNT as _ {
+                self.next_page_id = 0;
+            }
 
             if !self.used_pages[p as usize] {
                 self.used_pages[p as usize] = true;

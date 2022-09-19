@@ -71,6 +71,7 @@ impl<F: Flash> FileManager<F> {
     }
 
     pub fn write(&self, file_id: FileID) -> FileWriter<'_, F> {
+        self.inner.borrow_mut().free_all_file(file_id);
         FileWriter::new(self, file_id)
     }
 }
@@ -106,6 +107,26 @@ impl<F: Flash> Inner<F> {
         } else {
             last.prev_index(self, index)
         }
+    }
+
+    fn free_all_prev(&mut self, page_id: PageID) {
+        let p = PagePointer {
+            page_id,
+            header: self.read_header(page_id).unwrap(),
+        };
+        self.free_all_prev_pp(Some(p));
+    }
+
+    fn free_all_prev_pp(&mut self, mut p: Option<PagePointer>) {
+        while let Some(pp) = p {
+            self.alloc.free(pp.page_id);
+            p = pp.prev(self);
+        }
+    }
+
+    fn free_all_file(&mut self, file_id: FileID) {
+        self.free_all_prev_pp(self.files[file_id as usize].last);
+        self.files[file_id as usize].last = None;
     }
 
     fn read_page(&mut self, page_id: PageID) -> Result<(Header, PageReader<F>), ReadError> {
@@ -275,16 +296,8 @@ impl<'a, F: Flash> Drop for FileWriter<'a, F> {
             m.alloc.free(page_id);
 
             // Free previous pages, if any
-            let mut pp = s.previous_page_id;
-            while let Some(page_id) = pp {
-                let h = m.read_header(page_id).unwrap();
-                m.alloc.free(page_id);
-
-                // TODO check the index in the header to avoid infinite loops
-                pp = match h.previous_page_id {
-                    PageID::MAX => None,
-                    x => Some(x),
-                };
+            if let Some(pp) = s.previous_page_id {
+                m.free_all_prev(pp);
             }
         };
     }
@@ -550,6 +563,23 @@ mod tests {
         assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
         assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
         assert_eq!(m.inner.borrow().alloc.is_allocated(3), false);
+    }
+
+    #[test]
+    fn test_overwrite() {
+        let mut f = MemFlash::new();
+        let m = FileManager::new(&mut f);
+
+        for i in 0..3000u32 {
+            let mut w = m.write(0);
+            w.write(&i.to_le_bytes());
+            w.commit();
+
+            let mut r = m.read(0);
+            let mut buf = [0; 4];
+            r.read(&mut buf).unwrap();
+            assert_eq!(buf, i.to_le_bytes());
+        }
     }
 
     fn dummy_data(len: usize) -> Vec<u8> {

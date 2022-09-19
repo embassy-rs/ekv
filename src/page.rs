@@ -118,6 +118,14 @@ impl<F: Flash> PageWriter<F> {
     }
 
     pub fn write(&mut self, flash: &mut F, data: &[u8]) -> usize {
+        if data.len() == 0 {
+            return 0;
+        }
+
+        if self.offset == 0 {
+            flash.erase(self.page_id as _);
+        }
+
         let n = data.len().min(PAGE_MAX_PAYLOAD_SIZE - self.offset);
         let offset = PageHeader::SIZE + self.offset;
         flash.write(self.page_id as _, offset, &data[..n]);
@@ -126,6 +134,10 @@ impl<F: Flash> PageWriter<F> {
     }
 
     pub fn commit(self, flash: &mut F, header: Header) {
+        if self.offset == 0 {
+            flash.erase(self.page_id as _);
+        }
+
         PageManager::write_page_header(
             flash,
             self.page_id,
