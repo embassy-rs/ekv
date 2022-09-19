@@ -48,7 +48,8 @@ impl<F: Flash> Database<F> {
 
         let r1 = &mut self.files.read(start);
         let r2 = &mut self.files.read(start + 1);
-        let w = &mut self.files.write(start + 2);
+        let mut ww = self.files.write(start + 2);
+        let w = &mut ww;
 
         fn read_key_or_empty(r: &mut FileReader<impl Flash>, buf: &mut Vec<u8, MAX_KEY_SIZE>) {
             match read_key(r, buf) {
@@ -87,6 +88,8 @@ impl<F: Flash> Database<F> {
                 }
             }
         }
+
+        ww.commit();
     }
 }
 
@@ -173,6 +176,10 @@ impl<'a, F: Flash + 'a> WriteTransaction<'a, F> {
         self.last_key = Vec::from_slice(key).unwrap();
 
         write_record(&mut self.w, key, value)
+    }
+
+    pub fn commit(self) {
+        self.w.commit()
     }
 }
 
@@ -274,7 +281,7 @@ mod tests {
 
     #[test]
     fn test() {
-        let mut f = MemFlash::new();
+        let f = &mut MemFlash::new();
 
         let db = Database::new(f);
 
@@ -283,6 +290,7 @@ mod tests {
         let mut wtx = db.write_transaction();
         wtx.write(b"bar", b"4321");
         wtx.write(b"foo", b"1234");
+        wtx.commit();
 
         let mut rtx = db.read_transaction();
         let n = rtx.read(b"foo", &mut buf);
@@ -296,6 +304,7 @@ mod tests {
         wtx.write(b"bar", b"8765");
         wtx.write(b"baz", b"4242");
         wtx.write(b"foo", b"5678");
+        wtx.commit();
 
         let mut rtx = db.read_transaction();
         let n = rtx.read(b"foo", &mut buf);
@@ -317,6 +326,7 @@ mod tests {
 
         let mut wtx = db.write_transaction();
         wtx.write(b"lol", b"9999");
+        wtx.commit();
 
         let mut rtx = db.read_transaction();
         let n = rtx.read(b"foo", &mut buf);

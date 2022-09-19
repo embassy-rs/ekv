@@ -170,11 +170,12 @@ impl<'a, F: Flash> FileReader<'a, F> {
     }
 
     pub fn binary_search_start(&mut self) {
-        todo!()
+        // TODO
     }
 
     pub fn binary_search_seek(&mut self, direction: SeekDirection) -> bool {
-        todo!()
+        // TODO
+        false
     }
 
     fn next_page(&mut self, m: &mut Inner<F>) {
@@ -332,7 +333,7 @@ impl<'a, F: Flash> FileWriter<'a, F> {
     }
 
     pub fn record_end(&mut self) {
-        todo!();
+        // TODO
     }
 }
 
