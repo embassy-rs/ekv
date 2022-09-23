@@ -17,6 +17,10 @@ pub struct Database<F: Flash> {
 }
 
 impl<F: Flash> Database<F> {
+    pub fn format(flash: F) {
+        FileManager::format(flash);
+    }
+
     pub fn new(flash: F) -> Self {
         Self {
             files: FileManager::new(flash),
@@ -282,9 +286,10 @@ mod tests {
 
     #[test]
     fn test() {
-        let f = &mut MemFlash::new();
+        let mut f = MemFlash::new();
+        Database::format(&mut f);
 
-        let db = Database::new(f);
+        let db = Database::new(&mut f);
 
         let mut buf = [0u8; 1024];
 

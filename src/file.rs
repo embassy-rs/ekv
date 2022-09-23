@@ -6,8 +6,6 @@ use crate::config::*;
 use crate::flash::Flash;
 use crate::page::{PageManager, PageReader, PageWriter, ReadError};
 
-const HEADER_FLAG_COMMITTED: u32 = 0x01;
-
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SeekDirection {
     Left,
@@ -17,22 +15,27 @@ pub enum SeekDirection {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(C)]
 pub struct Header {
-    flags: u32,
-    file_id: FileID,
-    index: u16,
-    previous_page_id: PageID,
-    // TODO add a skiplist for previous pages, instead of just storing the immediately previous one.
+    file_id: FileID,          // 0xFFFF if meta
+    previous_page_id: PageID, // TODO add a skiplist for previous pages, instead of just storing the immediately previous one.
+    seq: u32,
 }
 
 impl Header {
     #[cfg(test)]
     pub const DUMMY: Self = Self {
-        flags: 0,
         file_id: 1,
-        index: 2,
-        previous_page_id: 3,
+        previous_page_id: 2,
+        seq: 3,
     };
 }
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(C)]
+pub struct FileMeta {
+    file_id: FileID,
+    page_id: PageID,
+}
+impl_bytes!(FileMeta);
 
 struct FileState {
     last: Option<PagePointer>,
@@ -46,19 +49,20 @@ struct Inner<F: Flash> {
     flash: F,
     pages: PageManager<F>,
     files: [FileState; FILE_COUNT],
+    meta_page_id: PageID,
+    meta_seq: u32,
 
     alloc: Allocator,
 }
 
 impl<F: Flash> FileManager<F> {
+    pub fn format(flash: F) {
+        let mut inner = Inner::new(flash);
+        inner.format();
+    }
+
     pub fn new(flash: F) -> Self {
-        const DUMMY_FILE: FileState = FileState { last: None };
-        let mut inner = Inner {
-            flash,
-            pages: PageManager::new(),
-            files: [DUMMY_FILE; FILE_COUNT],
-            alloc: Allocator::new(),
-        };
+        let mut inner = Inner::new(flash);
         inner.mount();
 
         Self {
@@ -66,33 +70,103 @@ impl<F: Flash> FileManager<F> {
         }
     }
 
+    pub fn commit(&self) {
+        self.inner.borrow_mut().commit();
+    }
+
     pub fn read(&self, file_id: FileID) -> FileReader<'_, F> {
         FileReader::new(self, file_id)
     }
 
     pub fn write(&self, file_id: FileID) -> FileWriter<'_, F> {
-        self.inner.borrow_mut().free_all_file(file_id);
+        let m = &mut *self.inner.borrow_mut();
+        m.free_all_file(file_id);
+
         FileWriter::new(self, file_id)
     }
 }
 
 impl<F: Flash> Inner<F> {
-    fn mount(&mut self) {
+    fn new(flash: F) -> Self {
+        // TODO initialize self in mount() to avoid having to
+        // use dummy values here.
+        const DUMMY_FILE: FileState = FileState { last: None };
+        Self {
+            flash,
+            meta_page_id: 0,
+            meta_seq: 0,
+            pages: PageManager::new(),
+            files: [DUMMY_FILE; FILE_COUNT],
+            alloc: Allocator::new(),
+        }
+    }
+
+    fn format(&mut self) {
+        // Erase all meta pages.
         for page_id in 0..PAGE_COUNT {
             if let Ok(h) = self.read_header(page_id as _) {
-                if h.flags & HEADER_FLAG_COMMITTED != 0 {
-                    self.files[h.file_id as usize] = FileState {
-                        last: Some(PagePointer {
-                            page_id: page_id as _,
-                            header: h,
-                        }),
-                    };
+                if h.file_id == FileID::MAX {
+                    self.flash.erase(page_id);
                 }
             }
         }
 
+        // Write initial meta page.
+        let w = self.write_page(0);
+        w.commit(
+            &mut self.flash,
+            Header {
+                file_id: FileID::MAX,
+                previous_page_id: 0,
+                seq: 1,
+            },
+        );
+    }
+
+    fn mount(&mut self) {
+        let mut meta_page_id = None;
+        let mut meta_seq = 0;
+        for page_id in 0..PAGE_COUNT {
+            if let Ok(h) = self.read_header(page_id as _) {
+                if h.file_id == FileID::MAX && h.seq > meta_seq {
+                    meta_page_id = Some(page_id as PageID);
+                    meta_seq = h.seq;
+                }
+            }
+        }
+
+        let meta_page_id = meta_page_id.unwrap();
+        self.meta_page_id = meta_page_id;
+        self.meta_seq = meta_seq;
+        self.alloc.mark_allocated(meta_page_id);
+
+        let (_, mut r) = self.read_page(meta_page_id).unwrap();
+        let mut files = [PageID::MAX; FILE_COUNT];
+        loop {
+            let mut meta = [0; FileMeta::SIZE];
+            let n = r.read(&mut self.flash, &mut meta);
+            if n == 0 {
+                break;
+            }
+            assert_eq!(n, FileMeta::SIZE);
+            let meta = FileMeta::from_bytes(meta);
+            assert!(meta.file_id < FILE_COUNT as _);
+            assert!(meta.page_id < PAGE_COUNT as _ || meta.page_id == PageID::MAX);
+            files[meta.file_id as usize] = meta.page_id;
+        }
+
         for file_id in 0..FILE_COUNT as FileID {
-            let mut p = self.files[file_id as usize].last;
+            let mut p = match files[file_id as usize] {
+                PageID::MAX => None,
+                page_id => {
+                    let h = self.read_header(page_id).unwrap();
+                    assert_eq!(h.file_id, file_id);
+                    Some(PagePointer { page_id, header: h })
+                }
+            };
+
+            self.files[file_id as usize] = FileState { last: p };
+
             while let Some(pp) = p {
                 self.alloc.mark_allocated(pp.page_id);
                 p = pp.prev(self);
@@ -100,12 +174,41 @@ impl<F: Flash> Inner<F> {
         }
     }
 
-    fn get_file_page(&mut self, file_id: FileID, index: usize) -> Option<PagePointer> {
+    fn commit(&mut self) {
+        let page_id = self.alloc.allocate();
+        let mut w = self.write_page(page_id);
+        for file_id in 0..FILE_COUNT as FileID {
+            let f = &self.files[file_id as usize];
+            if let Some(last) = f.last {
+                let meta = FileMeta {
+                    file_id,
+                    page_id: last.page_id,
+                };
+                let n = w.write(&mut self.flash, &meta.to_bytes());
+                assert_eq!(n, FileMeta::SIZE);
+            }
+        }
+
+        self.meta_seq = self.meta_seq.wrapping_add(1);
+        w.commit(
+            &mut self.flash,
+            Header {
+                file_id: FileID::MAX,
+                previous_page_id: 0,
+                seq: self.meta_seq,
+            },
+        );
+
+        self.alloc.free(self.meta_page_id);
+        self.meta_page_id = page_id;
+    }
+
+    fn get_file_page(&mut self, file_id: FileID, seq: u32) -> Option<PagePointer> {
         let last = self.files[file_id as usize].last?;
-        if index > last.header.index as _ {
+        if seq > last.header.seq {
             None
         } else {
-            last.prev_index(self, index)
+            last.prev_seq(self, seq)
         }
     }
 
@@ -157,7 +260,7 @@ impl PagePointer {
         } else {
             let h2 = m.read_header(p2).unwrap();
             assert_eq!(h2.file_id, self.header.file_id);
-            assert_eq!(h2.index, self.header.index - 1);
+            assert!(h2.seq < self.header.seq);
             Some(PagePointer {
                 page_id: p2,
                 header: h2,
@@ -165,11 +268,11 @@ impl PagePointer {
         }
     }
 
-    fn prev_index(self, m: &mut Inner<impl Flash>, index: usize) -> Option<PagePointer> {
-        assert!(index <= self.header.index as _);
+    fn prev_seq(self, m: &mut Inner<impl Flash>, seq: u32) -> Option<PagePointer> {
+        assert!(seq <= self.header.seq as _);
 
         let mut p = self;
-        while p.header.index as usize != index {
+        while p.header.seq > seq {
             p = p.prev(m)?;
         }
         Some(p)
@@ -189,7 +292,7 @@ enum ReaderState<F: Flash> {
     Finished,
 }
 struct ReaderStateReading<F: Flash> {
-    page_index: usize,
+    seq: u32,
     reader: PageReader<F>,
 }
 
@@ -212,14 +315,14 @@ impl<'a, F: Flash> FileReader<'a, F> {
     }
 
     fn next_page(&mut self, m: &mut Inner<F>) {
-        let index = match &self.state {
+        let seq = match &self.state {
             ReaderState::Created => 0,
-            ReaderState::Reading(s) => s.page_index,
+            ReaderState::Reading(s) => s.seq,
             ReaderState::Finished => unreachable!(),
         };
-        self.state = match m.get_file_page(self.file_id, index) {
+        self.state = match m.get_file_page(self.file_id, seq) {
             Some(pp) => ReaderState::Reading(ReaderStateReading {
-                page_index: index + 1,
+                seq,
                 reader: m.read_page(pp.page_id).unwrap().1,
             }),
             None => ReaderState::Finished,
@@ -238,6 +341,7 @@ impl<'a, F: Flash> FileReader<'a, F> {
                 ReaderState::Reading(s) => {
                     let n = s.reader.read(&mut m.flash, data);
                     data = &mut data[n..];
+                    s.seq = s.seq.checked_add(n.try_into().unwrap()).unwrap();
                     if n == 0 {
                         self.next_page(m);
                     }
@@ -259,6 +363,7 @@ impl<'a, F: Flash> FileReader<'a, F> {
                 ReaderState::Reading(s) => {
                     let n = s.reader.skip(len);
                     len -= n;
+                    s.seq = s.seq.checked_add(n.try_into().unwrap()).unwrap();
                     if n == 0 {
                         self.next_page(m);
                     }
@@ -282,7 +387,7 @@ enum WriterState<F: Flash> {
 }
 
 struct WriterStateWriting<F: Flash> {
-    page_index: usize,
+    seq: u32,
     previous_page_id: Option<PageID>,
     writer: PageWriter<F>,
 }
@@ -312,34 +417,34 @@ impl<'a, F: Flash> FileWriter<'a, F> {
         }
     }
 
-    fn flush_header(&mut self, m: &mut Inner<F>, s: WriterStateWriting<F>, flags: u32) -> Header {
+    fn flush_header(&mut self, m: &mut Inner<F>, s: WriterStateWriting<F>) -> Header {
         let header = Header {
-            flags: flags,
             file_id: self.file_id.try_into().unwrap(),
-            index: s.page_index.try_into().unwrap(),
             previous_page_id: s.previous_page_id.unwrap_or(PageID::MAX),
+            seq: s.seq,
         };
         s.writer.commit(&mut m.flash, header);
         header
     }
 
     fn next_page(&mut self, m: &mut Inner<F>) {
-        let (page_index, previous_page_id) = match mem::replace(&mut self.state, WriterState::Created) {
+        let (seq, previous_page_id) = match mem::replace(&mut self.state, WriterState::Created) {
             WriterState::Created => (0, None),
             WriterState::Writing(s) => {
                 let page_id = s.writer.page_id();
-                let page_index = s.page_index;
+                let page_size = s.writer.offset().try_into().unwrap();
+                let seq = s.seq.checked_add(page_size).unwrap();
 
                 // Flush header for the page we're done writing.
-                self.flush_header(m, s, 0);
+                self.flush_header(m, s);
 
-                (page_index + 1, Some(page_id))
+                (seq, Some(page_id))
             }
         };
 
         let page_id = m.alloc.allocate();
         self.state = WriterState::Writing(WriterStateWriting {
-            page_index,
+            seq,
             previous_page_id,
             writer: m.write_page(page_id),
         });
@@ -370,10 +475,8 @@ impl<'a, F: Flash> FileWriter<'a, F> {
             WriterState::Created => {}
             WriterState::Writing(s) => {
                 let page_id = s.writer.page_id();
-                let header = self.flush_header(m, s, HEADER_FLAG_COMMITTED);
-                m.files[self.file_id as usize] = FileState {
-                    last: Some(PagePointer { page_id, header }),
-                };
+                let header = self.flush_header(m, s);
+                m.files[self.file_id as usize].last = Some(PagePointer { page_id, header });
             }
         };
     }
@@ -392,6 +495,35 @@ mod tests {
     #[test]
     fn test_read_write() {
         let mut f = MemFlash::new();
+        FileManager::format(&mut f);
+        let m = FileManager::new(&mut f);
+
+        let data = dummy_data(24);
+
+        let mut w = m.write(0);
+        w.write(&data);
+        w.commit();
+
+        let mut r = m.read(0);
+        let mut buf = vec![0; data.len()];
+        r.read(&mut buf).unwrap();
+        assert_eq!(data, buf);
+
+        m.commit();
+
+        // Remount
+        let m = FileManager::new(&mut f);
+
+        let mut r = m.read(0);
+        let mut buf = vec![0; data.len()];
+        r.read(&mut buf).unwrap();
+        assert_eq!(data, buf);
+    }
+
+    #[test]
+    fn test_read_write_long() {
+        let mut f = MemFlash::new();
+        FileManager::format(&mut f);
         let m = FileManager::new(&mut f);
 
         let data = dummy_data(65201);
@@ -405,6 +537,8 @@ mod tests {
         r.read(&mut buf).unwrap();
         assert_eq!(data, buf);
 
+        m.commit();
+
         // Remount
         let m = FileManager::new(&mut f);
 
@@ -417,6 +551,7 @@ mod tests {
     #[test]
     fn test_read_unwritten() {
         let mut f = MemFlash::new();
+        FileManager::format(&mut f);
         let m = FileManager::new(&mut f);
 
         let mut r = m.read(0);
@@ -428,6 +563,7 @@ mod tests {
     #[test]
     fn test_read_uncommitted() {
         let mut f = MemFlash::new();
+        FileManager::format(&mut f);
         let m = FileManager::new(&mut f);
 
         let data = dummy_data(65201);
@@ -445,76 +581,58 @@ mod tests {
     #[test]
     fn test_alloc_commit() {
         let mut f = MemFlash::new();
+        FileManager::format(&mut f);
         let m = FileManager::new(&mut f);
 
-        assert_eq!(m.inner.borrow().alloc.is_allocated(0), false);
         assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
 
         let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE);
         let mut w = m.write(0);
 
         w.write(&data);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true); // old meta
+        assert_eq!(m.inner.borrow().alloc.is_allocated(1), true);
         assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(3), false);
 
         w.write(&data);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true); // old meta
         assert_eq!(m.inner.borrow().alloc.is_allocated(1), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(2), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(3), false);
 
         w.commit();
-        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true); // old meta
         assert_eq!(m.inner.borrow().alloc.is_allocated(1), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(2), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(3), false);
+
+        m.commit();
+        assert_eq!(m.inner.borrow().alloc.is_allocated(0), false); // old meta
+        assert_eq!(m.inner.borrow().alloc.is_allocated(1), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(2), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(3), true); // new meta
 
         // Remount
         let m = FileManager::new(&mut f);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
         assert_eq!(m.inner.borrow().alloc.is_allocated(1), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(2), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(3), true); // new meta
     }
 
     #[test]
     fn test_alloc_not_commit_1page() {
         let mut f = MemFlash::new();
+        FileManager::format(&mut f);
         let m = FileManager::new(&mut f);
 
-        assert_eq!(m.inner.borrow().alloc.is_allocated(0), false);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
-
-        let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE);
-        let mut w = m.write(0);
-
-        w.write(&data);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
-
-        drop(w);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(0), false);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
-
-        // Remount
-        let m = FileManager::new(&mut f);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(0), false);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
-    }
-
-    #[test]
-    fn test_alloc_not_commit_2page() {
-        let mut f = MemFlash::new();
-        let m = FileManager::new(&mut f);
-
-        assert_eq!(m.inner.borrow().alloc.is_allocated(0), false);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
-
-        let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE);
-        let mut w = m.write(0);
-
-        w.write(&data);
         assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
         assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
         assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
+
+        let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE);
+        let mut w = m.write(0);
 
         w.write(&data);
         assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
@@ -522,23 +640,72 @@ mod tests {
         assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
 
         drop(w);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
+
+        m.commit();
+        assert_eq!(m.inner.borrow().alloc.is_allocated(0), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(2), true); // new meta
+
+        // Remount
+        let m = FileManager::new(&mut f);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(0), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(2), true); // new meta
+    }
+
+    #[test]
+    fn test_alloc_not_commit_2page() {
+        let mut f = MemFlash::new();
+        FileManager::format(&mut f);
+        let m = FileManager::new(&mut f);
+
+        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
+
+        let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE);
+        let mut w = m.write(0);
+
+        w.write(&data);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(1), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
+
+        w.write(&data);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(1), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(2), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(3), false);
+
+        drop(w);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(3), false);
+
+        m.commit();
         assert_eq!(m.inner.borrow().alloc.is_allocated(0), false);
         assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
         assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(3), true);
 
         // Remount
         let m = FileManager::new(&mut f);
         assert_eq!(m.inner.borrow().alloc.is_allocated(0), false);
         assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
         assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(3), true);
     }
 
     #[test]
     fn test_alloc_not_commit_3page() {
         let mut f = MemFlash::new();
+        FileManager::format(&mut f);
         let m = FileManager::new(&mut f);
 
-        assert_eq!(m.inner.borrow().alloc.is_allocated(0), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
         assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
         assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
         assert_eq!(m.inner.borrow().alloc.is_allocated(3), false);
@@ -549,13 +716,22 @@ mod tests {
         assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
         assert_eq!(m.inner.borrow().alloc.is_allocated(1), true);
         assert_eq!(m.inner.borrow().alloc.is_allocated(2), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(3), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(3), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(4), false);
 
         drop(w);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(3), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(4), false);
+
+        m.commit();
         assert_eq!(m.inner.borrow().alloc.is_allocated(0), false);
         assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
         assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
         assert_eq!(m.inner.borrow().alloc.is_allocated(3), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(4), true);
 
         // Remount
         let m = FileManager::new(&mut f);
@@ -563,11 +739,13 @@ mod tests {
         assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
         assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
         assert_eq!(m.inner.borrow().alloc.is_allocated(3), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(4), true);
     }
 
     #[test]
     fn test_overwrite() {
         let mut f = MemFlash::new();
+        FileManager::format(&mut f);
         let m = FileManager::new(&mut f);
 
         for i in 0..3000u32 {
@@ -580,6 +758,52 @@ mod tests {
             r.read(&mut buf).unwrap();
             assert_eq!(buf, i.to_le_bytes());
         }
+    }
+
+    #[test]
+    fn test_overwrite_remount() {
+        let mut f = MemFlash::new();
+        FileManager::format(&mut f);
+
+        for i in 0..3000u32 {
+            let m = FileManager::new(&mut f);
+            let mut w = m.write(0);
+            w.write(&i.to_le_bytes());
+            w.commit();
+            m.commit();
+
+            let m = FileManager::new(&mut f);
+            let mut r = m.read(0);
+            let mut buf = [0; 4];
+            r.read(&mut buf).unwrap();
+            assert_eq!(buf, i.to_le_bytes());
+        }
+
+        let m = FileManager::new(&mut f);
+        let mut r = m.read(0);
+        let mut buf = [0; 4];
+        r.read(&mut buf).unwrap();
+        assert_eq!(buf, 2999u32.to_le_bytes());
+    }
+
+    #[test]
+    fn test_overwrite_remount_2() {
+        let mut f = MemFlash::new();
+        FileManager::format(&mut f);
+
+        let m = FileManager::new(&mut f);
+        for i in 0..3000u32 {
+            let mut w = m.write(0);
+            w.write(&i.to_le_bytes());
+            w.commit();
+            m.commit();
+        }
+
+        let m = FileManager::new(&mut f);
+        let mut r = m.read(0);
+        let mut buf = [0; 4];
+        r.read(&mut buf).unwrap();
+        assert_eq!(buf, 2999u32.to_le_bytes());
     }
 
     fn dummy_data(len: usize) -> Vec<u8> {

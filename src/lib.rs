@@ -1,4 +1,3 @@
-#![feature(generic_associated_types)]
 #![deny(unused_must_use)]
 
 // MUST go first.

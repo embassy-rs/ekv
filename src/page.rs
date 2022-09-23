@@ -113,6 +113,10 @@ pub struct PageWriter<F: Flash> {
 }
 
 impl<F: Flash> PageWriter<F> {
+    pub fn offset(&self) -> usize {
+        self.offset
+    }
+
     pub fn page_id(&self) -> PageID {
         self.page_id
     }
