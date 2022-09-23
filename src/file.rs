@@ -473,7 +473,7 @@ impl<'a, F: Flash> FileWriter<'a, F> {
         }
     }
 
-    pub fn commit(mut self) {
+    pub fn commit(&mut self) {
         let m = &mut *self.m.inner.borrow_mut();
         if let Some(w) = mem::replace(&mut self.writer, None) {
             self.flush_header(m, w);
@@ -505,6 +505,7 @@ mod tests {
         let mut w = m.write(0);
         w.write(&data);
         w.commit();
+        drop(w);
 
         let mut r = m.read(0);
         let mut buf = vec![0; data.len()];
@@ -533,6 +534,7 @@ mod tests {
         let mut w = m.write(0);
         w.write(&data);
         w.commit();
+        drop(w);
 
         let mut r = m.read(0);
         let mut buf = vec![0; data.len()];
@@ -559,10 +561,12 @@ mod tests {
         let mut w = m.write(0);
         w.write(&[1, 2, 3, 4, 5]);
         w.commit();
+        drop(w);
 
         let mut w = m.write(0);
         w.write(&[6, 7, 8, 9]);
         w.commit();
+        drop(w);
 
         let mut r = m.read(0);
         let mut buf = vec![0; 9];
@@ -592,6 +596,7 @@ mod tests {
         let mut w = m.write(0);
         w.write(&[1, 2, 3, 4, 5]);
         w.commit();
+        drop(w);
 
         m.left_truncate(0, 2);
 
@@ -632,9 +637,12 @@ mod tests {
         let mut w = m.write(0);
         w.write(&[1, 2, 3, 4, 5]);
         w.commit();
+        drop(w);
+
         let mut w = m.write(0);
         w.write(&[6, 7, 8, 9]);
         w.commit();
+        drop(w);
 
         m.left_truncate(0, 2);
 
@@ -769,6 +777,12 @@ mod tests {
         assert_eq!(m.inner.borrow().alloc.is_allocated(3), false);
 
         w.commit();
+        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true); // old meta
+        assert_eq!(m.inner.borrow().alloc.is_allocated(1), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(2), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(3), false);
+
+        drop(w);
         assert_eq!(m.inner.borrow().alloc.is_allocated(0), true); // old meta
         assert_eq!(m.inner.borrow().alloc.is_allocated(1), true);
         assert_eq!(m.inner.borrow().alloc.is_allocated(2), true);
@@ -921,6 +935,7 @@ mod tests {
         let mut w = m.write(0);
         w.write(&data);
         w.commit();
+        drop(w);
         assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
         assert_eq!(m.inner.borrow().alloc.is_allocated(1), true);
         assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
