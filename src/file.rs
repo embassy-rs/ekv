@@ -15,17 +15,15 @@ pub enum SeekDirection {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(C)]
 pub struct Header {
-    file_id: FileID,          // 0xFFFF if meta
-    previous_page_id: PageID, // TODO add a skiplist for previous pages, instead of just storing the immediately previous one.
     seq: u32,
+    previous_page_id: PageID, // TODO add a skiplist for previous pages, instead of just storing the immediately previous one.
 }
 
 impl Header {
     #[cfg(test)]
     pub const DUMMY: Self = Self {
-        file_id: 1,
-        previous_page_id: 2,
         seq: 3,
+        previous_page_id: 2,
     };
 }
 
@@ -106,7 +104,7 @@ impl<F: Flash> Inner<F> {
         // Erase all meta pages.
         for page_id in 0..PAGE_COUNT {
             if let Ok(h) = self.read_header(page_id as _) {
-                if h.file_id == FileID::MAX {
+                if h.previous_page_id == PageID::MAX - 1 {
                     self.flash.erase(page_id);
                 }
             }
@@ -117,9 +115,8 @@ impl<F: Flash> Inner<F> {
         w.commit(
             &mut self.flash,
             Header {
-                file_id: FileID::MAX,
-                previous_page_id: 0,
                 seq: 1,
+                previous_page_id: PageID::MAX - 1,
             },
         );
     }
@@ -129,7 +126,7 @@ impl<F: Flash> Inner<F> {
         let mut meta_seq = 0;
         for page_id in 0..PAGE_COUNT {
             if let Ok(h) = self.read_header(page_id as _) {
-                if h.file_id == FileID::MAX && h.seq > meta_seq {
+                if h.previous_page_id == PageID::MAX - 1 && h.seq > meta_seq {
                     meta_page_id = Some(page_id as PageID);
                     meta_seq = h.seq;
                 }
@@ -161,7 +158,6 @@ impl<F: Flash> Inner<F> {
                 PageID::MAX => (None, 0),
                 page_id => {
                     let (h, mut r) = self.read_page(page_id).unwrap();
-                    assert_eq!(h.file_id, file_id);
                     let page_len = r.skip(PAGE_SIZE);
                     let last_seq = h.seq.checked_add(page_len.try_into().unwrap()).unwrap();
                     (Some(PagePointer { page_id, header: h }), last_seq)
@@ -196,9 +192,8 @@ impl<F: Flash> Inner<F> {
         w.commit(
             &mut self.flash,
             Header {
-                file_id: FileID::MAX,
-                previous_page_id: 0,
                 seq: self.meta_seq,
+                previous_page_id: PageID::MAX - 1,
             },
         );
 
@@ -262,7 +257,6 @@ impl PagePointer {
             None
         } else {
             let h2 = m.read_header(p2).unwrap();
-            assert_eq!(h2.file_id, self.header.file_id);
             assert!(h2.seq < self.header.seq);
             Some(PagePointer {
                 page_id: p2,
@@ -417,7 +411,6 @@ impl<'a, F: Flash> FileWriter<'a, F> {
         let page_size = w.offset().try_into().unwrap();
         let page_id = w.page_id();
         let header = Header {
-            file_id: self.file_id.try_into().unwrap(),
             previous_page_id: self.last_page.map(|p| p.page_id).unwrap_or(PageID::MAX),
             seq: self.seq,
         };
