@@ -243,24 +243,16 @@ impl<F: Flash> Inner<F> {
         }
     }
 
-    fn free_all_prev(&mut self, page_id: PageID) {
-        let p = PagePointer {
-            page_id,
-            header: self.read_header(page_id).unwrap(),
-        };
-        self.free_all_prev_pp(Some(p));
-    }
-
-    fn free_all_prev_pp(&mut self, mut p: Option<PagePointer>) {
-        while let Some(pp) = p {
+    fn free_between(&mut self, mut from: Option<PagePointer>, to: Option<PagePointer>) {
+        while let Some(pp) = from {
+            if let Some(to) = to {
+                if pp.page_id == to.page_id {
+                    break;
+                }
+            }
             self.alloc.free(pp.page_id);
-            p = pp.prev(self);
+            from = pp.prev(self);
         }
-    }
-
-    fn free_all_file(&mut self, file_id: FileID) {
-        self.free_all_prev_pp(self.files[file_id as usize].last_page);
-        self.files[file_id as usize].last_page = None;
     }
 
     fn read_page(&mut self, page_id: PageID) -> Result<(Header, PageReader<F>), ReadError> {
@@ -420,7 +412,8 @@ impl<'a, F: Flash> Drop for FileWriter<'a, F> {
             m.alloc.free(page_id);
 
             // Free previous pages, if any
-            m.free_all_prev_pp(self.last_page);
+            let f = &m.files[self.file_id as usize];
+            m.free_between(self.last_page, f.last_page);
         };
     }
 }
@@ -690,6 +683,38 @@ mod tests {
     }
 
     #[test]
+    fn test_append_no_commit() {
+        let mut f = MemFlash::new();
+        FileManager::format(&mut f);
+        let m = FileManager::new(&mut f);
+
+        let mut w = m.write(0);
+        w.write(&[1, 2, 3, 4, 5]);
+        w.commit();
+
+        let mut w = m.write(0);
+        w.write(&[6, 7, 8, 9]);
+        drop(w);
+
+        let mut r = m.read(0);
+        let mut buf = [0; 5];
+        r.read(&mut buf).unwrap();
+        assert_eq!(buf, [1, 2, 3, 4, 5]);
+        let mut buf = [0; 1];
+        let res = r.read(&mut buf);
+        assert!(matches!(res, Err(ReadError::Eof)));
+
+        let mut w = m.write(0);
+        w.write(&[10, 11]);
+        w.commit();
+
+        let mut r = m.read(0);
+        let mut buf = [0; 7];
+        r.read(&mut buf).unwrap();
+        assert_eq!(buf, [1, 2, 3, 4, 5, 10, 11]);
+    }
+
+    #[test]
     fn test_read_unwritten() {
         let mut f = MemFlash::new();
         FileManager::format(&mut f);
@@ -881,6 +906,44 @@ mod tests {
         assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
         assert_eq!(m.inner.borrow().alloc.is_allocated(3), false);
         assert_eq!(m.inner.borrow().alloc.is_allocated(4), true);
+    }
+
+    #[test]
+    fn test_append_alloc_not_commit() {
+        let mut f = MemFlash::new();
+        FileManager::format(&mut f);
+        let m = FileManager::new(&mut f);
+
+        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
+
+        let data = dummy_data(24);
+        let mut w = m.write(0);
+        w.write(&data);
+        w.commit();
+        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(1), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
+
+        let mut w = m.write(0);
+        w.write(&data);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(1), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(2), true);
+
+        drop(w);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(1), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
+
+        m.commit();
+
+        // Remount
+        let m = FileManager::new(&mut f);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(0), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(1), true);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
+        assert_eq!(m.inner.borrow().alloc.is_allocated(3), true); // new meta
     }
 
     /*
