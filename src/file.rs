@@ -31,12 +31,14 @@ impl Header {
 #[repr(C)]
 pub struct FileMeta {
     file_id: FileID,
-    page_id: PageID,
+    last_page_id: PageID,
+    first_seq: u32,
 }
 impl_bytes!(FileMeta);
 
 struct FileState {
     last_page: Option<PagePointer>,
+    first_seq: u32,
     last_seq: u32,
 }
 
@@ -80,6 +82,14 @@ impl<F: Flash> FileManager<F> {
     pub fn write(&self, file_id: FileID) -> FileWriter<'_, F> {
         FileWriter::new(self, file_id)
     }
+
+    pub fn left_truncate(&self, file_id: FileID, seq: u32) {
+        let m = &mut *self.inner.borrow_mut();
+        let mut f = &mut m.files[file_id as usize];
+        assert!(seq >= f.first_seq);
+        assert!(seq <= f.last_seq);
+        f.first_seq = seq;
+    }
 }
 
 impl<F: Flash> Inner<F> {
@@ -88,6 +98,7 @@ impl<F: Flash> Inner<F> {
         // use dummy values here.
         const DUMMY_FILE: FileState = FileState {
             last_page: None,
+            first_seq: 0,
             last_seq: 0,
         };
         Self {
@@ -138,8 +149,17 @@ impl<F: Flash> Inner<F> {
         self.meta_seq = meta_seq;
         self.alloc.mark_allocated(meta_page_id);
 
+        #[derive(Clone, Copy)]
+        struct FileInfo {
+            last_page_id: PageID,
+            first_seq: u32,
+        }
+
         let (_, mut r) = self.read_page(meta_page_id).unwrap();
-        let mut files = [PageID::MAX; FILE_COUNT];
+        let mut files = [FileInfo {
+            last_page_id: PageID::MAX,
+            first_seq: 0,
+        }; FILE_COUNT];
         loop {
             let mut meta = [0; FileMeta::SIZE];
             let n = r.read(&mut self.flash, &mut meta);
@@ -149,22 +169,33 @@ impl<F: Flash> Inner<F> {
             assert_eq!(n, FileMeta::SIZE);
             let meta = FileMeta::from_bytes(meta);
             assert!(meta.file_id < FILE_COUNT as _);
-            assert!(meta.page_id < PAGE_COUNT as _ || meta.page_id == PageID::MAX);
-            files[meta.file_id as usize] = meta.page_id;
+            assert!(meta.last_page_id < PAGE_COUNT as _ || meta.last_page_id == PageID::MAX);
+            files[meta.file_id as usize] = FileInfo {
+                last_page_id: meta.last_page_id,
+                first_seq: meta.first_seq,
+            }
         }
 
         for file_id in 0..FILE_COUNT as FileID {
-            let (mut p, last_seq) = match files[file_id as usize] {
-                PageID::MAX => (None, 0),
-                page_id => {
-                    let (h, mut r) = self.read_page(page_id).unwrap();
-                    let page_len = r.skip(PAGE_SIZE);
-                    let last_seq = h.seq.checked_add(page_len.try_into().unwrap()).unwrap();
-                    (Some(PagePointer { page_id, header: h }), last_seq)
-                }
-            };
+            let fi = files[file_id as usize];
+            if fi.last_page_id == PageID::MAX {
+                continue;
+            }
 
-            self.files[file_id as usize] = FileState { last_page: p, last_seq };
+            let (h, mut r) = self.read_page(fi.last_page_id).unwrap();
+            let page_len = r.skip(PAGE_SIZE);
+            let last_seq = h.seq.checked_add(page_len.try_into().unwrap()).unwrap();
+
+            let mut p = Some(PagePointer {
+                page_id: fi.last_page_id,
+                header: h,
+            });
+
+            self.files[file_id as usize] = FileState {
+                last_page: p,
+                first_seq: fi.first_seq,
+                last_seq,
+            };
 
             while let Some(pp) = p {
                 self.alloc.mark_allocated(pp.page_id);
@@ -181,7 +212,8 @@ impl<F: Flash> Inner<F> {
             if let Some(last) = f.last_page {
                 let meta = FileMeta {
                     file_id,
-                    page_id: last.page_id,
+                    first_seq: f.first_seq,
+                    last_page_id: last.page_id,
                 };
                 let n = w.write(&mut self.flash, &meta.to_bytes());
                 assert_eq!(n, FileMeta::SIZE);
@@ -202,8 +234,9 @@ impl<F: Flash> Inner<F> {
     }
 
     fn get_file_page(&mut self, file_id: FileID, seq: u32) -> Option<PagePointer> {
-        let last = self.files[file_id as usize].last_page?;
-        if seq > last.header.seq {
+        let f = &self.files[file_id as usize];
+        let last = f.last_page?;
+        if seq < f.first_seq || seq >= f.last_seq {
             None
         } else {
             last.prev_seq(self, seq)
@@ -266,8 +299,6 @@ impl PagePointer {
     }
 
     fn prev_seq(self, m: &mut Inner<impl Flash>, seq: u32) -> Option<PagePointer> {
-        assert!(seq <= self.header.seq as _);
-
         let mut p = self;
         while p.header.seq > seq {
             p = p.prev(m)?;
@@ -313,15 +344,16 @@ impl<'a, F: Flash> FileReader<'a, F> {
 
     fn next_page(&mut self, m: &mut Inner<F>) {
         let seq = match &self.state {
-            ReaderState::Created => 0,
+            ReaderState::Created => m.files[self.file_id as usize].first_seq,
             ReaderState::Reading(s) => s.seq,
             ReaderState::Finished => unreachable!(),
         };
         self.state = match m.get_file_page(self.file_id, seq) {
-            Some(pp) => ReaderState::Reading(ReaderStateReading {
-                seq,
-                reader: m.read_page(pp.page_id).unwrap().1,
-            }),
+            Some(pp) => {
+                let (h, mut r) = m.read_page(pp.page_id).unwrap();
+                r.seek((seq - h.seq) as usize);
+                ReaderState::Reading(ReaderStateReading { seq, reader: r })
+            }
             None => ReaderState::Finished,
         };
     }
@@ -452,10 +484,9 @@ impl<'a, F: Flash> FileWriter<'a, F> {
         let m = &mut *self.m.inner.borrow_mut();
         if let Some(w) = mem::replace(&mut self.writer, None) {
             self.flush_header(m, w);
-            m.files[self.file_id as usize] = FileState {
-                last_page: self.last_page,
-                last_seq: self.seq,
-            }
+            let f = &mut m.files[self.file_id as usize];
+            f.last_page = self.last_page;
+            f.last_seq = self.seq;
         }
     }
 
@@ -557,6 +588,105 @@ mod tests {
         let mut r = m.read(0);
         r.read(&mut buf).unwrap();
         assert_eq!(buf, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    }
+
+    #[test]
+    fn test_truncate() {
+        let mut f = MemFlash::new();
+        FileManager::format(&mut f);
+        let m = FileManager::new(&mut f);
+
+        let mut w = m.write(0);
+        w.write(&[1, 2, 3, 4, 5]);
+        w.commit();
+
+        m.left_truncate(0, 2);
+
+        let mut r = m.read(0);
+        let mut buf = [0; 3];
+        r.read(&mut buf).unwrap();
+        assert_eq!(buf, [3, 4, 5]);
+
+        m.left_truncate(0, 3);
+
+        let mut r = m.read(0);
+        let mut buf = [0; 2];
+        r.read(&mut buf).unwrap();
+        assert_eq!(buf, [4, 5]);
+
+        m.commit();
+
+        let mut r = m.read(0);
+        let mut buf = [0; 2];
+        r.read(&mut buf).unwrap();
+        assert_eq!(buf, [4, 5]);
+
+        // Remount
+        let m = FileManager::new(&mut f);
+
+        let mut r = m.read(0);
+        let mut buf = [0; 2];
+        r.read(&mut buf).unwrap();
+        assert_eq!(buf, [4, 5]);
+    }
+
+    #[test]
+    fn test_append_truncate() {
+        let mut f = MemFlash::new();
+        FileManager::format(&mut f);
+        let m = FileManager::new(&mut f);
+
+        let mut w = m.write(0);
+        w.write(&[1, 2, 3, 4, 5]);
+        w.commit();
+        let mut w = m.write(0);
+        w.write(&[6, 7, 8, 9]);
+        w.commit();
+
+        m.left_truncate(0, 2);
+
+        let mut r = m.read(0);
+        let mut buf = [0; 7];
+        r.read(&mut buf).unwrap();
+        assert_eq!(buf, [3, 4, 5, 6, 7, 8, 9]);
+
+        m.left_truncate(0, 3);
+
+        let mut r = m.read(0);
+        let mut buf = [0; 6];
+        r.read(&mut buf).unwrap();
+        assert_eq!(buf, [4, 5, 6, 7, 8, 9]);
+
+        m.left_truncate(0, 8);
+
+        let mut r = m.read(0);
+        let mut buf = [0; 1];
+        r.read(&mut buf).unwrap();
+        assert_eq!(buf, [9]);
+
+        m.commit();
+
+        let mut r = m.read(0);
+        let mut buf = [0; 1];
+        r.read(&mut buf).unwrap();
+        assert_eq!(buf, [9]);
+
+        // Remount
+        let m = FileManager::new(&mut f);
+
+        let mut r = m.read(0);
+        let mut buf = [0; 1];
+        r.read(&mut buf).unwrap();
+        assert_eq!(buf, [9]);
+
+        let mut w = m.write(0);
+        w.write(&[10, 11, 12]);
+        w.commit();
+
+        let mut r = m.read(0);
+        let mut buf = [0; 4];
+        r.read(&mut buf).unwrap();
+        assert_eq!(buf, [9, 10, 11, 12]);
     }
 
     #[test]
