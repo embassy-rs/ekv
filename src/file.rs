@@ -38,7 +38,8 @@ pub struct FileMeta {
 impl_bytes!(FileMeta);
 
 struct FileState {
-    last: Option<PagePointer>,
+    last_page: Option<PagePointer>,
+    last_seq: u32,
 }
 
 pub struct FileManager<F: Flash> {
@@ -79,9 +80,6 @@ impl<F: Flash> FileManager<F> {
     }
 
     pub fn write(&self, file_id: FileID) -> FileWriter<'_, F> {
-        let m = &mut *self.inner.borrow_mut();
-        m.free_all_file(file_id);
-
         FileWriter::new(self, file_id)
     }
 }
@@ -90,7 +88,10 @@ impl<F: Flash> Inner<F> {
     fn new(flash: F) -> Self {
         // TODO initialize self in mount() to avoid having to
         // use dummy values here.
-        const DUMMY_FILE: FileState = FileState { last: None };
+        const DUMMY_FILE: FileState = FileState {
+            last_page: None,
+            last_seq: 0,
+        };
         Self {
             flash,
             meta_page_id: 0,
@@ -156,16 +157,18 @@ impl<F: Flash> Inner<F> {
         }
 
         for file_id in 0..FILE_COUNT as FileID {
-            let mut p = match files[file_id as usize] {
-                PageID::MAX => None,
+            let (mut p, last_seq) = match files[file_id as usize] {
+                PageID::MAX => (None, 0),
                 page_id => {
-                    let h = self.read_header(page_id).unwrap();
+                    let (h, mut r) = self.read_page(page_id).unwrap();
                     assert_eq!(h.file_id, file_id);
-                    Some(PagePointer { page_id, header: h })
+                    let page_len = r.skip(PAGE_SIZE);
+                    let last_seq = h.seq.checked_add(page_len.try_into().unwrap()).unwrap();
+                    (Some(PagePointer { page_id, header: h }), last_seq)
                 }
             };
 
-            self.files[file_id as usize] = FileState { last: p };
+            self.files[file_id as usize] = FileState { last_page: p, last_seq };
 
             while let Some(pp) = p {
                 self.alloc.mark_allocated(pp.page_id);
@@ -179,7 +182,7 @@ impl<F: Flash> Inner<F> {
         let mut w = self.write_page(page_id);
         for file_id in 0..FILE_COUNT as FileID {
             let f = &self.files[file_id as usize];
-            if let Some(last) = f.last {
+            if let Some(last) = f.last_page {
                 let meta = FileMeta {
                     file_id,
                     page_id: last.page_id,
@@ -204,7 +207,7 @@ impl<F: Flash> Inner<F> {
     }
 
     fn get_file_page(&mut self, file_id: FileID, seq: u32) -> Option<PagePointer> {
-        let last = self.files[file_id as usize].last?;
+        let last = self.files[file_id as usize].last_page?;
         if seq > last.header.seq {
             None
         } else {
@@ -228,8 +231,8 @@ impl<F: Flash> Inner<F> {
     }
 
     fn free_all_file(&mut self, file_id: FileID) {
-        self.free_all_prev_pp(self.files[file_id as usize].last);
-        self.files[file_id as usize].last = None;
+        self.free_all_prev_pp(self.files[file_id as usize].last_page);
+        self.files[file_id as usize].last_page = None;
     }
 
     fn read_page(&mut self, page_id: PageID) -> Result<(Header, PageReader<F>), ReadError> {
@@ -377,89 +380,72 @@ impl<'a, F: Flash> FileReader<'a, F> {
 pub struct FileWriter<'a, F: Flash> {
     m: &'a FileManager<F>,
     file_id: FileID,
-
-    state: WriterState<F>,
-}
-
-enum WriterState<F: Flash> {
-    Created,
-    Writing(WriterStateWriting<F>),
-}
-
-struct WriterStateWriting<F: Flash> {
+    last_page: Option<PagePointer>,
     seq: u32,
-    previous_page_id: Option<PageID>,
-    writer: PageWriter<F>,
+    writer: Option<PageWriter<F>>,
 }
 
 impl<'a, F: Flash> Drop for FileWriter<'a, F> {
     fn drop(&mut self) {
         let m = &mut *self.m.inner.borrow_mut();
-        if let WriterState::Writing(s) = &self.state {
+        if let Some(w) = &self.writer {
             // Free the page we're writing now (not yet committed)
-            let page_id = s.writer.page_id();
+            let page_id = w.page_id();
             m.alloc.free(page_id);
 
             // Free previous pages, if any
-            if let Some(pp) = s.previous_page_id {
-                m.free_all_prev(pp);
-            }
+            m.free_all_prev_pp(self.last_page);
         };
     }
 }
 
 impl<'a, F: Flash> FileWriter<'a, F> {
     fn new(m: &'a FileManager<F>, file_id: FileID) -> Self {
+        let mm = &mut *m.inner.borrow_mut();
+        let f = &mm.files[file_id as usize];
+
         Self {
             m,
             file_id,
-            state: WriterState::Created,
+            last_page: f.last_page,
+            seq: f.last_seq,
+            writer: None,
         }
     }
 
-    fn flush_header(&mut self, m: &mut Inner<F>, s: WriterStateWriting<F>) -> Header {
+    fn flush_header(&mut self, m: &mut Inner<F>, w: PageWriter<F>) {
+        let page_size = w.offset().try_into().unwrap();
+        let page_id = w.page_id();
         let header = Header {
             file_id: self.file_id.try_into().unwrap(),
-            previous_page_id: s.previous_page_id.unwrap_or(PageID::MAX),
-            seq: s.seq,
+            previous_page_id: self.last_page.map(|p| p.page_id).unwrap_or(PageID::MAX),
+            seq: self.seq,
         };
-        s.writer.commit(&mut m.flash, header);
-        header
+        w.commit(&mut m.flash, header);
+
+        self.seq = self.seq.checked_add(page_size).unwrap();
+        self.last_page = Some(PagePointer { page_id, header });
     }
 
     fn next_page(&mut self, m: &mut Inner<F>) {
-        let (seq, previous_page_id) = match mem::replace(&mut self.state, WriterState::Created) {
-            WriterState::Created => (0, None),
-            WriterState::Writing(s) => {
-                let page_id = s.writer.page_id();
-                let page_size = s.writer.offset().try_into().unwrap();
-                let seq = s.seq.checked_add(page_size).unwrap();
-
-                // Flush header for the page we're done writing.
-                self.flush_header(m, s);
-
-                (seq, Some(page_id))
-            }
-        };
+        if let Some(w) = mem::replace(&mut self.writer, None) {
+            self.flush_header(m, w);
+        }
 
         let page_id = m.alloc.allocate();
-        self.state = WriterState::Writing(WriterStateWriting {
-            seq,
-            previous_page_id,
-            writer: m.write_page(page_id),
-        });
+        self.writer = Some(m.write_page(page_id));
     }
 
     pub fn write(&mut self, mut data: &[u8]) {
         let m = &mut *self.m.inner.borrow_mut();
         while !data.is_empty() {
-            match &mut self.state {
-                WriterState::Created => {
+            match &mut self.writer {
+                None => {
                     self.next_page(m);
                     continue;
                 }
-                WriterState::Writing(s) => {
-                    let n = s.writer.write(&mut m.flash, data);
+                Some(w) => {
+                    let n = w.write(&mut m.flash, data);
                     data = &data[n..];
                     if n == 0 {
                         self.next_page(m);
@@ -471,14 +457,13 @@ impl<'a, F: Flash> FileWriter<'a, F> {
 
     pub fn commit(mut self) {
         let m = &mut *self.m.inner.borrow_mut();
-        match mem::replace(&mut self.state, WriterState::Created) {
-            WriterState::Created => {}
-            WriterState::Writing(s) => {
-                let page_id = s.writer.page_id();
-                let header = self.flush_header(m, s);
-                m.files[self.file_id as usize].last = Some(PagePointer { page_id, header });
+        if let Some(w) = mem::replace(&mut self.writer, None) {
+            self.flush_header(m, w);
+            m.files[self.file_id as usize] = FileState {
+                last_page: self.last_page,
+                last_seq: self.seq,
             }
-        };
+        }
     }
 
     pub fn record_end(&mut self) {
@@ -546,6 +531,39 @@ mod tests {
         let mut buf = vec![0; data.len()];
         r.read(&mut buf).unwrap();
         assert_eq!(data, buf);
+    }
+
+    #[test]
+    fn test_append() {
+        let mut f = MemFlash::new();
+        FileManager::format(&mut f);
+        let m = FileManager::new(&mut f);
+
+        let mut w = m.write(0);
+        w.write(&[1, 2, 3, 4, 5]);
+        w.commit();
+
+        let mut w = m.write(0);
+        w.write(&[6, 7, 8, 9]);
+        w.commit();
+
+        let mut r = m.read(0);
+        let mut buf = vec![0; 9];
+        r.read(&mut buf).unwrap();
+        assert_eq!(buf, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+
+        m.commit();
+
+        let mut r = m.read(0);
+        r.read(&mut buf).unwrap();
+        assert_eq!(buf, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+
+        // Remount
+        let m = FileManager::new(&mut f);
+
+        let mut r = m.read(0);
+        r.read(&mut buf).unwrap();
+        assert_eq!(buf, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
     }
 
     #[test]
@@ -742,6 +760,7 @@ mod tests {
         assert_eq!(m.inner.borrow().alloc.is_allocated(4), true);
     }
 
+    /*
     #[test]
     fn test_overwrite() {
         let mut f = MemFlash::new();
@@ -752,11 +771,6 @@ mod tests {
             let mut w = m.write(0);
             w.write(&i.to_le_bytes());
             w.commit();
-
-            let mut r = m.read(0);
-            let mut buf = [0; 4];
-            r.read(&mut buf).unwrap();
-            assert_eq!(buf, i.to_le_bytes());
         }
     }
 
@@ -805,6 +819,7 @@ mod tests {
         r.read(&mut buf).unwrap();
         assert_eq!(buf, 2999u32.to_le_bytes());
     }
+     */
 
     fn dummy_data(len: usize) -> Vec<u8> {
         let mut res = vec![0; len];
