@@ -83,6 +83,22 @@ impl<F: Flash> FileManager<F> {
         FileWriter::new(self, file_id)
     }
 
+    pub fn delete(&self, file_id: FileID) {
+        let m = &mut *self.inner.borrow_mut();
+        m.free_between(m.files[file_id as usize].last_page, None);
+        m.files[file_id as usize] = FileState {
+            first_seq: 0,
+            last_seq: 0,
+            last_page: None,
+        };
+    }
+
+    pub fn rename(&self, from: FileID, to: FileID) {
+        self.delete(to);
+        let m = &mut *self.inner.borrow_mut();
+        m.files.swap(from as usize, to as usize);
+    }
+
     pub fn left_truncate(&self, file_id: FileID, seq: u32) {
         let m = &mut *self.inner.borrow_mut();
         let mut f = &mut m.files[file_id as usize];

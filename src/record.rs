@@ -1,4 +1,5 @@
-use std::cell::Cell;
+use std::borrow::BorrowMut;
+use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 
 use heapless::Vec;
@@ -12,8 +13,11 @@ pub const MAX_KEY_SIZE: usize = 64;
 
 pub struct Database<F: Flash> {
     files: FileManager<F>,
-    file_start: Cell<FileID>,
-    file_end: Cell<FileID>,
+    state: RefCell<State>,
+}
+
+struct State {
+    levels: [usize; LEVEL_COUNT],
 }
 
 impl<F: Flash> Database<F> {
@@ -24,8 +28,9 @@ impl<F: Flash> Database<F> {
     pub fn new(flash: F) -> Self {
         Self {
             files: FileManager::new(flash),
-            file_start: Cell::new(0),
-            file_end: Cell::new(0),
+            state: RefCell::new(State {
+                levels: [0; LEVEL_COUNT],
+            }),
         }
     }
 
@@ -34,9 +39,9 @@ impl<F: Flash> Database<F> {
     }
 
     pub fn write_transaction(&self) -> WriteTransaction<'_, F> {
-        let file_id = self.file_end.get();
-        self.file_end.set(file_id + 1);
-
+        let s = &mut *self.state.borrow_mut();
+        let file_id = self.get_file(s, LEVEL_COUNT - 1);
+        println!("writing {}", file_id);
         let w = self.files.write(file_id);
         WriteTransaction {
             w,
@@ -44,16 +49,35 @@ impl<F: Flash> Database<F> {
         }
     }
 
-    pub fn compact(&self) {
-        let start = self.file_start.get();
-        let end = self.file_end.get();
-        assert!(start + 2 == end);
-        self.file_start.set(end);
-        self.file_end.set(end + 1);
+    fn file_id(level: usize, index: usize) -> FileID {
+        (1 + level * BRANCHING_FACTOR + index) as _
+    }
 
-        let r1 = &mut self.files.read(start);
-        let r2 = &mut self.files.read(start + 1);
-        let mut ww = self.files.write(start + 2);
+    fn get_file(&self, s: &mut State, level: usize) -> FileID {
+        assert!(s.levels[level] <= BRANCHING_FACTOR);
+
+        if s.levels[level] == BRANCHING_FACTOR {
+            self.compact(s, level);
+            assert!(s.levels[level] < BRANCHING_FACTOR);
+        }
+
+        let res = Self::file_id(level, s.levels[level]);
+        s.levels[level] += 1;
+        res
+    }
+
+    fn compact(&self, s: &mut State, level: usize) {
+        let fw = match level {
+            0 => 0,
+            _ => self.get_file(s, level - 1),
+        };
+        let f1 = Self::file_id(level, 0);
+        let f2 = Self::file_id(level, 1);
+
+        println!("compacting {}, {} -> {}", f1, f2, fw);
+        let r1 = &mut self.files.read(f1);
+        let r2 = &mut self.files.read(f2);
+        let mut ww = self.files.write(fw);
         let w = &mut ww;
 
         fn read_key_or_empty(r: &mut FileReader<impl Flash>, buf: &mut Vec<u8, MAX_KEY_SIZE>) {
@@ -95,6 +119,17 @@ impl<F: Flash> Database<F> {
         }
 
         ww.commit();
+        drop(ww);
+
+        self.files.delete(f1);
+        self.files.delete(f2);
+
+        if level == 0 {
+            self.files.rename(0, f1);
+            s.levels[level] = 1;
+        } else {
+            s.levels[level] = 0;
+        }
     }
 }
 
@@ -104,10 +139,8 @@ pub struct ReadTransaction<'a, F: Flash + 'a> {
 
 impl<'a, F: Flash + 'a> ReadTransaction<'a, F> {
     pub fn read(&mut self, key: &[u8], value: &mut [u8]) -> usize {
-        let start = self.db.file_start.get();
-        let end = self.db.file_end.get();
-        for file_id in (start..end).rev() {
-            let res = self.read_in_file(file_id, key, value);
+        for file_id in (0..FILE_COUNT).rev() {
+            let res = self.read_in_file(file_id as _, key, value);
             if res != 0 {
                 return res;
             }
@@ -183,7 +216,7 @@ impl<'a, F: Flash + 'a> WriteTransaction<'a, F> {
         write_record(&mut self.w, key, value)
     }
 
-    pub fn commit(self) {
+    pub fn commit(mut self) {
         self.w.commit()
     }
 }
@@ -320,31 +353,9 @@ mod tests {
         let n = rtx.read(b"baz", &mut buf);
         assert_eq!(&buf[..n], b"4242");
 
-        db.compact();
-
-        let mut rtx = db.read_transaction();
-        let n = rtx.read(b"foo", &mut buf);
-        assert_eq!(&buf[..n], b"5678");
-        let n = rtx.read(b"bar", &mut buf);
-        assert_eq!(&buf[..n], b"8765");
-        let n = rtx.read(b"baz", &mut buf);
-        assert_eq!(&buf[..n], b"4242");
-
         let mut wtx = db.write_transaction();
         wtx.write(b"lol", b"9999");
         wtx.commit();
-
-        let mut rtx = db.read_transaction();
-        let n = rtx.read(b"foo", &mut buf);
-        assert_eq!(&buf[..n], b"5678");
-        let n = rtx.read(b"bar", &mut buf);
-        assert_eq!(&buf[..n], b"8765");
-        let n = rtx.read(b"baz", &mut buf);
-        assert_eq!(&buf[..n], b"4242");
-        let n = rtx.read(b"lol", &mut buf);
-        assert_eq!(&buf[..n], b"9999");
-
-        db.compact();
 
         let mut rtx = db.read_transaction();
         let n = rtx.read(b"foo", &mut buf);
