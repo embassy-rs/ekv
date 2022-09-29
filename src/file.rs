@@ -1,5 +1,4 @@
 use core::mem;
-use std::cell::RefCell;
 
 use crate::alloc::Allocator;
 use crate::config::*;
@@ -43,10 +42,6 @@ struct FileState {
 }
 
 pub struct FileManager<F: Flash> {
-    inner: RefCell<Inner<F>>,
-}
-
-struct Inner<F: Flash> {
     flash: F,
     pages: PageManager<F>,
     files: [FileState; FILE_COUNT],
@@ -58,58 +53,46 @@ struct Inner<F: Flash> {
 
 impl<F: Flash> FileManager<F> {
     pub fn format(flash: F) {
-        let mut inner = Inner::new(flash);
-        inner.format();
+        let mut this = Self::new_dummy(flash);
+        this.do_format();
     }
 
     pub fn new(flash: F) -> Self {
-        let mut inner = Inner::new(flash);
-        inner.mount();
-
-        Self {
-            inner: RefCell::new(inner),
-        }
+        let mut this = Self::new_dummy(flash);
+        this.mount();
+        this
     }
 
-    pub fn commit(&self) {
-        self.inner.borrow_mut().commit();
-    }
-
-    pub fn read(&self, file_id: FileID) -> FileReader<'_, F> {
+    pub fn read(&mut self, file_id: FileID) -> FileReader<F> {
         FileReader::new(self, file_id)
     }
 
-    pub fn write(&self, file_id: FileID) -> FileWriter<'_, F> {
+    pub fn write(&mut self, file_id: FileID) -> FileWriter<F> {
         FileWriter::new(self, file_id)
     }
 
-    pub fn delete(&self, file_id: FileID) {
-        let m = &mut *self.inner.borrow_mut();
-        m.free_between(m.files[file_id as usize].last_page, None);
-        m.files[file_id as usize] = FileState {
+    pub fn delete(&mut self, file_id: FileID) {
+        self.free_between(self.files[file_id as usize].last_page, None);
+        self.files[file_id as usize] = FileState {
             first_seq: 0,
             last_seq: 0,
             last_page: None,
         };
     }
 
-    pub fn rename(&self, from: FileID, to: FileID) {
+    pub fn rename(&mut self, from: FileID, to: FileID) {
         self.delete(to);
-        let m = &mut *self.inner.borrow_mut();
-        m.files.swap(from as usize, to as usize);
+        self.files.swap(from as usize, to as usize);
     }
 
-    pub fn left_truncate(&self, file_id: FileID, seq: u32) {
-        let m = &mut *self.inner.borrow_mut();
-        let mut f = &mut m.files[file_id as usize];
+    pub fn left_truncate(&mut self, file_id: FileID, seq: u32) {
+        let mut f = &mut self.files[file_id as usize];
         assert!(seq >= f.first_seq);
         assert!(seq <= f.last_seq);
         f.first_seq = seq;
     }
-}
 
-impl<F: Flash> Inner<F> {
-    fn new(flash: F) -> Self {
+    fn new_dummy(flash: F) -> Self {
         // TODO initialize self in mount() to avoid having to
         // use dummy values here.
         const DUMMY_FILE: FileState = FileState {
@@ -127,7 +110,7 @@ impl<F: Flash> Inner<F> {
         }
     }
 
-    fn format(&mut self) {
+    fn do_format(&mut self) {
         // Erase all meta pages.
         for page_id in 0..PAGE_COUNT {
             if let Ok(h) = self.read_header(page_id as _) {
@@ -220,7 +203,7 @@ impl<F: Flash> Inner<F> {
         }
     }
 
-    fn commit(&mut self) {
+    pub fn commit(&mut self) {
         let page_id = self.alloc.allocate();
         let mut w = self.write_page(page_id);
         for file_id in 0..FILE_COUNT as FileID {
@@ -292,7 +275,7 @@ struct PagePointer {
 }
 
 impl PagePointer {
-    fn prev(self, m: &mut Inner<impl Flash>) -> Option<PagePointer> {
+    fn prev(self, m: &mut FileManager<impl Flash>) -> Option<PagePointer> {
         let p2 = self.header.previous_page_id;
         if p2 == PageID::MAX {
             None
@@ -306,7 +289,7 @@ impl PagePointer {
         }
     }
 
-    fn prev_seq(self, m: &mut Inner<impl Flash>, seq: u32) -> Option<PagePointer> {
+    fn prev_seq(self, m: &mut FileManager<impl Flash>, seq: u32) -> Option<PagePointer> {
         let mut p = self;
         while p.header.seq > seq {
             p = p.prev(m)?;
@@ -315,10 +298,8 @@ impl PagePointer {
     }
 }
 
-pub struct FileReader<'a, F: Flash> {
-    m: &'a FileManager<F>,
+pub struct FileReader<F: Flash> {
     file_id: FileID,
-
     state: ReaderState<F>,
 }
 
@@ -332,25 +313,24 @@ struct ReaderStateReading<F: Flash> {
     reader: PageReader<F>,
 }
 
-impl<'a, F: Flash> FileReader<'a, F> {
-    fn new(m: &'a FileManager<F>, file_id: FileID) -> Self {
+impl<F: Flash> FileReader<F> {
+    fn new(_m: &mut FileManager<F>, file_id: FileID) -> Self {
         Self {
-            m,
             file_id,
             state: ReaderState::Created,
         }
     }
 
-    pub fn binary_search_start(&mut self) {
+    pub fn binary_search_start(&mut self, _m: &mut FileManager<F>) {
         // TODO
     }
 
-    pub fn binary_search_seek(&mut self, _direction: SeekDirection) -> bool {
+    pub fn binary_search_seek(&mut self, _m: &mut FileManager<F>, _direction: SeekDirection) -> bool {
         // TODO
         false
     }
 
-    fn next_page(&mut self, m: &mut Inner<F>) {
+    fn next_page(&mut self, m: &mut FileManager<F>) {
         let seq = match &self.state {
             ReaderState::Created => m.files[self.file_id as usize].first_seq,
             ReaderState::Reading(s) => s.seq,
@@ -366,8 +346,7 @@ impl<'a, F: Flash> FileReader<'a, F> {
         };
     }
 
-    pub fn read(&mut self, mut data: &mut [u8]) -> Result<(), ReadError> {
-        let m = &mut *self.m.inner.borrow_mut();
+    pub fn read(&mut self, m: &mut FileManager<F>, mut data: &mut [u8]) -> Result<(), ReadError> {
         while !data.is_empty() {
             match &mut self.state {
                 ReaderState::Finished => return Err(ReadError::Eof),
@@ -388,8 +367,7 @@ impl<'a, F: Flash> FileReader<'a, F> {
         Ok(())
     }
 
-    pub fn skip(&mut self, mut len: usize) -> Result<(), ReadError> {
-        let m = &mut *self.m.inner.borrow_mut();
+    pub fn skip(&mut self, m: &mut FileManager<F>, mut len: usize) -> Result<(), ReadError> {
         while len != 0 {
             match &mut self.state {
                 ReaderState::Finished => return Err(ReadError::Eof),
@@ -411,36 +389,18 @@ impl<'a, F: Flash> FileReader<'a, F> {
     }
 }
 
-pub struct FileWriter<'a, F: Flash> {
-    m: &'a FileManager<F>,
+pub struct FileWriter<F: Flash> {
     file_id: FileID,
     last_page: Option<PagePointer>,
     seq: u32,
     writer: Option<PageWriter<F>>,
 }
 
-impl<'a, F: Flash> Drop for FileWriter<'a, F> {
-    fn drop(&mut self) {
-        let m = &mut *self.m.inner.borrow_mut();
-        if let Some(w) = &self.writer {
-            // Free the page we're writing now (not yet committed)
-            let page_id = w.page_id();
-            m.alloc.free(page_id);
-
-            // Free previous pages, if any
-            let f = &m.files[self.file_id as usize];
-            m.free_between(self.last_page, f.last_page);
-        };
-    }
-}
-
-impl<'a, F: Flash> FileWriter<'a, F> {
-    fn new(m: &'a FileManager<F>, file_id: FileID) -> Self {
-        let mm = &mut *m.inner.borrow_mut();
-        let f = &mm.files[file_id as usize];
+impl<F: Flash> FileWriter<F> {
+    fn new(m: &mut FileManager<F>, file_id: FileID) -> Self {
+        let f = &m.files[file_id as usize];
 
         Self {
-            m,
             file_id,
             last_page: f.last_page,
             seq: f.last_seq,
@@ -448,7 +408,7 @@ impl<'a, F: Flash> FileWriter<'a, F> {
         }
     }
 
-    fn flush_header(&mut self, m: &mut Inner<F>, w: PageWriter<F>) {
+    fn flush_header(&mut self, m: &mut FileManager<F>, w: PageWriter<F>) {
         let page_size = w.offset().try_into().unwrap();
         let page_id = w.page_id();
         let header = Header {
@@ -461,7 +421,7 @@ impl<'a, F: Flash> FileWriter<'a, F> {
         self.last_page = Some(PagePointer { page_id, header });
     }
 
-    fn next_page(&mut self, m: &mut Inner<F>) {
+    fn next_page(&mut self, m: &mut FileManager<F>) {
         if let Some(w) = mem::replace(&mut self.writer, None) {
             self.flush_header(m, w);
         }
@@ -470,8 +430,7 @@ impl<'a, F: Flash> FileWriter<'a, F> {
         self.writer = Some(m.write_page(page_id));
     }
 
-    pub fn write(&mut self, mut data: &[u8]) {
-        let m = &mut *self.m.inner.borrow_mut();
+    pub fn write(&mut self, m: &mut FileManager<F>, mut data: &[u8]) {
         while !data.is_empty() {
             match &mut self.writer {
                 None => {
@@ -489,14 +448,25 @@ impl<'a, F: Flash> FileWriter<'a, F> {
         }
     }
 
-    pub fn commit(&mut self) {
-        let m = &mut *self.m.inner.borrow_mut();
+    pub fn commit(&mut self, m: &mut FileManager<F>) {
         if let Some(w) = mem::replace(&mut self.writer, None) {
             self.flush_header(m, w);
             let f = &mut m.files[self.file_id as usize];
             f.last_page = self.last_page;
             f.last_seq = self.seq;
         }
+    }
+
+    pub fn discard(&mut self, m: &mut FileManager<F>) {
+        if let Some(w) = &self.writer {
+            // Free the page we're writing now (not yet committed)
+            let page_id = w.page_id();
+            m.alloc.free(page_id);
+
+            // Free previous pages, if any
+            let f = &m.files[self.file_id as usize];
+            m.free_between(self.last_page, f.last_page);
+        };
     }
 
     pub fn record_end(&mut self) {
@@ -514,28 +484,28 @@ mod tests {
     fn test_read_write() {
         let mut f = MemFlash::new();
         FileManager::format(&mut f);
-        let m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f);
 
         let data = dummy_data(24);
 
         let mut w = m.write(0);
-        w.write(&data);
-        w.commit();
-        drop(w);
+        w.write(&mut m, &data);
+        w.commit(&mut m);
+        w.discard(&mut m);
 
         let mut r = m.read(0);
         let mut buf = vec![0; data.len()];
-        r.read(&mut buf).unwrap();
+        r.read(&mut m, &mut buf).unwrap();
         assert_eq!(data, buf);
 
         m.commit();
 
         // Remount
-        let m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f);
 
         let mut r = m.read(0);
         let mut buf = vec![0; data.len()];
-        r.read(&mut buf).unwrap();
+        r.read(&mut m, &mut buf).unwrap();
         assert_eq!(data, buf);
     }
 
@@ -543,28 +513,28 @@ mod tests {
     fn test_read_write_long() {
         let mut f = MemFlash::new();
         FileManager::format(&mut f);
-        let m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f);
 
         let data = dummy_data(65201);
 
         let mut w = m.write(0);
-        w.write(&data);
-        w.commit();
-        drop(w);
+        w.write(&mut m, &data);
+        w.commit(&mut m);
+        w.discard(&mut m);
 
         let mut r = m.read(0);
         let mut buf = vec![0; data.len()];
-        r.read(&mut buf).unwrap();
+        r.read(&mut m, &mut buf).unwrap();
         assert_eq!(data, buf);
 
         m.commit();
 
         // Remount
-        let m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f);
 
         let mut r = m.read(0);
         let mut buf = vec![0; data.len()];
-        r.read(&mut buf).unwrap();
+        r.read(&mut m, &mut buf).unwrap();
         assert_eq!(data, buf);
     }
 
@@ -572,34 +542,34 @@ mod tests {
     fn test_append() {
         let mut f = MemFlash::new();
         FileManager::format(&mut f);
-        let m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f);
 
         let mut w = m.write(0);
-        w.write(&[1, 2, 3, 4, 5]);
-        w.commit();
-        drop(w);
+        w.write(&mut m, &[1, 2, 3, 4, 5]);
+        w.commit(&mut m);
+        w.discard(&mut m);
 
         let mut w = m.write(0);
-        w.write(&[6, 7, 8, 9]);
-        w.commit();
-        drop(w);
+        w.write(&mut m, &[6, 7, 8, 9]);
+        w.commit(&mut m);
+        w.discard(&mut m);
 
         let mut r = m.read(0);
         let mut buf = vec![0; 9];
-        r.read(&mut buf).unwrap();
+        r.read(&mut m, &mut buf).unwrap();
         assert_eq!(buf, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
 
         m.commit();
 
         let mut r = m.read(0);
-        r.read(&mut buf).unwrap();
+        r.read(&mut m, &mut buf).unwrap();
         assert_eq!(buf, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
 
         // Remount
-        let m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f);
 
         let mut r = m.read(0);
-        r.read(&mut buf).unwrap();
+        r.read(&mut m, &mut buf).unwrap();
         assert_eq!(buf, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
     }
 
@@ -607,40 +577,40 @@ mod tests {
     fn test_truncate() {
         let mut f = MemFlash::new();
         FileManager::format(&mut f);
-        let m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f);
 
         let mut w = m.write(0);
-        w.write(&[1, 2, 3, 4, 5]);
-        w.commit();
-        drop(w);
+        w.write(&mut m, &[1, 2, 3, 4, 5]);
+        w.commit(&mut m);
+        w.discard(&mut m);
 
         m.left_truncate(0, 2);
 
         let mut r = m.read(0);
         let mut buf = [0; 3];
-        r.read(&mut buf).unwrap();
+        r.read(&mut m, &mut buf).unwrap();
         assert_eq!(buf, [3, 4, 5]);
 
         m.left_truncate(0, 3);
 
         let mut r = m.read(0);
         let mut buf = [0; 2];
-        r.read(&mut buf).unwrap();
+        r.read(&mut m, &mut buf).unwrap();
         assert_eq!(buf, [4, 5]);
 
         m.commit();
 
         let mut r = m.read(0);
         let mut buf = [0; 2];
-        r.read(&mut buf).unwrap();
+        r.read(&mut m, &mut buf).unwrap();
         assert_eq!(buf, [4, 5]);
 
         // Remount
-        let m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f);
 
         let mut r = m.read(0);
         let mut buf = [0; 2];
-        r.read(&mut buf).unwrap();
+        r.read(&mut m, &mut buf).unwrap();
         assert_eq!(buf, [4, 5]);
     }
 
@@ -648,61 +618,61 @@ mod tests {
     fn test_append_truncate() {
         let mut f = MemFlash::new();
         FileManager::format(&mut f);
-        let m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f);
 
         let mut w = m.write(0);
-        w.write(&[1, 2, 3, 4, 5]);
-        w.commit();
-        drop(w);
+        w.write(&mut m, &[1, 2, 3, 4, 5]);
+        w.commit(&mut m);
+        w.discard(&mut m);
 
         let mut w = m.write(0);
-        w.write(&[6, 7, 8, 9]);
-        w.commit();
-        drop(w);
+        w.write(&mut m, &[6, 7, 8, 9]);
+        w.commit(&mut m);
+        w.discard(&mut m);
 
         m.left_truncate(0, 2);
 
         let mut r = m.read(0);
         let mut buf = [0; 7];
-        r.read(&mut buf).unwrap();
+        r.read(&mut m, &mut buf).unwrap();
         assert_eq!(buf, [3, 4, 5, 6, 7, 8, 9]);
 
         m.left_truncate(0, 3);
 
         let mut r = m.read(0);
         let mut buf = [0; 6];
-        r.read(&mut buf).unwrap();
+        r.read(&mut m, &mut buf).unwrap();
         assert_eq!(buf, [4, 5, 6, 7, 8, 9]);
 
         m.left_truncate(0, 8);
 
         let mut r = m.read(0);
         let mut buf = [0; 1];
-        r.read(&mut buf).unwrap();
+        r.read(&mut m, &mut buf).unwrap();
         assert_eq!(buf, [9]);
 
         m.commit();
 
         let mut r = m.read(0);
         let mut buf = [0; 1];
-        r.read(&mut buf).unwrap();
+        r.read(&mut m, &mut buf).unwrap();
         assert_eq!(buf, [9]);
 
         // Remount
-        let m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f);
 
         let mut r = m.read(0);
         let mut buf = [0; 1];
-        r.read(&mut buf).unwrap();
+        r.read(&mut m, &mut buf).unwrap();
         assert_eq!(buf, [9]);
 
         let mut w = m.write(0);
-        w.write(&[10, 11, 12]);
-        w.commit();
+        w.write(&mut m, &[10, 11, 12]);
+        w.commit(&mut m);
 
         let mut r = m.read(0);
         let mut buf = [0; 4];
-        r.read(&mut buf).unwrap();
+        r.read(&mut m, &mut buf).unwrap();
         assert_eq!(buf, [9, 10, 11, 12]);
     }
 
@@ -710,31 +680,31 @@ mod tests {
     fn test_append_no_commit() {
         let mut f = MemFlash::new();
         FileManager::format(&mut f);
-        let m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f);
 
         let mut w = m.write(0);
-        w.write(&[1, 2, 3, 4, 5]);
-        w.commit();
+        w.write(&mut m, &[1, 2, 3, 4, 5]);
+        w.commit(&mut m);
 
         let mut w = m.write(0);
-        w.write(&[6, 7, 8, 9]);
-        drop(w);
+        w.write(&mut m, &[6, 7, 8, 9]);
+        w.discard(&mut m);
 
         let mut r = m.read(0);
         let mut buf = [0; 5];
-        r.read(&mut buf).unwrap();
+        r.read(&mut m, &mut buf).unwrap();
         assert_eq!(buf, [1, 2, 3, 4, 5]);
         let mut buf = [0; 1];
-        let res = r.read(&mut buf);
+        let res = r.read(&mut m, &mut buf);
         assert!(matches!(res, Err(ReadError::Eof)));
 
         let mut w = m.write(0);
-        w.write(&[10, 11]);
-        w.commit();
+        w.write(&mut m, &[10, 11]);
+        w.commit(&mut m);
 
         let mut r = m.read(0);
         let mut buf = [0; 7];
-        r.read(&mut buf).unwrap();
+        r.read(&mut m, &mut buf).unwrap();
         assert_eq!(buf, [1, 2, 3, 4, 5, 10, 11]);
     }
 
@@ -742,11 +712,11 @@ mod tests {
     fn test_read_unwritten() {
         let mut f = MemFlash::new();
         FileManager::format(&mut f);
-        let m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f);
 
         let mut r = m.read(0);
         let mut buf = vec![0; 1024];
-        let res = r.read(&mut buf);
+        let res = r.read(&mut m, &mut buf);
         assert!(matches!(res, Err(ReadError::Eof)));
     }
 
@@ -754,17 +724,17 @@ mod tests {
     fn test_read_uncommitted() {
         let mut f = MemFlash::new();
         FileManager::format(&mut f);
-        let m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f);
 
         let data = dummy_data(65201);
 
         let mut w = m.write(0);
-        w.write(&data);
-        drop(w); // don't commit
+        w.write(&mut m, &data);
+        w.discard(&mut m); // don't commit
 
         let mut r = m.read(0);
         let mut buf = vec![0; 1024];
-        let res = r.read(&mut buf);
+        let res = r.read(&mut m, &mut buf);
         assert!(matches!(res, Err(ReadError::Eof)));
     }
 
@@ -772,271 +742,203 @@ mod tests {
     fn test_alloc_commit() {
         let mut f = MemFlash::new();
         FileManager::format(&mut f);
-        let m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f);
 
-        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
+        assert_eq!(m.alloc.is_allocated(1), false);
+        assert_eq!(m.alloc.is_allocated(2), false);
 
         let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE);
         let mut w = m.write(0);
 
-        w.write(&data);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true); // old meta
-        assert_eq!(m.inner.borrow().alloc.is_allocated(1), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(3), false);
+        w.write(&mut m, &data);
+        assert_eq!(m.alloc.is_allocated(0), true); // old meta
+        assert_eq!(m.alloc.is_allocated(1), true);
+        assert_eq!(m.alloc.is_allocated(2), false);
+        assert_eq!(m.alloc.is_allocated(3), false);
 
-        w.write(&data);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true); // old meta
-        assert_eq!(m.inner.borrow().alloc.is_allocated(1), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(2), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(3), false);
+        w.write(&mut m, &data);
+        assert_eq!(m.alloc.is_allocated(0), true); // old meta
+        assert_eq!(m.alloc.is_allocated(1), true);
+        assert_eq!(m.alloc.is_allocated(2), true);
+        assert_eq!(m.alloc.is_allocated(3), false);
 
-        w.commit();
-        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true); // old meta
-        assert_eq!(m.inner.borrow().alloc.is_allocated(1), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(2), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(3), false);
-
-        drop(w);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true); // old meta
-        assert_eq!(m.inner.borrow().alloc.is_allocated(1), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(2), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(3), false);
+        w.commit(&mut m);
+        assert_eq!(m.alloc.is_allocated(0), true); // old meta
+        assert_eq!(m.alloc.is_allocated(1), true);
+        assert_eq!(m.alloc.is_allocated(2), true);
+        assert_eq!(m.alloc.is_allocated(3), false);
 
         m.commit();
-        assert_eq!(m.inner.borrow().alloc.is_allocated(0), false); // old meta
-        assert_eq!(m.inner.borrow().alloc.is_allocated(1), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(2), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(3), true); // new meta
+        assert_eq!(m.alloc.is_allocated(0), false); // old meta
+        assert_eq!(m.alloc.is_allocated(1), true);
+        assert_eq!(m.alloc.is_allocated(2), true);
+        assert_eq!(m.alloc.is_allocated(3), true); // new meta
 
         // Remount
         let m = FileManager::new(&mut f);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(1), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(2), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(3), true); // new meta
+        assert_eq!(m.alloc.is_allocated(1), true);
+        assert_eq!(m.alloc.is_allocated(2), true);
+        assert_eq!(m.alloc.is_allocated(3), true); // new meta
     }
 
     #[test]
     fn test_alloc_not_commit_1page() {
         let mut f = MemFlash::new();
         FileManager::format(&mut f);
-        let m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f);
 
-        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
+        assert_eq!(m.alloc.is_allocated(0), true);
+        assert_eq!(m.alloc.is_allocated(1), false);
+        assert_eq!(m.alloc.is_allocated(2), false);
 
         let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE);
         let mut w = m.write(0);
 
-        w.write(&data);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(1), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
+        w.write(&mut m, &data);
+        assert_eq!(m.alloc.is_allocated(0), true);
+        assert_eq!(m.alloc.is_allocated(1), true);
+        assert_eq!(m.alloc.is_allocated(2), false);
 
-        drop(w);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
+        w.discard(&mut m);
+        assert_eq!(m.alloc.is_allocated(0), true);
+        assert_eq!(m.alloc.is_allocated(1), false);
+        assert_eq!(m.alloc.is_allocated(2), false);
 
         m.commit();
-        assert_eq!(m.inner.borrow().alloc.is_allocated(0), false);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(2), true); // new meta
+        assert_eq!(m.alloc.is_allocated(0), false);
+        assert_eq!(m.alloc.is_allocated(1), false);
+        assert_eq!(m.alloc.is_allocated(2), true); // new meta
 
         // Remount
         let m = FileManager::new(&mut f);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(0), false);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(2), true); // new meta
+        assert_eq!(m.alloc.is_allocated(0), false);
+        assert_eq!(m.alloc.is_allocated(1), false);
+        assert_eq!(m.alloc.is_allocated(2), true); // new meta
     }
 
     #[test]
     fn test_alloc_not_commit_2page() {
         let mut f = MemFlash::new();
         FileManager::format(&mut f);
-        let m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f);
 
-        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
+        assert_eq!(m.alloc.is_allocated(0), true);
+        assert_eq!(m.alloc.is_allocated(1), false);
 
         let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE);
         let mut w = m.write(0);
 
-        w.write(&data);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(1), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
+        w.write(&mut m, &data);
+        assert_eq!(m.alloc.is_allocated(0), true);
+        assert_eq!(m.alloc.is_allocated(1), true);
+        assert_eq!(m.alloc.is_allocated(2), false);
 
-        w.write(&data);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(1), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(2), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(3), false);
+        w.write(&mut m, &data);
+        assert_eq!(m.alloc.is_allocated(0), true);
+        assert_eq!(m.alloc.is_allocated(1), true);
+        assert_eq!(m.alloc.is_allocated(2), true);
+        assert_eq!(m.alloc.is_allocated(3), false);
 
-        drop(w);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(3), false);
+        w.discard(&mut m);
+        assert_eq!(m.alloc.is_allocated(0), true);
+        assert_eq!(m.alloc.is_allocated(1), false);
+        assert_eq!(m.alloc.is_allocated(2), false);
+        assert_eq!(m.alloc.is_allocated(3), false);
 
         m.commit();
-        assert_eq!(m.inner.borrow().alloc.is_allocated(0), false);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(3), true);
+        assert_eq!(m.alloc.is_allocated(0), false);
+        assert_eq!(m.alloc.is_allocated(1), false);
+        assert_eq!(m.alloc.is_allocated(2), false);
+        assert_eq!(m.alloc.is_allocated(3), true);
 
         // Remount
         let m = FileManager::new(&mut f);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(0), false);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(3), true);
+        assert_eq!(m.alloc.is_allocated(0), false);
+        assert_eq!(m.alloc.is_allocated(1), false);
+        assert_eq!(m.alloc.is_allocated(2), false);
+        assert_eq!(m.alloc.is_allocated(3), true);
     }
 
     #[test]
     fn test_alloc_not_commit_3page() {
         let mut f = MemFlash::new();
         FileManager::format(&mut f);
-        let m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f);
 
-        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(3), false);
+        assert_eq!(m.alloc.is_allocated(0), true);
+        assert_eq!(m.alloc.is_allocated(1), false);
+        assert_eq!(m.alloc.is_allocated(2), false);
+        assert_eq!(m.alloc.is_allocated(3), false);
 
         let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE * 3);
         let mut w = m.write(0);
-        w.write(&data);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(1), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(2), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(3), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(4), false);
+        w.write(&mut m, &data);
+        assert_eq!(m.alloc.is_allocated(0), true);
+        assert_eq!(m.alloc.is_allocated(1), true);
+        assert_eq!(m.alloc.is_allocated(2), true);
+        assert_eq!(m.alloc.is_allocated(3), true);
+        assert_eq!(m.alloc.is_allocated(4), false);
 
-        drop(w);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(3), false);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(4), false);
+        w.discard(&mut m);
+        assert_eq!(m.alloc.is_allocated(0), true);
+        assert_eq!(m.alloc.is_allocated(1), false);
+        assert_eq!(m.alloc.is_allocated(2), false);
+        assert_eq!(m.alloc.is_allocated(3), false);
+        assert_eq!(m.alloc.is_allocated(4), false);
 
         m.commit();
-        assert_eq!(m.inner.borrow().alloc.is_allocated(0), false);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(3), false);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(4), true);
+        assert_eq!(m.alloc.is_allocated(0), false);
+        assert_eq!(m.alloc.is_allocated(1), false);
+        assert_eq!(m.alloc.is_allocated(2), false);
+        assert_eq!(m.alloc.is_allocated(3), false);
+        assert_eq!(m.alloc.is_allocated(4), true);
 
         // Remount
         let m = FileManager::new(&mut f);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(0), false);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(3), false);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(4), true);
+        assert_eq!(m.alloc.is_allocated(0), false);
+        assert_eq!(m.alloc.is_allocated(1), false);
+        assert_eq!(m.alloc.is_allocated(2), false);
+        assert_eq!(m.alloc.is_allocated(3), false);
+        assert_eq!(m.alloc.is_allocated(4), true);
     }
 
     #[test]
     fn test_append_alloc_not_commit() {
         let mut f = MemFlash::new();
         FileManager::format(&mut f);
-        let m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f);
 
-        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(1), false);
+        assert_eq!(m.alloc.is_allocated(0), true);
+        assert_eq!(m.alloc.is_allocated(1), false);
 
         let data = dummy_data(24);
         let mut w = m.write(0);
-        w.write(&data);
-        w.commit();
-        drop(w);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(1), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
+        w.write(&mut m, &data);
+        w.commit(&mut m);
+        assert_eq!(m.alloc.is_allocated(0), true);
+        assert_eq!(m.alloc.is_allocated(1), true);
+        assert_eq!(m.alloc.is_allocated(2), false);
 
         let mut w = m.write(0);
-        w.write(&data);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(1), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(2), true);
+        w.write(&mut m, &data);
+        assert_eq!(m.alloc.is_allocated(0), true);
+        assert_eq!(m.alloc.is_allocated(1), true);
+        assert_eq!(m.alloc.is_allocated(2), true);
 
-        drop(w);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(0), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(1), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
+        w.discard(&mut m);
+        assert_eq!(m.alloc.is_allocated(0), true);
+        assert_eq!(m.alloc.is_allocated(1), true);
+        assert_eq!(m.alloc.is_allocated(2), false);
 
         m.commit();
 
         // Remount
         let m = FileManager::new(&mut f);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(0), false);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(1), true);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(2), false);
-        assert_eq!(m.inner.borrow().alloc.is_allocated(3), true); // new meta
+        assert_eq!(m.alloc.is_allocated(0), false);
+        assert_eq!(m.alloc.is_allocated(1), true);
+        assert_eq!(m.alloc.is_allocated(2), false);
+        assert_eq!(m.alloc.is_allocated(3), true); // new meta
     }
-
-    /*
-    #[test]
-    fn test_overwrite() {
-        let mut f = MemFlash::new();
-        FileManager::format(&mut f);
-        let m = FileManager::new(&mut f);
-
-        for i in 0..3000u32 {
-            let mut w = m.write(0);
-            w.write(&i.to_le_bytes());
-            w.commit();
-        }
-    }
-
-    #[test]
-    fn test_overwrite_remount() {
-        let mut f = MemFlash::new();
-        FileManager::format(&mut f);
-
-        for i in 0..3000u32 {
-            let m = FileManager::new(&mut f);
-            let mut w = m.write(0);
-            w.write(&i.to_le_bytes());
-            w.commit();
-            m.commit();
-
-            let m = FileManager::new(&mut f);
-            let mut r = m.read(0);
-            let mut buf = [0; 4];
-            r.read(&mut buf).unwrap();
-            assert_eq!(buf, i.to_le_bytes());
-        }
-
-        let m = FileManager::new(&mut f);
-        let mut r = m.read(0);
-        let mut buf = [0; 4];
-        r.read(&mut buf).unwrap();
-        assert_eq!(buf, 2999u32.to_le_bytes());
-    }
-
-    #[test]
-    fn test_overwrite_remount_2() {
-        let mut f = MemFlash::new();
-        FileManager::format(&mut f);
-
-        let m = FileManager::new(&mut f);
-        for i in 0..3000u32 {
-            let mut w = m.write(0);
-            w.write(&i.to_le_bytes());
-            w.commit();
-            m.commit();
-        }
-
-        let m = FileManager::new(&mut f);
-        let mut r = m.read(0);
-        let mut buf = [0; 4];
-        r.read(&mut buf).unwrap();
-        assert_eq!(buf, 2999u32.to_le_bytes());
-    }
-     */
 
     fn dummy_data(len: usize) -> Vec<u8> {
         let mut res = vec![0; len];
