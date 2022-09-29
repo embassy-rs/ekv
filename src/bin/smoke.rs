@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use ekv::flash::MemFlash;
 use ekv::Database;
@@ -9,6 +9,8 @@ const KEY_MIN_LEN: usize = 1;
 const KEY_MAX_LEN: usize = 10;
 const VAL_MIN_LEN: usize = 1;
 const VAL_MAX_LEN: usize = 100;
+const TX_MIN_COUNT: usize = 1;
+const TX_MAX_COUNT: usize = 100;
 
 fn rand(max: usize) -> usize {
     rand::thread_rng().gen_range(0..max)
@@ -46,18 +48,28 @@ fn main() {
     let mut buf = [0; VAL_MAX_LEN];
 
     for _ in 0..1000000 {
-        let key = &keys[rand(KEY_COUNT)];
-        let value = rand_data(rand_between(VAL_MIN_LEN, VAL_MAX_LEN));
+        let tx_count = rand_between(TX_MIN_COUNT, TX_MAX_COUNT);
+        let mut tx = BTreeMap::new();
+
+        for i in 0..tx_count {
+            let key = &keys[rand(KEY_COUNT)];
+            let value = rand_data(rand_between(VAL_MIN_LEN, VAL_MAX_LEN));
+            tx.insert(key, value);
+        }
 
         //println!("write {:?} = {:?}", key, value);
 
         // Write to DB
         let mut wtx = db.write_transaction();
-        wtx.write(key, &value);
+        for (key, value) in &tx {
+            wtx.write(key, value);
+        }
         wtx.commit();
 
         // Write to mirror
-        m.insert(key.clone(), value);
+        for (key, value) in &tx {
+            m.insert(key.clone(), value.clone());
+        }
 
         // Check everything
         for i in 0..KEY_COUNT {
