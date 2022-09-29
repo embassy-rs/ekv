@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::mem::MaybeUninit;
 
 use heapless::Vec;
 
@@ -59,18 +60,26 @@ impl<F: Flash> Database<F> {
     }
 
     fn compact(&mut self, level: usize) {
+        // Open file in higher level for writing.
         let fw = match level {
             0 => 0,
             _ => self.get_file(level - 1),
         };
-        let f1 = Self::file_id(level, 0);
-        let f2 = Self::file_id(level, 1);
+        let mut w = self.files.write(fw);
 
-        println!("compacting {}, {} -> {}", f1, f2, fw);
-        let r1 = &mut self.files.read(f1);
-        let r2 = &mut self.files.read(f2);
-        let mut ww = self.files.write(fw);
-        let w = &mut ww;
+        println!(
+            "compacting {}..{} -> {}",
+            Self::file_id(level, 0),
+            Self::file_id(level, BRANCHING_FACTOR - 1),
+            fw
+        );
+
+        // Open all files in level for reading.
+        let mut r: [MaybeUninit<FileReader<F>>; BRANCHING_FACTOR] = unsafe { MaybeUninit::uninit().assume_init() };
+        for i in 0..BRANCHING_FACTOR {
+            r[i].write(self.files.read(Self::file_id(level, i)));
+        }
+        let r = unsafe { &mut *(&mut r as *mut _ as *mut [FileReader<F>; BRANCHING_FACTOR]) };
 
         let m = &mut self.files;
 
@@ -81,44 +90,72 @@ impl<F: Flash> Database<F> {
             }
         }
 
-        let mut k1 = Vec::new();
-        let mut k2 = Vec::new();
-        read_key_or_empty(m, r1, &mut k1);
-        read_key_or_empty(m, r2, &mut k2);
+        const NEW_VEC: Vec<u8, MAX_KEY_SIZE> = Vec::new();
+        let mut k = [NEW_VEC; BRANCHING_FACTOR];
+
+        for i in 0..BRANCHING_FACTOR {
+            read_key_or_empty(m, &mut r[i], &mut k[i]);
+        }
 
         loop {
-            match (k1.is_empty(), k2.is_empty(), k1.cmp(&k2)) {
-                (true, true, _) => break,
-                (false, false, Ordering::Equal) => {
-                    // Advance both, keep 2nd value because it's newer.
-                    write_key(m, w, &k1);
-                    skip_value(m, r1);
-                    copy_value(m, r2, w);
-                    read_key_or_empty(m, r1, &mut k1);
-                    read_key_or_empty(m, r2, &mut k2);
+            fn highest_bit(x: u32) -> Option<usize> {
+                match x {
+                    0 => None,
+                    _ => Some(31 - x.leading_zeros() as usize),
                 }
-                (false, true, _) | (false, false, Ordering::Less) => {
-                    // Advance r1
-                    write_key(m, w, &k1);
-                    copy_value(m, r1, w);
-                    read_key_or_empty(m, r1, &mut k1);
+            }
+
+            let mut bits: u32 = 0;
+            for i in 0..BRANCHING_FACTOR {
+                // Ignore files that have already reached the end.
+                if k[i].is_empty() {
+                    continue;
                 }
-                (true, false, _) | (false, false, Ordering::Greater) => {
-                    // Advance r2
-                    write_key(m, w, &k2);
-                    copy_value(m, r2, w);
-                    read_key_or_empty(m, r2, &mut k2);
+
+                match highest_bit(bits) {
+                    // If we haven't found any nonempty key yet, take the current one.
+                    None => bits = 1 << i,
+                    Some(j) => match k[j].cmp(&k[i]) {
+                        Ordering::Greater => bits = 1 << i,
+                        Ordering::Equal => bits |= 1 << i,
+                        Ordering::Less => {}
+                    },
+                }
+            }
+
+            // All keys empty, means we've finished
+            if bits == 0 {
+                break;
+            }
+
+            match highest_bit(bits) {
+                // All keys empty, means we've finished
+                None => break,
+                Some(i) => {
+                    // Copy value from the highest bit (so newest file)
+                    write_key(m, &mut w, &k[i]);
+                    copy_value(m, &mut r[i], &mut w);
+                    read_key_or_empty(m, &mut r[i], &mut k[i]);
+
+                    // Advance all the others
+                    for j in 0..BRANCHING_FACTOR {
+                        if j != i && (bits & 1 << j) != 0 {
+                            skip_value(m, &mut r[j]);
+                            read_key_or_empty(m, &mut r[j], &mut k[j]);
+                        }
+                    }
                 }
             }
         }
 
-        ww.commit(&mut self.files);
+        w.commit(&mut self.files);
 
-        self.files.delete(f1);
-        self.files.delete(f2);
+        for i in 0..BRANCHING_FACTOR {
+            self.files.delete(Self::file_id(level, i));
+        }
 
         if level == 0 {
-            self.files.rename(0, f1);
+            self.files.rename(0, Self::file_id(level, 0));
             self.levels[level] = 1;
         } else {
             self.levels[level] = 0;
