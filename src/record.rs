@@ -148,11 +148,11 @@ impl<F: Flash> Database<F> {
             }
         }
 
-        w.commit(&mut self.files);
-
+        let mut truncate = [(0, 0); BRANCHING_FACTOR];
         for i in 0..BRANCHING_FACTOR {
-            self.files.delete(Self::file_id(level, i));
+            truncate[i] = (Self::file_id(level, i), u32::MAX);
         }
+        self.files.commit_and_truncate(Some(&mut w), &truncate);
 
         if level == 0 {
             self.files.rename(0, Self::file_id(level, 0));
@@ -249,7 +249,7 @@ impl<'a, F: Flash + 'a> WriteTransaction<'a, F> {
     }
 
     pub fn commit(mut self) {
-        self.w.commit(&mut self.db.files)
+        self.db.files.commit(&mut self.w)
     }
 }
 

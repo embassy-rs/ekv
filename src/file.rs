@@ -71,38 +71,6 @@ impl<F: Flash> FileManager<F> {
         FileWriter::new(self, file_id)
     }
 
-    pub fn delete(&mut self, file_id: FileID) {
-        let f = &self.files[file_id as usize];
-        self.free_between(f.last_page, None, f.first_seq);
-        self.files[file_id as usize] = FileState {
-            first_seq: 0,
-            last_seq: 0,
-            last_page: None,
-        };
-    }
-
-    pub fn rename(&mut self, from: FileID, to: FileID) {
-        self.delete(to);
-        self.files.swap(from as usize, to as usize);
-    }
-
-    pub fn left_truncate(&mut self, file_id: FileID, seq: u32) {
-        let f = &mut self.files[file_id as usize];
-        assert!(seq >= f.first_seq);
-        assert!(seq <= f.last_seq);
-
-        if seq == f.last_seq {
-            self.delete(file_id)
-        } else {
-            let old_seq = f.first_seq;
-            let p = self.get_file_page(file_id, seq).unwrap();
-            let prev = p.prev(self, old_seq);
-            self.free_between(prev, None, old_seq);
-
-            self.files[file_id as usize].first_seq = seq;
-        }
-    }
-
     fn new_dummy(flash: F) -> Self {
         // TODO initialize self in mount() to avoid having to
         // use dummy values here.
@@ -214,7 +182,48 @@ impl<F: Flash> FileManager<F> {
         }
     }
 
-    pub fn commit(&mut self) {
+    // TODO remove this
+    pub fn rename(&mut self, from: FileID, to: FileID) {
+        self.files.swap(from as usize, to as usize);
+        self.commit_and_truncate(None, &[]);
+    }
+
+    pub fn commit(&mut self, w: &mut FileWriter<F>) {
+        self.commit_and_truncate(Some(w), &[])
+    }
+
+    pub fn commit_and_truncate(&mut self, w: Option<&mut FileWriter<F>>, truncate: &[(FileID, u32)]) {
+        if let Some(w) = w {
+            w.do_commit(self);
+        }
+
+        for &(file_id, mut seq) in truncate {
+            let f = &mut self.files[file_id as usize];
+            assert!(seq >= f.first_seq);
+            // TODO remove
+            if seq > f.last_seq {
+                seq = f.last_seq
+            }
+            assert!(seq <= f.last_seq);
+
+            let old_seq = f.first_seq;
+            let p = if seq == f.last_seq {
+                f.last_page
+            } else {
+                self.get_file_page(file_id, seq).unwrap().prev(self, old_seq)
+            };
+            self.free_between(p, None, old_seq);
+
+            let f = &mut self.files[file_id as usize];
+            if seq == f.last_seq {
+                f.first_seq = 0;
+                f.last_seq = 0;
+                f.last_page = None;
+            } else {
+                f.first_seq = seq;
+            }
+        }
+
         let page_id = self.alloc.allocate();
         let mut w = self.write_page(page_id);
         for file_id in 0..FILE_COUNT as FileID {
@@ -241,8 +250,6 @@ impl<F: Flash> FileManager<F> {
 
         self.alloc.free(self.meta_page_id);
         self.meta_page_id = page_id;
-
-        self.alloc.commit();
     }
 
     fn get_file_page(&mut self, file_id: FileID, seq: u32) -> Option<PagePointer> {
@@ -465,7 +472,7 @@ impl<F: Flash> FileWriter<F> {
         }
     }
 
-    pub fn commit(&mut self, m: &mut FileManager<F>) {
+    fn do_commit(&mut self, m: &mut FileManager<F>) {
         if let Some(w) = mem::replace(&mut self.writer, None) {
             self.flush_header(m, w);
             let f = &mut m.files[self.file_id as usize];
@@ -507,15 +514,12 @@ mod tests {
 
         let mut w = m.write(0);
         w.write(&mut m, &data);
-        w.commit(&mut m);
-        w.discard(&mut m);
+        m.commit(&mut w);
 
         let mut r = m.read(0);
         let mut buf = vec![0; data.len()];
         r.read(&mut m, &mut buf).unwrap();
         assert_eq!(data, buf);
-
-        m.commit();
 
         // Remount
         let mut m = FileManager::new(&mut f);
@@ -536,15 +540,13 @@ mod tests {
 
         let mut w = m.write(0);
         w.write(&mut m, &data);
-        w.commit(&mut m);
+        m.commit(&mut w);
         w.discard(&mut m);
 
         let mut r = m.read(0);
         let mut buf = vec![0; data.len()];
         r.read(&mut m, &mut buf).unwrap();
         assert_eq!(data, buf);
-
-        m.commit();
 
         // Remount
         let mut m = FileManager::new(&mut f);
@@ -563,22 +565,14 @@ mod tests {
 
         let mut w = m.write(0);
         w.write(&mut m, &[1, 2, 3, 4, 5]);
-        w.commit(&mut m);
-        w.discard(&mut m);
+        m.commit(&mut w);
 
         let mut w = m.write(0);
         w.write(&mut m, &[6, 7, 8, 9]);
-        w.commit(&mut m);
-        w.discard(&mut m);
+        m.commit(&mut w);
 
         let mut r = m.read(0);
         let mut buf = vec![0; 9];
-        r.read(&mut m, &mut buf).unwrap();
-        assert_eq!(buf, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
-
-        m.commit();
-
-        let mut r = m.read(0);
         r.read(&mut m, &mut buf).unwrap();
         assert_eq!(buf, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
 
@@ -598,24 +592,16 @@ mod tests {
 
         let mut w = m.write(0);
         w.write(&mut m, &[1, 2, 3, 4, 5]);
-        w.commit(&mut m);
-        w.discard(&mut m);
+        m.commit(&mut w);
 
-        m.left_truncate(0, 2);
+        m.commit_and_truncate(None, &[(0, 2)]);
 
         let mut r = m.read(0);
         let mut buf = [0; 3];
         r.read(&mut m, &mut buf).unwrap();
         assert_eq!(buf, [3, 4, 5]);
 
-        m.left_truncate(0, 3);
-
-        let mut r = m.read(0);
-        let mut buf = [0; 2];
-        r.read(&mut m, &mut buf).unwrap();
-        assert_eq!(buf, [4, 5]);
-
-        m.commit();
+        m.commit_and_truncate(None, &[(0, 3)]);
 
         let mut r = m.read(0);
         let mut buf = [0; 2];
@@ -639,36 +625,26 @@ mod tests {
 
         let mut w = m.write(0);
         w.write(&mut m, &[1, 2, 3, 4, 5]);
-        w.commit(&mut m);
-        w.discard(&mut m);
+        m.commit(&mut w);
 
         let mut w = m.write(0);
         w.write(&mut m, &[6, 7, 8, 9]);
-        w.commit(&mut m);
-        w.discard(&mut m);
 
-        m.left_truncate(0, 2);
+        m.commit_and_truncate(Some(&mut w), &[(0, 2)]);
 
         let mut r = m.read(0);
         let mut buf = [0; 7];
         r.read(&mut m, &mut buf).unwrap();
         assert_eq!(buf, [3, 4, 5, 6, 7, 8, 9]);
 
-        m.left_truncate(0, 3);
+        m.commit_and_truncate(None, &[(0, 3)]);
 
         let mut r = m.read(0);
         let mut buf = [0; 6];
         r.read(&mut m, &mut buf).unwrap();
         assert_eq!(buf, [4, 5, 6, 7, 8, 9]);
 
-        m.left_truncate(0, 8);
-
-        let mut r = m.read(0);
-        let mut buf = [0; 1];
-        r.read(&mut m, &mut buf).unwrap();
-        assert_eq!(buf, [9]);
-
-        m.commit();
+        m.commit_and_truncate(None, &[(0, 8)]);
 
         let mut r = m.read(0);
         let mut buf = [0; 1];
@@ -685,7 +661,7 @@ mod tests {
 
         let mut w = m.write(0);
         w.write(&mut m, &[10, 11, 12]);
-        w.commit(&mut m);
+        m.commit(&mut w);
 
         let mut r = m.read(0);
         let mut buf = [0; 4];
@@ -701,16 +677,11 @@ mod tests {
 
         let mut w = m.write(0);
         w.write(&mut m, &[1, 2, 3, 4, 5]);
-        w.commit(&mut m);
-        m.commit();
+        m.commit(&mut w);
 
         assert_eq!(m.alloc.is_used(1), true);
 
-        m.delete(0);
-
-        assert_eq!(m.alloc.is_used(1), true);
-
-        m.commit();
+        m.commit_and_truncate(None, &[(0, 5)]);
 
         assert_eq!(m.alloc.is_used(1), false);
 
@@ -726,34 +697,6 @@ mod tests {
     }
 
     #[test]
-    fn test_truncate_delete() {
-        let mut f = MemFlash::new();
-        FileManager::format(&mut f);
-        let mut m = FileManager::new(&mut f);
-
-        let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE);
-
-        let mut w = m.write(0);
-        w.write(&mut m, &data);
-        w.write(&mut m, &data);
-        w.commit(&mut m);
-        m.commit();
-
-        assert_eq!(m.alloc.is_used(1), true);
-        assert_eq!(m.alloc.is_used(2), true);
-
-        m.left_truncate(0, PAGE_MAX_PAYLOAD_SIZE as _);
-        m.commit();
-        assert_eq!(m.alloc.is_used(1), false);
-        assert_eq!(m.alloc.is_used(2), true);
-
-        m.delete(0);
-        m.commit();
-        assert_eq!(m.alloc.is_used(1), false);
-        assert_eq!(m.alloc.is_used(2), false);
-    }
-
-    #[test]
     fn test_truncate_alloc() {
         let mut f = MemFlash::new();
         FileManager::format(&mut f);
@@ -763,16 +706,11 @@ mod tests {
 
         let mut w = m.write(0);
         w.write(&mut m, &[1, 2, 3, 4, 5]);
-        w.commit(&mut m);
-        m.commit();
+        m.commit(&mut w);
 
         assert_eq!(m.alloc.is_used(1), true);
 
-        m.left_truncate(0, 5);
-
-        assert_eq!(m.alloc.is_used(1), true);
-
-        m.commit();
+        m.commit_and_truncate(None, &[(0, 5)]);
 
         assert_eq!(m.alloc.is_used(1), false);
 
@@ -800,28 +738,16 @@ mod tests {
         let mut w = m.write(0);
         w.write(&mut m, &data);
         w.write(&mut m, &data);
-        w.commit(&mut m);
-        m.commit();
+        m.commit(&mut w);
 
         assert_eq!(m.alloc.is_used(1), true);
         assert_eq!(m.alloc.is_used(2), true);
 
-        m.left_truncate(0, PAGE_MAX_PAYLOAD_SIZE as _);
-
-        assert_eq!(m.alloc.is_used(1), true);
-        assert_eq!(m.alloc.is_used(2), true);
-
-        m.commit();
-
+        m.commit_and_truncate(None, &[(0, PAGE_MAX_PAYLOAD_SIZE as _)]);
         assert_eq!(m.alloc.is_used(1), false);
         assert_eq!(m.alloc.is_used(2), true);
 
-        m.left_truncate(0, PAGE_MAX_PAYLOAD_SIZE as u32 * 2);
-
-        assert_eq!(m.alloc.is_used(1), false);
-        assert_eq!(m.alloc.is_used(2), true);
-
-        m.commit();
+        m.commit_and_truncate(None, &[(0, PAGE_MAX_PAYLOAD_SIZE as u32 * 2)]);
         assert_eq!(m.alloc.is_used(1), false);
         assert_eq!(m.alloc.is_used(2), false);
 
@@ -845,7 +771,7 @@ mod tests {
 
         let mut w = m.write(0);
         w.write(&mut m, &[1, 2, 3, 4, 5]);
-        w.commit(&mut m);
+        m.commit(&mut w);
 
         let mut w = m.write(0);
         w.write(&mut m, &[6, 7, 8, 9]);
@@ -861,7 +787,7 @@ mod tests {
 
         let mut w = m.write(0);
         w.write(&mut m, &[10, 11]);
-        w.commit(&mut m);
+        m.commit(&mut w);
 
         let mut r = m.read(0);
         let mut buf = [0; 7];
@@ -923,13 +849,7 @@ mod tests {
         assert_eq!(m.alloc.is_used(2), true);
         assert_eq!(m.alloc.is_used(3), false);
 
-        w.commit(&mut m);
-        assert_eq!(m.alloc.is_used(0), true); // old meta
-        assert_eq!(m.alloc.is_used(1), true);
-        assert_eq!(m.alloc.is_used(2), true);
-        assert_eq!(m.alloc.is_used(3), false);
-
-        m.commit();
+        m.commit(&mut w);
         assert_eq!(m.alloc.is_used(0), false); // old meta
         assert_eq!(m.alloc.is_used(1), true);
         assert_eq!(m.alloc.is_used(2), true);
@@ -943,7 +863,7 @@ mod tests {
     }
 
     #[test]
-    fn test_alloc_not_commit_1page() {
+    fn test_alloc_discard_1page() {
         let mut f = MemFlash::new();
         FileManager::format(&mut f);
         let mut m = FileManager::new(&mut f);
@@ -965,20 +885,15 @@ mod tests {
         assert_eq!(m.alloc.is_used(1), false);
         assert_eq!(m.alloc.is_used(2), false);
 
-        m.commit();
-        assert_eq!(m.alloc.is_used(0), false);
-        assert_eq!(m.alloc.is_used(1), false);
-        assert_eq!(m.alloc.is_used(2), true); // new meta
-
         // Remount
         let m = FileManager::new(&mut f);
-        assert_eq!(m.alloc.is_used(0), false);
+        assert_eq!(m.alloc.is_used(0), true);
         assert_eq!(m.alloc.is_used(1), false);
-        assert_eq!(m.alloc.is_used(2), true); // new meta
+        assert_eq!(m.alloc.is_used(2), false);
     }
 
     #[test]
-    fn test_alloc_not_commit_2page() {
+    fn test_alloc_discard_2page() {
         let mut f = MemFlash::new();
         FileManager::format(&mut f);
         let mut m = FileManager::new(&mut f);
@@ -1006,22 +921,16 @@ mod tests {
         assert_eq!(m.alloc.is_used(2), false);
         assert_eq!(m.alloc.is_used(3), false);
 
-        m.commit();
-        assert_eq!(m.alloc.is_used(0), false);
-        assert_eq!(m.alloc.is_used(1), false);
-        assert_eq!(m.alloc.is_used(2), false);
-        assert_eq!(m.alloc.is_used(3), true);
-
         // Remount
         let m = FileManager::new(&mut f);
-        assert_eq!(m.alloc.is_used(0), false);
+        assert_eq!(m.alloc.is_used(0), true);
         assert_eq!(m.alloc.is_used(1), false);
         assert_eq!(m.alloc.is_used(2), false);
-        assert_eq!(m.alloc.is_used(3), true);
+        assert_eq!(m.alloc.is_used(3), false);
     }
 
     #[test]
-    fn test_alloc_not_commit_3page() {
+    fn test_alloc_discard_3page() {
         let mut f = MemFlash::new();
         FileManager::format(&mut f);
         let mut m = FileManager::new(&mut f);
@@ -1047,24 +956,17 @@ mod tests {
         assert_eq!(m.alloc.is_used(3), false);
         assert_eq!(m.alloc.is_used(4), false);
 
-        m.commit();
-        assert_eq!(m.alloc.is_used(0), false);
-        assert_eq!(m.alloc.is_used(1), false);
-        assert_eq!(m.alloc.is_used(2), false);
-        assert_eq!(m.alloc.is_used(3), false);
-        assert_eq!(m.alloc.is_used(4), true);
-
         // Remount
         let m = FileManager::new(&mut f);
-        assert_eq!(m.alloc.is_used(0), false);
+        assert_eq!(m.alloc.is_used(0), true);
         assert_eq!(m.alloc.is_used(1), false);
         assert_eq!(m.alloc.is_used(2), false);
         assert_eq!(m.alloc.is_used(3), false);
-        assert_eq!(m.alloc.is_used(4), true);
+        assert_eq!(m.alloc.is_used(4), false);
     }
 
     #[test]
-    fn test_append_alloc_not_commit() {
+    fn test_append_alloc_discard() {
         let mut f = MemFlash::new();
         FileManager::format(&mut f);
         let mut m = FileManager::new(&mut f);
@@ -1075,30 +977,72 @@ mod tests {
         let data = dummy_data(24);
         let mut w = m.write(0);
         w.write(&mut m, &data);
-        w.commit(&mut m);
-        assert_eq!(m.alloc.is_used(0), true);
+        m.commit(&mut w);
+        assert_eq!(m.alloc.is_used(0), false); // old meta
         assert_eq!(m.alloc.is_used(1), true);
-        assert_eq!(m.alloc.is_used(2), false);
+        assert_eq!(m.alloc.is_used(2), true); // new meta
+        assert_eq!(m.alloc.is_used(3), false);
 
         let mut w = m.write(0);
         w.write(&mut m, &data);
-        assert_eq!(m.alloc.is_used(0), true);
+        assert_eq!(m.alloc.is_used(0), false);
         assert_eq!(m.alloc.is_used(1), true);
         assert_eq!(m.alloc.is_used(2), true);
+        assert_eq!(m.alloc.is_used(3), true);
 
         w.discard(&mut m);
-        assert_eq!(m.alloc.is_used(0), true);
+        assert_eq!(m.alloc.is_used(0), false);
         assert_eq!(m.alloc.is_used(1), true);
-        assert_eq!(m.alloc.is_used(2), false);
-
-        m.commit();
+        assert_eq!(m.alloc.is_used(2), true);
+        assert_eq!(m.alloc.is_used(3), false);
 
         // Remount
         let m = FileManager::new(&mut f);
         assert_eq!(m.alloc.is_used(0), false);
         assert_eq!(m.alloc.is_used(1), true);
-        assert_eq!(m.alloc.is_used(2), false);
-        assert_eq!(m.alloc.is_used(3), true); // new meta
+        assert_eq!(m.alloc.is_used(2), true);
+        assert_eq!(m.alloc.is_used(3), false);
+    }
+
+    #[test]
+    fn test_write_2_files() {
+        let mut f = MemFlash::new();
+        FileManager::format(&mut f);
+        let mut m = FileManager::new(&mut f);
+
+        let data = dummy_data(32);
+
+        let mut w1 = m.write(1);
+        w1.write(&mut m, &data);
+
+        let mut w2 = m.write(2);
+        w2.write(&mut m, &data);
+
+        m.commit(&mut w2);
+        m.commit(&mut w1);
+
+        let mut r = m.read(1);
+        let mut buf = [0; 32];
+        r.read(&mut m, &mut buf).unwrap();
+        assert_eq!(buf[..], data[..]);
+
+        let mut r = m.read(2);
+        let mut buf = [0; 32];
+        r.read(&mut m, &mut buf).unwrap();
+        assert_eq!(buf[..], data[..]);
+
+        // Remount
+        let mut m = FileManager::new(&mut f);
+
+        let mut r = m.read(1);
+        let mut buf = [0; 32];
+        r.read(&mut m, &mut buf).unwrap();
+        assert_eq!(buf[..], data[..]);
+
+        let mut r = m.read(2);
+        let mut buf = [0; 32];
+        r.read(&mut m, &mut buf).unwrap();
+        assert_eq!(buf[..], data[..]);
     }
 
     fn dummy_data(len: usize) -> Vec<u8> {
