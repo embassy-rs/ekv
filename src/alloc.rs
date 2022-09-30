@@ -1,15 +1,23 @@
 use crate::config::*;
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum PageState {
+    Free,
+    UsedOnCommit,
+    FreedOnCommit,
+    Used,
+}
+
 /// Page allocator
 pub struct Allocator {
-    used_pages: [bool; PAGE_COUNT], // TODO use a bitfield
+    pages: [PageState; PAGE_COUNT], // TODO use a bitfield
     next_page_id: PageID,
 }
 
 impl Allocator {
     pub fn new() -> Self {
         Self {
-            used_pages: [false; PAGE_COUNT],
+            pages: [PageState::Free; PAGE_COUNT],
             next_page_id: 0, // TODO make random to spread out wear
         }
     }
@@ -23,8 +31,9 @@ impl Allocator {
                 self.next_page_id = 0;
             }
 
-            if !self.used_pages[p as usize] {
-                self.used_pages[p as usize] = true;
+            let v = &mut self.pages[p as usize];
+            if *v == PageState::Free {
+                *v = PageState::UsedOnCommit;
                 return p;
             }
 
@@ -34,18 +43,34 @@ impl Allocator {
         }
     }
 
-    pub fn mark_allocated(&mut self, page_id: PageID) {
-        assert!(!self.used_pages[page_id as usize]);
-        self.used_pages[page_id as usize] = true;
+    pub fn mark_used(&mut self, page_id: PageID) {
+        assert_eq!(self.pages[page_id as usize], PageState::Free);
+        self.pages[page_id as usize] = PageState::Used;
     }
 
     pub fn free(&mut self, page_id: PageID) {
-        assert!(self.used_pages[page_id as usize]);
-        self.used_pages[page_id as usize] = false;
+        let v = &mut self.pages[page_id as usize];
+        *v = match *v {
+            PageState::Free => panic!("double free"),
+            PageState::FreedOnCommit => panic!("double free"),
+            PageState::Used => PageState::FreedOnCommit,
+            PageState::UsedOnCommit => PageState::Free,
+        };
+    }
+
+    pub fn commit(&mut self) {
+        for v in &mut self.pages {
+            *v = match *v {
+                PageState::Free => PageState::Free,
+                PageState::FreedOnCommit => PageState::Free,
+                PageState::Used => PageState::Used,
+                PageState::UsedOnCommit => PageState::Used,
+            }
+        }
     }
 
     #[cfg(test)]
-    pub fn is_allocated(&self, page_id: PageID) -> bool {
-        self.used_pages[page_id as usize]
+    pub fn is_used(&self, page_id: PageID) -> bool {
+        self.pages[page_id as usize] != PageState::Free
     }
 }

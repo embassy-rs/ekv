@@ -146,7 +146,7 @@ impl<F: Flash> FileManager<F> {
         let meta_page_id = meta_page_id.unwrap();
         self.meta_page_id = meta_page_id;
         self.meta_seq = meta_seq;
-        self.alloc.mark_allocated(meta_page_id);
+        self.alloc.mark_used(meta_page_id);
 
         #[derive(Clone, Copy)]
         struct FileInfo {
@@ -197,7 +197,7 @@ impl<F: Flash> FileManager<F> {
             };
 
             while let Some(pp) = p {
-                self.alloc.mark_allocated(pp.page_id);
+                self.alloc.mark_used(pp.page_id);
                 p = pp.prev(self);
             }
         }
@@ -230,6 +230,8 @@ impl<F: Flash> FileManager<F> {
 
         self.alloc.free(self.meta_page_id);
         self.meta_page_id = page_id;
+
+        self.alloc.commit();
     }
 
     fn get_file_page(&mut self, file_id: FileID, seq: u32) -> Option<PagePointer> {
@@ -744,41 +746,41 @@ mod tests {
         FileManager::format(&mut f);
         let mut m = FileManager::new(&mut f);
 
-        assert_eq!(m.alloc.is_allocated(1), false);
-        assert_eq!(m.alloc.is_allocated(2), false);
+        assert_eq!(m.alloc.is_used(1), false);
+        assert_eq!(m.alloc.is_used(2), false);
 
         let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE);
         let mut w = m.write(0);
 
         w.write(&mut m, &data);
-        assert_eq!(m.alloc.is_allocated(0), true); // old meta
-        assert_eq!(m.alloc.is_allocated(1), true);
-        assert_eq!(m.alloc.is_allocated(2), false);
-        assert_eq!(m.alloc.is_allocated(3), false);
+        assert_eq!(m.alloc.is_used(0), true); // old meta
+        assert_eq!(m.alloc.is_used(1), true);
+        assert_eq!(m.alloc.is_used(2), false);
+        assert_eq!(m.alloc.is_used(3), false);
 
         w.write(&mut m, &data);
-        assert_eq!(m.alloc.is_allocated(0), true); // old meta
-        assert_eq!(m.alloc.is_allocated(1), true);
-        assert_eq!(m.alloc.is_allocated(2), true);
-        assert_eq!(m.alloc.is_allocated(3), false);
+        assert_eq!(m.alloc.is_used(0), true); // old meta
+        assert_eq!(m.alloc.is_used(1), true);
+        assert_eq!(m.alloc.is_used(2), true);
+        assert_eq!(m.alloc.is_used(3), false);
 
         w.commit(&mut m);
-        assert_eq!(m.alloc.is_allocated(0), true); // old meta
-        assert_eq!(m.alloc.is_allocated(1), true);
-        assert_eq!(m.alloc.is_allocated(2), true);
-        assert_eq!(m.alloc.is_allocated(3), false);
+        assert_eq!(m.alloc.is_used(0), true); // old meta
+        assert_eq!(m.alloc.is_used(1), true);
+        assert_eq!(m.alloc.is_used(2), true);
+        assert_eq!(m.alloc.is_used(3), false);
 
         m.commit();
-        assert_eq!(m.alloc.is_allocated(0), false); // old meta
-        assert_eq!(m.alloc.is_allocated(1), true);
-        assert_eq!(m.alloc.is_allocated(2), true);
-        assert_eq!(m.alloc.is_allocated(3), true); // new meta
+        assert_eq!(m.alloc.is_used(0), false); // old meta
+        assert_eq!(m.alloc.is_used(1), true);
+        assert_eq!(m.alloc.is_used(2), true);
+        assert_eq!(m.alloc.is_used(3), true); // new meta
 
         // Remount
         let m = FileManager::new(&mut f);
-        assert_eq!(m.alloc.is_allocated(1), true);
-        assert_eq!(m.alloc.is_allocated(2), true);
-        assert_eq!(m.alloc.is_allocated(3), true); // new meta
+        assert_eq!(m.alloc.is_used(1), true);
+        assert_eq!(m.alloc.is_used(2), true);
+        assert_eq!(m.alloc.is_used(3), true); // new meta
     }
 
     #[test]
@@ -787,33 +789,33 @@ mod tests {
         FileManager::format(&mut f);
         let mut m = FileManager::new(&mut f);
 
-        assert_eq!(m.alloc.is_allocated(0), true);
-        assert_eq!(m.alloc.is_allocated(1), false);
-        assert_eq!(m.alloc.is_allocated(2), false);
+        assert_eq!(m.alloc.is_used(0), true);
+        assert_eq!(m.alloc.is_used(1), false);
+        assert_eq!(m.alloc.is_used(2), false);
 
         let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE);
         let mut w = m.write(0);
 
         w.write(&mut m, &data);
-        assert_eq!(m.alloc.is_allocated(0), true);
-        assert_eq!(m.alloc.is_allocated(1), true);
-        assert_eq!(m.alloc.is_allocated(2), false);
+        assert_eq!(m.alloc.is_used(0), true);
+        assert_eq!(m.alloc.is_used(1), true);
+        assert_eq!(m.alloc.is_used(2), false);
 
         w.discard(&mut m);
-        assert_eq!(m.alloc.is_allocated(0), true);
-        assert_eq!(m.alloc.is_allocated(1), false);
-        assert_eq!(m.alloc.is_allocated(2), false);
+        assert_eq!(m.alloc.is_used(0), true);
+        assert_eq!(m.alloc.is_used(1), false);
+        assert_eq!(m.alloc.is_used(2), false);
 
         m.commit();
-        assert_eq!(m.alloc.is_allocated(0), false);
-        assert_eq!(m.alloc.is_allocated(1), false);
-        assert_eq!(m.alloc.is_allocated(2), true); // new meta
+        assert_eq!(m.alloc.is_used(0), false);
+        assert_eq!(m.alloc.is_used(1), false);
+        assert_eq!(m.alloc.is_used(2), true); // new meta
 
         // Remount
         let m = FileManager::new(&mut f);
-        assert_eq!(m.alloc.is_allocated(0), false);
-        assert_eq!(m.alloc.is_allocated(1), false);
-        assert_eq!(m.alloc.is_allocated(2), true); // new meta
+        assert_eq!(m.alloc.is_used(0), false);
+        assert_eq!(m.alloc.is_used(1), false);
+        assert_eq!(m.alloc.is_used(2), true); // new meta
     }
 
     #[test]
@@ -822,41 +824,41 @@ mod tests {
         FileManager::format(&mut f);
         let mut m = FileManager::new(&mut f);
 
-        assert_eq!(m.alloc.is_allocated(0), true);
-        assert_eq!(m.alloc.is_allocated(1), false);
+        assert_eq!(m.alloc.is_used(0), true);
+        assert_eq!(m.alloc.is_used(1), false);
 
         let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE);
         let mut w = m.write(0);
 
         w.write(&mut m, &data);
-        assert_eq!(m.alloc.is_allocated(0), true);
-        assert_eq!(m.alloc.is_allocated(1), true);
-        assert_eq!(m.alloc.is_allocated(2), false);
+        assert_eq!(m.alloc.is_used(0), true);
+        assert_eq!(m.alloc.is_used(1), true);
+        assert_eq!(m.alloc.is_used(2), false);
 
         w.write(&mut m, &data);
-        assert_eq!(m.alloc.is_allocated(0), true);
-        assert_eq!(m.alloc.is_allocated(1), true);
-        assert_eq!(m.alloc.is_allocated(2), true);
-        assert_eq!(m.alloc.is_allocated(3), false);
+        assert_eq!(m.alloc.is_used(0), true);
+        assert_eq!(m.alloc.is_used(1), true);
+        assert_eq!(m.alloc.is_used(2), true);
+        assert_eq!(m.alloc.is_used(3), false);
 
         w.discard(&mut m);
-        assert_eq!(m.alloc.is_allocated(0), true);
-        assert_eq!(m.alloc.is_allocated(1), false);
-        assert_eq!(m.alloc.is_allocated(2), false);
-        assert_eq!(m.alloc.is_allocated(3), false);
+        assert_eq!(m.alloc.is_used(0), true);
+        assert_eq!(m.alloc.is_used(1), false);
+        assert_eq!(m.alloc.is_used(2), false);
+        assert_eq!(m.alloc.is_used(3), false);
 
         m.commit();
-        assert_eq!(m.alloc.is_allocated(0), false);
-        assert_eq!(m.alloc.is_allocated(1), false);
-        assert_eq!(m.alloc.is_allocated(2), false);
-        assert_eq!(m.alloc.is_allocated(3), true);
+        assert_eq!(m.alloc.is_used(0), false);
+        assert_eq!(m.alloc.is_used(1), false);
+        assert_eq!(m.alloc.is_used(2), false);
+        assert_eq!(m.alloc.is_used(3), true);
 
         // Remount
         let m = FileManager::new(&mut f);
-        assert_eq!(m.alloc.is_allocated(0), false);
-        assert_eq!(m.alloc.is_allocated(1), false);
-        assert_eq!(m.alloc.is_allocated(2), false);
-        assert_eq!(m.alloc.is_allocated(3), true);
+        assert_eq!(m.alloc.is_used(0), false);
+        assert_eq!(m.alloc.is_used(1), false);
+        assert_eq!(m.alloc.is_used(2), false);
+        assert_eq!(m.alloc.is_used(3), true);
     }
 
     #[test]
@@ -865,41 +867,41 @@ mod tests {
         FileManager::format(&mut f);
         let mut m = FileManager::new(&mut f);
 
-        assert_eq!(m.alloc.is_allocated(0), true);
-        assert_eq!(m.alloc.is_allocated(1), false);
-        assert_eq!(m.alloc.is_allocated(2), false);
-        assert_eq!(m.alloc.is_allocated(3), false);
+        assert_eq!(m.alloc.is_used(0), true);
+        assert_eq!(m.alloc.is_used(1), false);
+        assert_eq!(m.alloc.is_used(2), false);
+        assert_eq!(m.alloc.is_used(3), false);
 
         let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE * 3);
         let mut w = m.write(0);
         w.write(&mut m, &data);
-        assert_eq!(m.alloc.is_allocated(0), true);
-        assert_eq!(m.alloc.is_allocated(1), true);
-        assert_eq!(m.alloc.is_allocated(2), true);
-        assert_eq!(m.alloc.is_allocated(3), true);
-        assert_eq!(m.alloc.is_allocated(4), false);
+        assert_eq!(m.alloc.is_used(0), true);
+        assert_eq!(m.alloc.is_used(1), true);
+        assert_eq!(m.alloc.is_used(2), true);
+        assert_eq!(m.alloc.is_used(3), true);
+        assert_eq!(m.alloc.is_used(4), false);
 
         w.discard(&mut m);
-        assert_eq!(m.alloc.is_allocated(0), true);
-        assert_eq!(m.alloc.is_allocated(1), false);
-        assert_eq!(m.alloc.is_allocated(2), false);
-        assert_eq!(m.alloc.is_allocated(3), false);
-        assert_eq!(m.alloc.is_allocated(4), false);
+        assert_eq!(m.alloc.is_used(0), true);
+        assert_eq!(m.alloc.is_used(1), false);
+        assert_eq!(m.alloc.is_used(2), false);
+        assert_eq!(m.alloc.is_used(3), false);
+        assert_eq!(m.alloc.is_used(4), false);
 
         m.commit();
-        assert_eq!(m.alloc.is_allocated(0), false);
-        assert_eq!(m.alloc.is_allocated(1), false);
-        assert_eq!(m.alloc.is_allocated(2), false);
-        assert_eq!(m.alloc.is_allocated(3), false);
-        assert_eq!(m.alloc.is_allocated(4), true);
+        assert_eq!(m.alloc.is_used(0), false);
+        assert_eq!(m.alloc.is_used(1), false);
+        assert_eq!(m.alloc.is_used(2), false);
+        assert_eq!(m.alloc.is_used(3), false);
+        assert_eq!(m.alloc.is_used(4), true);
 
         // Remount
         let m = FileManager::new(&mut f);
-        assert_eq!(m.alloc.is_allocated(0), false);
-        assert_eq!(m.alloc.is_allocated(1), false);
-        assert_eq!(m.alloc.is_allocated(2), false);
-        assert_eq!(m.alloc.is_allocated(3), false);
-        assert_eq!(m.alloc.is_allocated(4), true);
+        assert_eq!(m.alloc.is_used(0), false);
+        assert_eq!(m.alloc.is_used(1), false);
+        assert_eq!(m.alloc.is_used(2), false);
+        assert_eq!(m.alloc.is_used(3), false);
+        assert_eq!(m.alloc.is_used(4), true);
     }
 
     #[test]
@@ -908,36 +910,36 @@ mod tests {
         FileManager::format(&mut f);
         let mut m = FileManager::new(&mut f);
 
-        assert_eq!(m.alloc.is_allocated(0), true);
-        assert_eq!(m.alloc.is_allocated(1), false);
+        assert_eq!(m.alloc.is_used(0), true);
+        assert_eq!(m.alloc.is_used(1), false);
 
         let data = dummy_data(24);
         let mut w = m.write(0);
         w.write(&mut m, &data);
         w.commit(&mut m);
-        assert_eq!(m.alloc.is_allocated(0), true);
-        assert_eq!(m.alloc.is_allocated(1), true);
-        assert_eq!(m.alloc.is_allocated(2), false);
+        assert_eq!(m.alloc.is_used(0), true);
+        assert_eq!(m.alloc.is_used(1), true);
+        assert_eq!(m.alloc.is_used(2), false);
 
         let mut w = m.write(0);
         w.write(&mut m, &data);
-        assert_eq!(m.alloc.is_allocated(0), true);
-        assert_eq!(m.alloc.is_allocated(1), true);
-        assert_eq!(m.alloc.is_allocated(2), true);
+        assert_eq!(m.alloc.is_used(0), true);
+        assert_eq!(m.alloc.is_used(1), true);
+        assert_eq!(m.alloc.is_used(2), true);
 
         w.discard(&mut m);
-        assert_eq!(m.alloc.is_allocated(0), true);
-        assert_eq!(m.alloc.is_allocated(1), true);
-        assert_eq!(m.alloc.is_allocated(2), false);
+        assert_eq!(m.alloc.is_used(0), true);
+        assert_eq!(m.alloc.is_used(1), true);
+        assert_eq!(m.alloc.is_used(2), false);
 
         m.commit();
 
         // Remount
         let m = FileManager::new(&mut f);
-        assert_eq!(m.alloc.is_allocated(0), false);
-        assert_eq!(m.alloc.is_allocated(1), true);
-        assert_eq!(m.alloc.is_allocated(2), false);
-        assert_eq!(m.alloc.is_allocated(3), true); // new meta
+        assert_eq!(m.alloc.is_used(0), false);
+        assert_eq!(m.alloc.is_used(1), true);
+        assert_eq!(m.alloc.is_used(2), false);
+        assert_eq!(m.alloc.is_used(3), true); // new meta
     }
 
     fn dummy_data(len: usize) -> Vec<u8> {
