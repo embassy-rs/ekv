@@ -72,7 +72,8 @@ impl<F: Flash> FileManager<F> {
     }
 
     pub fn delete(&mut self, file_id: FileID) {
-        self.free_between(self.files[file_id as usize].last_page, None);
+        let f = &self.files[file_id as usize];
+        self.free_between(f.last_page, None, f.first_seq);
         self.files[file_id as usize] = FileState {
             first_seq: 0,
             last_seq: 0,
@@ -86,10 +87,20 @@ impl<F: Flash> FileManager<F> {
     }
 
     pub fn left_truncate(&mut self, file_id: FileID, seq: u32) {
-        let mut f = &mut self.files[file_id as usize];
+        let f = &mut self.files[file_id as usize];
         assert!(seq >= f.first_seq);
         assert!(seq <= f.last_seq);
-        f.first_seq = seq;
+
+        if seq == f.last_seq {
+            self.delete(file_id)
+        } else {
+            let old_seq = f.first_seq;
+            let p = self.get_file_page(file_id, seq).unwrap();
+            let prev = p.prev(self, old_seq);
+            self.free_between(prev, None, old_seq);
+
+            self.files[file_id as usize].first_seq = seq;
+        }
     }
 
     fn new_dummy(flash: F) -> Self {
@@ -198,7 +209,7 @@ impl<F: Flash> FileManager<F> {
 
             while let Some(pp) = p {
                 self.alloc.mark_used(pp.page_id);
-                p = pp.prev(self);
+                p = pp.prev(self, fi.first_seq);
             }
         }
     }
@@ -244,7 +255,7 @@ impl<F: Flash> FileManager<F> {
         }
     }
 
-    fn free_between(&mut self, mut from: Option<PagePointer>, to: Option<PagePointer>) {
+    fn free_between(&mut self, mut from: Option<PagePointer>, to: Option<PagePointer>, seq_limit: u32) {
         while let Some(pp) = from {
             if let Some(to) = to {
                 if pp.page_id == to.page_id {
@@ -252,7 +263,7 @@ impl<F: Flash> FileManager<F> {
                 }
             }
             self.alloc.free(pp.page_id);
-            from = pp.prev(self);
+            from = pp.prev(self, seq_limit);
         }
     }
 
@@ -277,24 +288,28 @@ struct PagePointer {
 }
 
 impl PagePointer {
-    fn prev(self, m: &mut FileManager<impl Flash>) -> Option<PagePointer> {
+    fn prev(self, m: &mut FileManager<impl Flash>, seq_limit: u32) -> Option<PagePointer> {
+        if self.header.seq <= seq_limit {
+            return None;
+        }
+
         let p2 = self.header.previous_page_id;
         if p2 == PageID::MAX {
-            None
-        } else {
-            let h2 = m.read_header(p2).unwrap();
-            assert!(h2.seq < self.header.seq);
-            Some(PagePointer {
-                page_id: p2,
-                header: h2,
-            })
+            return None;
         }
+
+        let h2 = m.read_header(p2).unwrap();
+        assert!(h2.seq < self.header.seq);
+        Some(PagePointer {
+            page_id: p2,
+            header: h2,
+        })
     }
 
     fn prev_seq(self, m: &mut FileManager<impl Flash>, seq: u32) -> Option<PagePointer> {
         let mut p = self;
         while p.header.seq > seq {
-            p = p.prev(m)?;
+            p = p.prev(m, 0)?;
         }
         Some(p)
     }
@@ -467,7 +482,7 @@ impl<F: Flash> FileWriter<F> {
 
             // Free previous pages, if any
             let f = &m.files[self.file_id as usize];
-            m.free_between(self.last_page, f.last_page);
+            m.free_between(self.last_page, f.last_page, 0);
         };
     }
 
@@ -676,6 +691,150 @@ mod tests {
         let mut buf = [0; 4];
         r.read(&mut m, &mut buf).unwrap();
         assert_eq!(buf, [9, 10, 11, 12]);
+    }
+
+    #[test]
+    fn test_delete() {
+        let mut f = MemFlash::new();
+        FileManager::format(&mut f);
+        let mut m = FileManager::new(&mut f);
+
+        let mut w = m.write(0);
+        w.write(&mut m, &[1, 2, 3, 4, 5]);
+        w.commit(&mut m);
+        m.commit();
+
+        assert_eq!(m.alloc.is_used(1), true);
+
+        m.delete(0);
+
+        assert_eq!(m.alloc.is_used(1), true);
+
+        m.commit();
+
+        assert_eq!(m.alloc.is_used(1), false);
+
+        // Remount
+        let mut m = FileManager::new(&mut f);
+
+        assert_eq!(m.alloc.is_used(1), false);
+
+        let mut r = m.read(0);
+        let mut buf = [0; 1];
+        let res = r.read(&mut m, &mut buf);
+        assert!(matches!(res, Err(ReadError::Eof)));
+    }
+
+    #[test]
+    fn test_truncate_delete() {
+        let mut f = MemFlash::new();
+        FileManager::format(&mut f);
+        let mut m = FileManager::new(&mut f);
+
+        let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE);
+
+        let mut w = m.write(0);
+        w.write(&mut m, &data);
+        w.write(&mut m, &data);
+        w.commit(&mut m);
+        m.commit();
+
+        assert_eq!(m.alloc.is_used(1), true);
+        assert_eq!(m.alloc.is_used(2), true);
+
+        m.left_truncate(0, PAGE_MAX_PAYLOAD_SIZE as _);
+        m.commit();
+        assert_eq!(m.alloc.is_used(1), false);
+        assert_eq!(m.alloc.is_used(2), true);
+
+        m.delete(0);
+        m.commit();
+        assert_eq!(m.alloc.is_used(1), false);
+        assert_eq!(m.alloc.is_used(2), false);
+    }
+
+    #[test]
+    fn test_truncate_alloc() {
+        let mut f = MemFlash::new();
+        FileManager::format(&mut f);
+        let mut m = FileManager::new(&mut f);
+
+        assert_eq!(m.alloc.is_used(1), false);
+
+        let mut w = m.write(0);
+        w.write(&mut m, &[1, 2, 3, 4, 5]);
+        w.commit(&mut m);
+        m.commit();
+
+        assert_eq!(m.alloc.is_used(1), true);
+
+        m.left_truncate(0, 5);
+
+        assert_eq!(m.alloc.is_used(1), true);
+
+        m.commit();
+
+        assert_eq!(m.alloc.is_used(1), false);
+
+        // Remount
+        let mut m = FileManager::new(&mut f);
+
+        assert_eq!(m.alloc.is_used(1), false);
+
+        let mut r = m.read(0);
+        let mut buf = [0; 1];
+        let res = r.read(&mut m, &mut buf);
+        assert!(matches!(res, Err(ReadError::Eof)));
+    }
+
+    #[test]
+    fn test_truncate_alloc_2() {
+        let mut f = MemFlash::new();
+        FileManager::format(&mut f);
+        let mut m = FileManager::new(&mut f);
+
+        assert_eq!(m.alloc.is_used(1), false);
+
+        let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE);
+
+        let mut w = m.write(0);
+        w.write(&mut m, &data);
+        w.write(&mut m, &data);
+        w.commit(&mut m);
+        m.commit();
+
+        assert_eq!(m.alloc.is_used(1), true);
+        assert_eq!(m.alloc.is_used(2), true);
+
+        m.left_truncate(0, PAGE_MAX_PAYLOAD_SIZE as _);
+
+        assert_eq!(m.alloc.is_used(1), true);
+        assert_eq!(m.alloc.is_used(2), true);
+
+        m.commit();
+
+        assert_eq!(m.alloc.is_used(1), false);
+        assert_eq!(m.alloc.is_used(2), true);
+
+        m.left_truncate(0, PAGE_MAX_PAYLOAD_SIZE as u32 * 2);
+
+        assert_eq!(m.alloc.is_used(1), false);
+        assert_eq!(m.alloc.is_used(2), true);
+
+        m.commit();
+        assert_eq!(m.alloc.is_used(1), false);
+        assert_eq!(m.alloc.is_used(2), false);
+
+        // Remount
+        let mut m = FileManager::new(&mut f);
+
+        assert_eq!(m.alloc.is_used(1), false);
+        assert_eq!(m.alloc.is_used(2), false);
+
+        let mut r = m.read(0);
+        let mut buf = [0; 1];
+        let res = r.read(&mut m, &mut buf);
+        assert!(matches!(res, Err(ReadError::Eof)));
     }
 
     #[test]
