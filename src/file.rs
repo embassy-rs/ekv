@@ -414,6 +414,16 @@ impl<F: Flash> FileReader<F> {
                 let (h, mut r) = m.read_page(pp.page_id).inspect_err(|e| {
                     debug!("failed read next page={}: {:?}", pp.page_id, e);
                 })?;
+                if r.available() <= seq.sub(h.seq) {
+                    debug!(
+                        "found seq hole in file. page={} h.seq={:?} seq={:?} avail={}",
+                        pp.page_id,
+                        h.seq,
+                        seq,
+                        r.available()
+                    );
+                    return Err(Error::Corrupted);
+                }
                 r.seek((seq.sub(h.seq)) as usize);
                 ReaderState::Reading(ReaderStateReading { seq, reader: r })
             }

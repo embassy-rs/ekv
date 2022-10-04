@@ -97,6 +97,10 @@ pub struct PageReader<F: Flash> {
 }
 
 impl<F: Flash> PageReader<F> {
+    pub fn available(&self) -> usize {
+        self.len - self.offset
+    }
+
     pub fn page_id(&self) -> PageID {
         self.page_id
     }
