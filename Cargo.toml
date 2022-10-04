@@ -9,6 +9,9 @@ name = "ekv"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = [ "log" ]
+
 [dependencies]
 defmt = { version = "0.3.2", optional = true }
 heapless = "0.7.16"

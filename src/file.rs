@@ -15,14 +15,14 @@ pub enum SeekDirection {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(C)]
 pub struct Header {
-    seq: u32,
+    seq: Seq,
     previous_page_id: PageID, // TODO add a skiplist for previous pages, instead of just storing the immediately previous one.
 }
 
 impl Header {
     #[cfg(test)]
     pub const DUMMY: Self = Self {
-        seq: 3,
+        seq: Seq(3),
         previous_page_id: 2,
     };
 }
@@ -32,14 +32,14 @@ impl Header {
 pub struct FileMeta {
     file_id: FileID,
     last_page_id: PageID,
-    first_seq: u32,
+    first_seq: Seq,
 }
 impl_bytes!(FileMeta);
 
 struct FileState {
     last_page: Option<PagePointer>,
-    first_seq: u32,
-    last_seq: u32,
+    first_seq: Seq,
+    last_seq: Seq,
 }
 
 pub struct FileManager<F: Flash> {
@@ -47,7 +47,7 @@ pub struct FileManager<F: Flash> {
     pages: PageManager<F>,
     files: [FileState; FILE_COUNT],
     meta_page_id: PageID,
-    meta_seq: u32,
+    meta_seq: Seq,
 
     alloc: Allocator,
 }
@@ -56,13 +56,13 @@ impl<F: Flash> FileManager<F> {
     pub fn new(flash: F) -> Self {
         const DUMMY_FILE: FileState = FileState {
             last_page: None,
-            first_seq: 0,
-            last_seq: 0,
+            first_seq: Seq::ZERO,
+            last_seq: Seq::ZERO,
         };
         Self {
             flash,
             meta_page_id: 0,
-            meta_seq: 0,
+            meta_seq: Seq::ZERO,
             pages: PageManager::new(),
             files: [DUMMY_FILE; FILE_COUNT],
             alloc: Allocator::new(),
@@ -96,7 +96,7 @@ impl<F: Flash> FileManager<F> {
         w.commit(
             &mut self.flash,
             Header {
-                seq: 1,
+                seq: Seq(1),
                 previous_page_id: PageID::MAX - 1,
             },
         );
@@ -106,7 +106,7 @@ impl<F: Flash> FileManager<F> {
         self.alloc.reset();
 
         let mut meta_page_id = None;
-        let mut meta_seq = 0;
+        let mut meta_seq = Seq::ZERO;
         for page_id in 0..PAGE_COUNT {
             if let Ok(h) = self.read_header(page_id as _) {
                 if h.previous_page_id == PageID::MAX - 1 && h.seq > meta_seq {
@@ -127,13 +127,15 @@ impl<F: Flash> FileManager<F> {
         #[derive(Clone, Copy)]
         struct FileInfo {
             last_page_id: PageID,
-            first_seq: u32,
+            first_seq: Seq,
         }
 
-        let (_, mut r) = self.read_page(meta_page_id).unwrap();
+        let (_, mut r) = self.read_page(meta_page_id).inspect_err(|e| {
+            debug!("failed read meta_page_id={}: {:?}", meta_page_id, e);
+        })?;
         let mut files = [FileInfo {
             last_page_id: PageID::MAX,
-            first_seq: 0,
+            first_seq: Seq::ZERO,
         }; FILE_COUNT];
         loop {
             let mut meta = [0; FileMeta::SIZE];
@@ -173,10 +175,7 @@ impl<F: Flash> FileManager<F> {
                 debug!("read last_page_id={} file_id={}: {:?}", file_id, fi.last_page_id, e);
             })?;
             let page_len = r.skip(PAGE_SIZE);
-            let Some(last_seq) = h.seq.checked_add(page_len.try_into().unwrap()) else{
-                debug!("last_seq overflow, seq={} page_len={}", h.seq, page_len);
-                return Err(Error::Corrupted);
-            };
+            let last_seq = h.seq.add(page_len)?;
 
             let mut p = Some(PagePointer {
                 page_id: fi.last_page_id,
@@ -215,10 +214,10 @@ impl<F: Flash> FileManager<F> {
     pub fn commit_and_truncate(
         &mut self,
         w: Option<&mut FileWriter<F>>,
-        truncate: &[(FileID, u32)],
+        truncate: &[(FileID, Seq)],
     ) -> Result<(), Error> {
         if let Some(w) = w {
-            w.do_commit(self);
+            w.do_commit(self)?;
         }
 
         for &(file_id, mut seq) in truncate {
@@ -240,8 +239,8 @@ impl<F: Flash> FileManager<F> {
 
             let f = &mut self.files[file_id as usize];
             if seq == f.last_seq {
-                f.first_seq = 0;
-                f.last_seq = 0;
+                f.first_seq = Seq::ZERO;
+                f.last_seq = Seq::ZERO;
                 f.last_page = None;
             } else {
                 f.first_seq = seq;
@@ -263,7 +262,7 @@ impl<F: Flash> FileManager<F> {
             }
         }
 
-        self.meta_seq = self.meta_seq.wrapping_add(1);
+        self.meta_seq = self.meta_seq.add(1)?; // TODO handle wraparound
         w.commit(
             &mut self.flash,
             Header {
@@ -278,7 +277,7 @@ impl<F: Flash> FileManager<F> {
         Ok(())
     }
 
-    fn get_file_page(&mut self, file_id: FileID, seq: u32) -> Result<Option<PagePointer>, Error> {
+    fn get_file_page(&mut self, file_id: FileID, seq: Seq) -> Result<Option<PagePointer>, Error> {
         let f = &self.files[file_id as usize];
         let Some(last) = f.last_page else {
             return Ok(None)
@@ -294,7 +293,7 @@ impl<F: Flash> FileManager<F> {
         &mut self,
         mut from: Option<PagePointer>,
         to: Option<PagePointer>,
-        seq_limit: u32,
+        seq_limit: Seq,
     ) -> Result<(), Error> {
         while let Some(pp) = from {
             if let Some(to) = to {
@@ -329,7 +328,7 @@ struct PagePointer {
 }
 
 impl PagePointer {
-    fn prev(self, m: &mut FileManager<impl Flash>, seq_limit: u32) -> Result<Option<PagePointer>, Error> {
+    fn prev(self, m: &mut FileManager<impl Flash>, seq_limit: Seq) -> Result<Option<PagePointer>, Error> {
         if self.header.seq <= seq_limit {
             return Ok(None);
         }
@@ -338,19 +337,32 @@ impl PagePointer {
         if p2 == PageID::MAX {
             return Ok(None);
         }
+        if p2 >= PAGE_COUNT as _ {
+            debug!("prev page out of range {}", p2);
+            return Err(Error::Corrupted);
+        }
 
         let h2 = m.read_header(p2)?;
-        assert!(h2.seq < self.header.seq);
+
+        // Check seq always decreases. This avoids infinite loops
+        // TODO we can make this check stricter: h2.seq == self.header.seq - page_len
+        if h2.seq >= self.header.seq {
+            debug!(
+                "seq not decreasing when walking back: curr={:?} prev={:?}",
+                self.header.seq, h2.seq
+            );
+            return Err(Error::Corrupted);
+        }
         Ok(Some(PagePointer {
             page_id: p2,
             header: h2,
         }))
     }
 
-    fn prev_seq(self, m: &mut FileManager<impl Flash>, seq: u32) -> Result<Option<PagePointer>, Error> {
+    fn prev_seq(self, m: &mut FileManager<impl Flash>, seq: Seq) -> Result<Option<PagePointer>, Error> {
         let mut p = self;
         while p.header.seq > seq {
-            p = match p.prev(m, 0)? {
+            p = match p.prev(m, Seq::ZERO)? {
                 Some(p) => p,
                 None => return Ok(None),
             }
@@ -370,7 +382,7 @@ enum ReaderState<F: Flash> {
     Finished,
 }
 struct ReaderStateReading<F: Flash> {
-    seq: u32,
+    seq: Seq,
     reader: PageReader<F>,
 }
 
@@ -399,8 +411,10 @@ impl<F: Flash> FileReader<F> {
         };
         self.state = match m.get_file_page(self.file_id, seq)? {
             Some(pp) => {
-                let (h, mut r) = m.read_page(pp.page_id).unwrap();
-                r.seek((seq - h.seq) as usize);
+                let (h, mut r) = m.read_page(pp.page_id).inspect_err(|e| {
+                    debug!("failed read next page={}: {:?}", pp.page_id, e);
+                })?;
+                r.seek((seq.sub(h.seq)) as usize);
                 ReaderState::Reading(ReaderStateReading { seq, reader: r })
             }
             None => ReaderState::Finished,
@@ -419,7 +433,7 @@ impl<F: Flash> FileReader<F> {
                 ReaderState::Reading(s) => {
                     let n = s.reader.read(&mut m.flash, data);
                     data = &mut data[n..];
-                    s.seq = s.seq.checked_add(n.try_into().unwrap()).unwrap();
+                    s.seq = s.seq.add(n)?;
                     if n == 0 {
                         self.next_page(m)?;
                     }
@@ -440,7 +454,7 @@ impl<F: Flash> FileReader<F> {
                 ReaderState::Reading(s) => {
                     let n = s.reader.skip(len);
                     len -= n;
-                    s.seq = s.seq.checked_add(n.try_into().unwrap()).unwrap();
+                    s.seq = s.seq.add(n).unwrap();
                     if n == 0 {
                         self.next_page(m)?;
                     }
@@ -454,7 +468,7 @@ impl<F: Flash> FileReader<F> {
 pub struct FileWriter<F: Flash> {
     file_id: FileID,
     last_page: Option<PagePointer>,
-    seq: u32,
+    seq: Seq,
     writer: Option<PageWriter<F>>,
 }
 
@@ -470,7 +484,7 @@ impl<F: Flash> FileWriter<F> {
         }
     }
 
-    fn flush_header(&mut self, m: &mut FileManager<F>, w: PageWriter<F>) {
+    fn flush_header(&mut self, m: &mut FileManager<F>, w: PageWriter<F>) -> Result<(), Error> {
         let page_size = w.offset().try_into().unwrap();
         let page_id = w.page_id();
         let header = Header {
@@ -479,31 +493,34 @@ impl<F: Flash> FileWriter<F> {
         };
         w.commit(&mut m.flash, header);
 
-        self.seq = self.seq.checked_add(page_size).unwrap();
+        self.seq = self.seq.add(page_size)?;
         self.last_page = Some(PagePointer { page_id, header });
+
+        Ok(())
     }
 
-    fn next_page(&mut self, m: &mut FileManager<F>) {
+    fn next_page(&mut self, m: &mut FileManager<F>) -> Result<(), Error> {
         if let Some(w) = mem::replace(&mut self.writer, None) {
-            self.flush_header(m, w);
+            self.flush_header(m, w)?;
         }
 
         let page_id = m.alloc.allocate();
         self.writer = Some(m.write_page(page_id));
+        Ok(())
     }
 
     pub fn write(&mut self, m: &mut FileManager<F>, mut data: &[u8]) -> Result<(), Error> {
         while !data.is_empty() {
             match &mut self.writer {
                 None => {
-                    self.next_page(m);
+                    self.next_page(m)?;
                     continue;
                 }
                 Some(w) => {
                     let n = w.write(&mut m.flash, data);
                     data = &data[n..];
                     if n == 0 {
-                        self.next_page(m);
+                        self.next_page(m)?;
                     }
                 }
             }
@@ -511,13 +528,14 @@ impl<F: Flash> FileWriter<F> {
         Ok(())
     }
 
-    fn do_commit(&mut self, m: &mut FileManager<F>) {
+    fn do_commit(&mut self, m: &mut FileManager<F>) -> Result<(), Error> {
         if let Some(w) = mem::replace(&mut self.writer, None) {
-            self.flush_header(m, w);
+            self.flush_header(m, w)?;
             let f = &mut m.files[self.file_id as usize];
             f.last_page = self.last_page;
             f.last_seq = self.seq;
         }
+        Ok(())
     }
 
     pub fn discard(&mut self, m: &mut FileManager<F>) {
@@ -528,12 +546,38 @@ impl<F: Flash> FileWriter<F> {
 
             // Free previous pages, if any
             let f = &m.files[self.file_id as usize];
-            m.free_between(self.last_page, f.last_page, 0).unwrap();
+            m.free_between(self.last_page, f.last_page, Seq::ZERO).unwrap();
         };
     }
 
     pub fn record_end(&mut self) {
         // TODO
+    }
+}
+
+#[repr(transparent)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct Seq(u32);
+
+impl Seq {
+    pub const ZERO: Self = Self(0);
+    pub const MAX: Self = Self(u32::MAX);
+
+    fn sub(self, other: Self) -> usize {
+        self.0.checked_sub(other.0).unwrap() as _
+    }
+
+    fn add(self, offs: usize) -> Result<Self, Error> {
+        let Ok(offs_u32) = offs.try_into() else {
+            debug!("seq add overflow, offs doesn't fit u32: {}", offs);
+            return Err(Error::Corrupted);
+        };
+        let Some(res) = self.0.checked_add(offs_u32) else {
+            debug!("seq add overflow, self={} offs={}", self.0, offs_u32);
+            return Err(Error::Corrupted);
+        };
+        Ok(Self(res))
     }
 }
 
@@ -637,14 +681,14 @@ mod tests {
         w.write(&mut m, &[1, 2, 3, 4, 5]).unwrap();
         m.commit(&mut w).unwrap();
 
-        m.commit_and_truncate(None, &[(0, 2)]).unwrap();
+        m.commit_and_truncate(None, &[(0, Seq(2))]).unwrap();
 
         let mut r = m.read(0);
         let mut buf = [0; 3];
         r.read(&mut m, &mut buf).unwrap();
         assert_eq!(buf, [3, 4, 5]);
 
-        m.commit_and_truncate(None, &[(0, 3)]).unwrap();
+        m.commit_and_truncate(None, &[(0, Seq(3))]).unwrap();
 
         let mut r = m.read(0);
         let mut buf = [0; 2];
@@ -674,21 +718,21 @@ mod tests {
         let mut w = m.write(0);
         w.write(&mut m, &[6, 7, 8, 9]).unwrap();
 
-        m.commit_and_truncate(Some(&mut w), &[(0, 2)]).unwrap();
+        m.commit_and_truncate(Some(&mut w), &[(0, Seq(2))]).unwrap();
 
         let mut r = m.read(0);
         let mut buf = [0; 7];
         r.read(&mut m, &mut buf).unwrap();
         assert_eq!(buf, [3, 4, 5, 6, 7, 8, 9]);
 
-        m.commit_and_truncate(None, &[(0, 3)]).unwrap();
+        m.commit_and_truncate(None, &[(0, Seq(3))]).unwrap();
 
         let mut r = m.read(0);
         let mut buf = [0; 6];
         r.read(&mut m, &mut buf).unwrap();
         assert_eq!(buf, [4, 5, 6, 7, 8, 9]);
 
-        m.commit_and_truncate(None, &[(0, 8)]).unwrap();
+        m.commit_and_truncate(None, &[(0, Seq(8))]).unwrap();
 
         let mut r = m.read(0);
         let mut buf = [0; 1];
@@ -726,7 +770,7 @@ mod tests {
 
         assert_eq!(m.alloc.is_used(1), true);
 
-        m.commit_and_truncate(None, &[(0, 5)]).unwrap();
+        m.commit_and_truncate(None, &[(0, Seq(5))]).unwrap();
 
         assert_eq!(m.alloc.is_used(1), false);
 
@@ -756,7 +800,7 @@ mod tests {
 
         assert_eq!(m.alloc.is_used(1), true);
 
-        m.commit_and_truncate(None, &[(0, 5)]).unwrap();
+        m.commit_and_truncate(None, &[(0, Seq(5))]).unwrap();
 
         assert_eq!(m.alloc.is_used(1), false);
 
@@ -790,11 +834,12 @@ mod tests {
         assert_eq!(m.alloc.is_used(1), true);
         assert_eq!(m.alloc.is_used(2), true);
 
-        m.commit_and_truncate(None, &[(0, PAGE_MAX_PAYLOAD_SIZE as _)]).unwrap();
+        m.commit_and_truncate(None, &[(0, Seq(PAGE_MAX_PAYLOAD_SIZE as _))])
+            .unwrap();
         assert_eq!(m.alloc.is_used(1), false);
         assert_eq!(m.alloc.is_used(2), true);
 
-        m.commit_and_truncate(None, &[(0, PAGE_MAX_PAYLOAD_SIZE as u32 * 2)])
+        m.commit_and_truncate(None, &[(0, Seq(PAGE_MAX_PAYLOAD_SIZE as u32 * 2))])
             .unwrap();
         assert_eq!(m.alloc.is_used(1), false);
         assert_eq!(m.alloc.is_used(2), false);

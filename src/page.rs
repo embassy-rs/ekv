@@ -54,6 +54,11 @@ impl<F: Flash> PageManager<F> {
             return Err(Error::Corrupted);
         }
 
+        if h.len > PAGE_MAX_PAYLOAD_SIZE as _ {
+            debug!("page header len too big: len={} max={}", h.len, PAGE_MAX_PAYLOAD_SIZE);
+            return Err(Error::Corrupted);
+        }
+
         Ok(h)
     }
 

@@ -4,7 +4,7 @@ use std::mem::MaybeUninit;
 use heapless::Vec;
 
 use crate::config::*;
-use crate::file::{FileManager, FileReader, FileWriter, SeekDirection};
+use crate::file::{FileManager, FileReader, FileWriter, SeekDirection, Seq};
 use crate::flash::Flash;
 use crate::page::ReadError;
 use crate::Error;
@@ -163,9 +163,9 @@ impl<F: Flash> Database<F> {
             }
         }
 
-        let mut truncate = [(0, 0); BRANCHING_FACTOR];
+        let mut truncate = [(0, Seq::MAX); BRANCHING_FACTOR];
         for i in 0..BRANCHING_FACTOR {
-            truncate[i] = (Self::file_id(level, i), u32::MAX);
+            truncate[i] = (Self::file_id(level, i), Seq::MAX);
         }
         self.files.commit_and_truncate(Some(&mut w), &truncate)?;
 
@@ -356,10 +356,12 @@ fn read_key<F: Flash>(
     buf: &mut Vec<u8, MAX_KEY_SIZE>,
 ) -> Result<(), ReadError> {
     let len = read_leb128(m, r)? as usize;
-    assert!(len <= MAX_KEY_SIZE);
+    if len > MAX_KEY_SIZE {
+        info!("key too long: {}", len);
+        return Err(ReadError::Corrupted);
+    }
     unsafe { buf.set_len(len) };
-    r.read(m, buf).unwrap();
-    Ok(())
+    r.read(m, buf)
 }
 
 fn read_value<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader<F>, value: &mut [u8]) -> Result<usize, ReadError> {
