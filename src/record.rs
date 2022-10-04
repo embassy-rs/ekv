@@ -12,7 +12,6 @@ pub const MAX_KEY_SIZE: usize = 64;
 
 pub struct Database<F: Flash> {
     files: FileManager<F>,
-    levels: [usize; LEVEL_COUNT],
 }
 
 impl<F: Flash> Database<F> {
@@ -23,7 +22,6 @@ impl<F: Flash> Database<F> {
     pub fn new(flash: F) -> Self {
         Self {
             files: FileManager::new(flash),
-            levels: [0; LEVEL_COUNT],
         }
     }
 
@@ -32,7 +30,16 @@ impl<F: Flash> Database<F> {
     }
 
     pub fn write_transaction(&mut self) -> WriteTransaction<'_, F> {
-        let file_id = self.get_file(LEVEL_COUNT - 1);
+        let num_compacts = (0..LEVEL_COUNT)
+            .rev()
+            .take_while(|&i| self.find_empty_file_in_level(i).is_none())
+            .count();
+
+        for level in (LEVEL_COUNT - num_compacts)..LEVEL_COUNT {
+            self.compact(level)
+        }
+
+        let file_id = self.find_empty_file_in_level(LEVEL_COUNT - 1).unwrap();
         println!("writing {}", file_id);
         let w = self.files.write(file_id);
         WriteTransaction {
@@ -46,25 +53,26 @@ impl<F: Flash> Database<F> {
         (1 + level * BRANCHING_FACTOR + index) as _
     }
 
-    fn get_file(&mut self, level: usize) -> FileID {
-        assert!(self.levels[level] <= BRANCHING_FACTOR);
-
-        if self.levels[level] == BRANCHING_FACTOR {
-            self.compact(level);
-            assert!(self.levels[level] < BRANCHING_FACTOR);
+    /// Returns None if level is full.
+    fn find_empty_file_in_level(&mut self, level: usize) -> Option<FileID> {
+        for i in 0..BRANCHING_FACTOR {
+            let file_id = Self::file_id(level, i);
+            if self.files.is_empty(file_id) {
+                return Some(file_id);
+            }
         }
-
-        let res = Self::file_id(level, self.levels[level]);
-        self.levels[level] += 1;
-        res
+        None
     }
 
+    /// Compact all files within the level into a single file in the upper level.
+    /// Upper level MUST not be full.
     fn compact(&mut self, level: usize) {
         // Open file in higher level for writing.
         let fw = match level {
             0 => 0,
-            _ => self.get_file(level - 1),
+            _ => self.find_empty_file_in_level(level - 1).unwrap(),
         };
+        assert!(self.files.is_empty(fw));
         let mut w = self.files.write(fw);
 
         println!(
@@ -156,9 +164,6 @@ impl<F: Flash> Database<F> {
 
         if level == 0 {
             self.files.rename(0, Self::file_id(level, 0));
-            self.levels[level] = 1;
-        } else {
-            self.levels[level] = 0;
         }
     }
 }
@@ -392,6 +397,66 @@ mod tests {
         let mut wtx = db.write_transaction();
         wtx.write(b"lol", b"9999");
         wtx.commit();
+
+        let mut rtx = db.read_transaction();
+        let n = rtx.read(b"foo", &mut buf);
+        assert_eq!(&buf[..n], b"5678");
+        let n = rtx.read(b"bar", &mut buf);
+        assert_eq!(&buf[..n], b"8765");
+        let n = rtx.read(b"baz", &mut buf);
+        assert_eq!(&buf[..n], b"4242");
+        let n = rtx.read(b"lol", &mut buf);
+        assert_eq!(&buf[..n], b"9999");
+    }
+
+    #[test]
+    fn test_remount() {
+        let mut f = MemFlash::new();
+        Database::format(&mut f);
+
+        let mut db = Database::new(&mut f);
+
+        let mut buf = [0u8; 1024];
+
+        let mut wtx = db.write_transaction();
+        wtx.write(b"bar", b"4321");
+        wtx.write(b"foo", b"1234");
+        wtx.commit();
+
+        // remount
+        let mut db = Database::new(&mut f);
+
+        let mut rtx = db.read_transaction();
+        let n = rtx.read(b"foo", &mut buf);
+        assert_eq!(&buf[..n], b"1234");
+        let n = rtx.read(b"bar", &mut buf);
+        assert_eq!(&buf[..n], b"4321");
+        let n = rtx.read(b"baz", &mut buf);
+        assert_eq!(&buf[..n], b"");
+
+        let mut wtx = db.write_transaction();
+        wtx.write(b"bar", b"8765");
+        wtx.write(b"baz", b"4242");
+        wtx.write(b"foo", b"5678");
+        wtx.commit();
+
+        // remount
+        let mut db = Database::new(&mut f);
+
+        let mut rtx = db.read_transaction();
+        let n = rtx.read(b"foo", &mut buf);
+        assert_eq!(&buf[..n], b"5678");
+        let n = rtx.read(b"bar", &mut buf);
+        assert_eq!(&buf[..n], b"8765");
+        let n = rtx.read(b"baz", &mut buf);
+        assert_eq!(&buf[..n], b"4242");
+
+        let mut wtx = db.write_transaction();
+        wtx.write(b"lol", b"9999");
+        wtx.commit();
+
+        // remount
+        let mut db = Database::new(&mut f);
 
         let mut rtx = db.read_transaction();
         let n = rtx.read(b"foo", &mut buf);

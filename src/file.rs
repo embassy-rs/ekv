@@ -63,6 +63,10 @@ impl<F: Flash> FileManager<F> {
         this
     }
 
+    pub fn is_empty(&mut self, file_id: FileID) -> bool {
+        self.files[file_id as usize].last_page.is_none()
+    }
+
     pub fn read(&mut self, file_id: FileID) -> FileReader<F> {
         FileReader::new(self, file_id)
     }
