@@ -7,6 +7,7 @@ use crate::config::*;
 use crate::file::{FileManager, FileReader, FileWriter, SeekDirection};
 use crate::flash::Flash;
 use crate::page::ReadError;
+use crate::Error;
 
 pub const MAX_KEY_SIZE: usize = 64;
 
@@ -20,10 +21,10 @@ impl<F: Flash> Database<F> {
         m.format();
     }
 
-    pub fn new(flash: F) -> Self {
+    pub fn new(flash: F) -> Result<Self, Error> {
         let mut m = FileManager::new(flash);
-        m.mount();
-        Self { files: m }
+        m.mount()?;
+        Ok(Self { files: m })
     }
 
     pub fn read_transaction(&mut self) -> ReadTransaction<'_, F> {
@@ -364,7 +365,7 @@ mod tests {
         let mut f = MemFlash::new();
         Database::format(&mut f);
 
-        let mut db = Database::new(&mut f);
+        let mut db = Database::new(&mut f).unwrap();
 
         let mut buf = [0u8; 1024];
 
@@ -415,7 +416,7 @@ mod tests {
         let mut f = MemFlash::new();
         Database::format(&mut f);
 
-        let mut db = Database::new(&mut f);
+        let mut db = Database::new(&mut f).unwrap();
 
         let mut buf = [0u8; 1024];
 
@@ -425,7 +426,7 @@ mod tests {
         wtx.commit();
 
         // remount
-        let mut db = Database::new(&mut f);
+        let mut db = Database::new(&mut f).unwrap();
 
         let mut rtx = db.read_transaction();
         let n = rtx.read(b"foo", &mut buf);
@@ -442,7 +443,7 @@ mod tests {
         wtx.commit();
 
         // remount
-        let mut db = Database::new(&mut f);
+        let mut db = Database::new(&mut f).unwrap();
 
         let mut rtx = db.read_transaction();
         let n = rtx.read(b"foo", &mut buf);
@@ -457,7 +458,7 @@ mod tests {
         wtx.commit();
 
         // remount
-        let mut db = Database::new(&mut f);
+        let mut db = Database::new(&mut f).unwrap();
 
         let mut rtx = db.read_transaction();
         let n = rtx.read(b"foo", &mut buf);

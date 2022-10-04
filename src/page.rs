@@ -3,6 +3,7 @@ use std::marker::PhantomData;
 use crate::config::*;
 use crate::file::Header;
 use crate::flash::Flash;
+use crate::Error;
 
 const PAGE_HEADER_MAGIC: u32 = 0xc4e21c75;
 
@@ -36,23 +37,23 @@ impl<F: Flash> PageManager<F> {
         flash.write(page_id as _, 0, &buf);
     }
 
-    fn read_page_header(flash: &mut F, page_id: PageID) -> Result<PageHeader, ReadError> {
+    fn read_page_header(flash: &mut F, page_id: PageID) -> Result<PageHeader, Error> {
         let mut buf = [0u8; PageHeader::SIZE];
         flash.read(page_id as _, 0, &mut buf);
         let h = PageHeader::from_bytes(buf);
         if h.magic != PAGE_HEADER_MAGIC {
-            return Err(ReadError::Eof);
+            return Err(Error::Corrupted);
         }
 
         Ok(h)
     }
 
-    pub fn read_header(&mut self, flash: &mut F, page_id: PageID) -> Result<Header, ReadError> {
+    pub fn read_header(&mut self, flash: &mut F, page_id: PageID) -> Result<Header, Error> {
         let h = Self::read_page_header(flash, page_id)?;
         Ok(h.file_header)
     }
 
-    pub fn read(&mut self, flash: &mut F, page_id: PageID) -> Result<(Header, PageReader<F>), ReadError> {
+    pub fn read(&mut self, flash: &mut F, page_id: PageID) -> Result<(Header, PageReader<F>), Error> {
         let header = Self::read_page_header(flash, page_id)?;
         Ok((
             header.file_header,
@@ -179,7 +180,7 @@ mod tests {
         let f = &mut MemFlash::new();
 
         let res = PageManager::read_page_header(f, 0);
-        assert!(matches!(res, Err(ReadError::Eof)))
+        assert!(matches!(res, Err(Error::Corrupted)))
     }
 
     #[test]
@@ -189,7 +190,7 @@ mod tests {
 
         // Read
         let res = b.read(f, 0);
-        assert!(matches!(res, Err(ReadError::Eof)));
+        assert!(matches!(res, Err(Error::Corrupted)));
     }
 
     #[test]
@@ -206,7 +207,7 @@ mod tests {
 
         // Read
         let res = b.read(f, 0);
-        assert!(matches!(res, Err(ReadError::Eof)));
+        assert!(matches!(res, Err(Error::Corrupted)));
     }
 
     #[test]

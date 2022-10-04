@@ -4,6 +4,7 @@ use crate::alloc::Allocator;
 use crate::config::*;
 use crate::flash::Flash;
 use crate::page::{PageManager, PageReader, PageWriter, ReadError};
+use crate::Error;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SeekDirection {
@@ -101,7 +102,7 @@ impl<F: Flash> FileManager<F> {
         );
     }
 
-    pub fn mount(&mut self) {
+    pub fn mount(&mut self) -> Result<(), Error> {
         self.alloc.reset();
 
         let mut meta_page_id = None;
@@ -115,10 +116,13 @@ impl<F: Flash> FileManager<F> {
             }
         }
 
-        let meta_page_id = meta_page_id.unwrap();
+        let Some(meta_page_id) = meta_page_id else {
+            debug!("Meta page not found");
+            return Err(Error::Corrupted)
+        };
         self.meta_page_id = meta_page_id;
         self.meta_seq = meta_seq;
-        self.alloc.mark_used(meta_page_id);
+        self.alloc.mark_used(meta_page_id)?;
 
         #[derive(Clone, Copy)]
         struct FileInfo {
@@ -137,10 +141,22 @@ impl<F: Flash> FileManager<F> {
             if n == 0 {
                 break;
             }
-            assert_eq!(n, FileMeta::SIZE);
+            if n != FileMeta::SIZE {
+                debug!("meta page last entry incomplete, size {}", n);
+                return Err(Error::Corrupted);
+            }
+
             let meta = FileMeta::from_bytes(meta);
-            assert!(meta.file_id < FILE_COUNT as _);
-            assert!(meta.last_page_id < PAGE_COUNT as _ || meta.last_page_id == PageID::MAX);
+            if meta.file_id >= FILE_COUNT as _ {
+                debug!("meta file_id out of range: {}", meta.file_id);
+                return Err(Error::Corrupted);
+            }
+
+            if meta.last_page_id >= PAGE_COUNT as _ && meta.last_page_id != PageID::MAX {
+                debug!("meta last_page_id out of range: {}", meta.file_id);
+                return Err(Error::Corrupted);
+            }
+
             files[meta.file_id as usize] = FileInfo {
                 last_page_id: meta.last_page_id,
                 first_seq: meta.first_seq,
@@ -153,9 +169,14 @@ impl<F: Flash> FileManager<F> {
                 continue;
             }
 
-            let (h, mut r) = self.read_page(fi.last_page_id).unwrap();
+            let (h, mut r) = self.read_page(fi.last_page_id).inspect_err(|e| {
+                debug!("read last_page_id={} file_id={}: {:?}", file_id, fi.last_page_id, e);
+            })?;
             let page_len = r.skip(PAGE_SIZE);
-            let last_seq = h.seq.checked_add(page_len.try_into().unwrap()).unwrap();
+            let Some(last_seq) = h.seq.checked_add(page_len.try_into().unwrap()) else{
+                debug!("last_seq overflow, seq={} page_len={}", h.seq, page_len);
+                return Err(Error::Corrupted);
+            };
 
             let mut p = Some(PagePointer {
                 page_id: fi.last_page_id,
@@ -169,10 +190,12 @@ impl<F: Flash> FileManager<F> {
             };
 
             while let Some(pp) = p {
-                self.alloc.mark_used(pp.page_id);
+                self.alloc.mark_used(pp.page_id)?;
                 p = pp.prev(self, fi.first_seq);
             }
         }
+
+        Ok(())
     }
 
     // TODO remove this
@@ -267,11 +290,11 @@ impl<F: Flash> FileManager<F> {
         }
     }
 
-    fn read_page(&mut self, page_id: PageID) -> Result<(Header, PageReader<F>), ReadError> {
+    fn read_page(&mut self, page_id: PageID) -> Result<(Header, PageReader<F>), Error> {
         self.pages.read(&mut self.flash, page_id)
     }
 
-    fn read_header(&mut self, page_id: PageID) -> Result<Header, ReadError> {
+    fn read_header(&mut self, page_id: PageID) -> Result<Header, Error> {
         self.pages.read_header(&mut self.flash, page_id)
     }
 
@@ -502,7 +525,7 @@ mod tests {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
         m.format();
-        m.mount();
+        m.mount().unwrap();
 
         let data = dummy_data(24);
 
@@ -516,7 +539,7 @@ mod tests {
         assert_eq!(data, buf);
 
         // Remount
-        m.mount();
+        m.mount().unwrap();
 
         let mut r = m.read(0);
         let mut buf = vec![0; data.len()];
@@ -529,7 +552,7 @@ mod tests {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
         m.format();
-        m.mount();
+        m.mount().unwrap();
 
         let data = dummy_data(65201);
 
@@ -544,7 +567,7 @@ mod tests {
         assert_eq!(data, buf);
 
         // Remount
-        m.mount();
+        m.mount().unwrap();
 
         let mut r = m.read(0);
         let mut buf = vec![0; data.len()];
@@ -557,7 +580,7 @@ mod tests {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
         m.format();
-        m.mount();
+        m.mount().unwrap();
 
         let mut w = m.write(0);
         w.write(&mut m, &[1, 2, 3, 4, 5]);
@@ -573,7 +596,7 @@ mod tests {
         assert_eq!(buf, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
 
         // Remount
-        m.mount();
+        m.mount().unwrap();
 
         let mut r = m.read(0);
         r.read(&mut m, &mut buf).unwrap();
@@ -585,7 +608,7 @@ mod tests {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
         m.format();
-        m.mount();
+        m.mount().unwrap();
 
         let mut w = m.write(0);
         w.write(&mut m, &[1, 2, 3, 4, 5]);
@@ -606,7 +629,7 @@ mod tests {
         assert_eq!(buf, [4, 5]);
 
         // Remount
-        m.mount();
+        m.mount().unwrap();
 
         let mut r = m.read(0);
         let mut buf = [0; 2];
@@ -619,7 +642,7 @@ mod tests {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
         m.format();
-        m.mount();
+        m.mount().unwrap();
 
         let mut w = m.write(0);
         w.write(&mut m, &[1, 2, 3, 4, 5]);
@@ -650,7 +673,7 @@ mod tests {
         assert_eq!(buf, [9]);
 
         // Remount
-        m.mount();
+        m.mount().unwrap();
 
         let mut r = m.read(0);
         let mut buf = [0; 1];
@@ -672,7 +695,7 @@ mod tests {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
         m.format();
-        m.mount();
+        m.mount().unwrap();
 
         let mut w = m.write(0);
         w.write(&mut m, &[1, 2, 3, 4, 5]);
@@ -685,7 +708,7 @@ mod tests {
         assert_eq!(m.alloc.is_used(1), false);
 
         // Remount
-        m.mount();
+        m.mount().unwrap();
 
         assert_eq!(m.alloc.is_used(1), false);
 
@@ -700,7 +723,7 @@ mod tests {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
         m.format();
-        m.mount();
+        m.mount().unwrap();
 
         assert_eq!(m.alloc.is_used(1), false);
 
@@ -715,7 +738,7 @@ mod tests {
         assert_eq!(m.alloc.is_used(1), false);
 
         // Remount
-        m.mount();
+        m.mount().unwrap();
 
         assert_eq!(m.alloc.is_used(1), false);
 
@@ -730,7 +753,7 @@ mod tests {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
         m.format();
-        m.mount();
+        m.mount().unwrap();
 
         assert_eq!(m.alloc.is_used(1), false);
 
@@ -753,7 +776,7 @@ mod tests {
         assert_eq!(m.alloc.is_used(2), false);
 
         // Remount
-        m.mount();
+        m.mount().unwrap();
 
         assert_eq!(m.alloc.is_used(1), false);
         assert_eq!(m.alloc.is_used(2), false);
@@ -769,7 +792,7 @@ mod tests {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
         m.format();
-        m.mount();
+        m.mount().unwrap();
 
         let mut w = m.write(0);
         w.write(&mut m, &[1, 2, 3, 4, 5]);
@@ -802,7 +825,7 @@ mod tests {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
         m.format();
-        m.mount();
+        m.mount().unwrap();
 
         let mut r = m.read(0);
         let mut buf = vec![0; 1024];
@@ -815,7 +838,7 @@ mod tests {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
         m.format();
-        m.mount();
+        m.mount().unwrap();
 
         let data = dummy_data(65201);
 
@@ -834,7 +857,7 @@ mod tests {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
         m.format();
-        m.mount();
+        m.mount().unwrap();
 
         assert_eq!(m.alloc.is_used(1), false);
         assert_eq!(m.alloc.is_used(2), false);
@@ -861,7 +884,7 @@ mod tests {
         assert_eq!(m.alloc.is_used(3), true); // new meta
 
         // Remount
-        m.mount();
+        m.mount().unwrap();
         assert_eq!(m.alloc.is_used(1), true);
         assert_eq!(m.alloc.is_used(2), true);
         assert_eq!(m.alloc.is_used(3), true); // new meta
@@ -872,7 +895,7 @@ mod tests {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
         m.format();
-        m.mount();
+        m.mount().unwrap();
 
         assert_eq!(m.alloc.is_used(0), true);
         assert_eq!(m.alloc.is_used(1), false);
@@ -892,7 +915,7 @@ mod tests {
         assert_eq!(m.alloc.is_used(2), false);
 
         // Remount
-        m.mount();
+        m.mount().unwrap();
         assert_eq!(m.alloc.is_used(0), true);
         assert_eq!(m.alloc.is_used(1), false);
         assert_eq!(m.alloc.is_used(2), false);
@@ -903,7 +926,7 @@ mod tests {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
         m.format();
-        m.mount();
+        m.mount().unwrap();
 
         assert_eq!(m.alloc.is_used(0), true);
         assert_eq!(m.alloc.is_used(1), false);
@@ -929,7 +952,7 @@ mod tests {
         assert_eq!(m.alloc.is_used(3), false);
 
         // Remount
-        m.mount();
+        m.mount().unwrap();
         assert_eq!(m.alloc.is_used(0), true);
         assert_eq!(m.alloc.is_used(1), false);
         assert_eq!(m.alloc.is_used(2), false);
@@ -941,7 +964,7 @@ mod tests {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
         m.format();
-        m.mount();
+        m.mount().unwrap();
 
         assert_eq!(m.alloc.is_used(0), true);
         assert_eq!(m.alloc.is_used(1), false);
@@ -965,7 +988,7 @@ mod tests {
         assert_eq!(m.alloc.is_used(4), false);
 
         // Remount
-        m.mount();
+        m.mount().unwrap();
         assert_eq!(m.alloc.is_used(0), true);
         assert_eq!(m.alloc.is_used(1), false);
         assert_eq!(m.alloc.is_used(2), false);
@@ -978,7 +1001,7 @@ mod tests {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
         m.format();
-        m.mount();
+        m.mount().unwrap();
 
         assert_eq!(m.alloc.is_used(0), true);
         assert_eq!(m.alloc.is_used(1), false);
@@ -1006,7 +1029,7 @@ mod tests {
         assert_eq!(m.alloc.is_used(3), false);
 
         // Remount
-        m.mount();
+        m.mount().unwrap();
         assert_eq!(m.alloc.is_used(0), false);
         assert_eq!(m.alloc.is_used(1), true);
         assert_eq!(m.alloc.is_used(2), true);
@@ -1018,7 +1041,7 @@ mod tests {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
         m.format();
-        m.mount();
+        m.mount().unwrap();
 
         let data = dummy_data(32);
 
@@ -1042,7 +1065,7 @@ mod tests {
         assert_eq!(buf[..], data[..]);
 
         // Remount
-        m.mount();
+        m.mount().unwrap();
 
         let mut r = m.read(1);
         let mut buf = [0; 32];

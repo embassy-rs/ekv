@@ -40,7 +40,7 @@ fn main() {
 
     let mut f = MemFlash::new();
     Database::format(&mut f);
-    let mut db = Database::new(&mut f);
+    let mut db = Database::new(&mut f).unwrap();
 
     // Mirror hashmap. Should always match F
     let mut m = HashMap::new();
