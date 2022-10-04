@@ -1,5 +1,4 @@
 use crate::config::*;
-use crate::Error;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum PageState {
@@ -46,13 +45,9 @@ impl Allocator {
         }
     }
 
-    pub fn mark_used(&mut self, page_id: PageID) -> Result<(), Error> {
-        if self.pages[page_id as usize] != PageState::Free {
-            info!("tried to mark already-used page as used. page_id={}", page_id);
-            return Err(Error::Corrupted);
-        }
+    pub fn mark_used(&mut self, page_id: PageID) {
+        assert_eq!(self.pages[page_id as usize], PageState::Free);
         self.pages[page_id as usize] = PageState::Used;
-        Ok(())
     }
 
     pub fn free(&mut self, page_id: PageID) {
@@ -63,7 +58,6 @@ impl Allocator {
         };
     }
 
-    #[cfg(test)]
     pub fn is_used(&self, page_id: PageID) -> bool {
         self.pages[page_id as usize] == PageState::Used
     }

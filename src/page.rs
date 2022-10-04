@@ -21,6 +21,15 @@ impl_bytes!(PageHeader);
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ReadError {
     Eof,
+    Corrupted,
+}
+
+impl From<Error> for ReadError {
+    fn from(err: Error) -> Self {
+        match err {
+            Error::Corrupted => Self::Corrupted,
+        }
+    }
 }
 
 pub struct PageManager<F: Flash> {

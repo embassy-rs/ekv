@@ -8,7 +8,7 @@ const KEY_COUNT: usize = 100;
 const KEY_MIN_LEN: usize = 1;
 const KEY_MAX_LEN: usize = 10;
 const VAL_MIN_LEN: usize = 1;
-const VAL_MAX_LEN: usize = 100;
+const VAL_MAX_LEN: usize = 10;
 const TX_MIN_COUNT: usize = 1;
 const TX_MAX_COUNT: usize = 100;
 
@@ -31,6 +31,7 @@ fn main() {
 
     // Generate keys
     let mut keys = Vec::new();
+    keys.push(b"foo".to_vec());
     while keys.len() < KEY_COUNT {
         let key = rand_data(rand_between(KEY_MIN_LEN, KEY_MAX_LEN));
         if !keys.contains(&key) {
@@ -47,11 +48,11 @@ fn main() {
 
     let mut buf = [0; VAL_MAX_LEN];
 
-    for _ in 0..1000000 {
+    for _ in 0..10000 {
         let tx_count = rand_between(TX_MIN_COUNT, TX_MAX_COUNT);
         let mut tx = BTreeMap::new();
 
-        for i in 0..tx_count {
+        for _ in 0..tx_count {
             let key = &keys[rand(KEY_COUNT)];
             let value = rand_data(rand_between(VAL_MIN_LEN, VAL_MAX_LEN));
             tx.insert(key, value);
@@ -60,11 +61,11 @@ fn main() {
         //println!("write {:?} = {:?}", key, value);
 
         // Write to DB
-        let mut wtx = db.write_transaction();
+        let mut wtx = db.write_transaction().unwrap();
         for (key, value) in &tx {
-            wtx.write(key, value);
+            wtx.write(key, value).unwrap();
         }
-        wtx.commit();
+        wtx.commit().unwrap();
 
         // Write to mirror
         for (key, value) in &tx {
@@ -75,12 +76,14 @@ fn main() {
         for i in 0..KEY_COUNT {
             let key = &keys[i];
 
-            let mut rtx = db.read_transaction();
-            let n = rtx.read(key, &mut buf);
+            let mut rtx = db.read_transaction().unwrap();
+            let n = rtx.read(key, &mut buf).unwrap();
             let val1 = &buf[..n];
             let val2 = m.get(key).map(|v| &v[..]).unwrap_or(&[]);
 
             assert_eq!(val1, val2);
         }
     }
+
+    std::fs::write("out.bin", &f.data).unwrap();
 }

@@ -10,14 +10,9 @@ fn fuzz(data: &[u8]) {
     let n = f.data.len().min(data.len());
     f.data[..n].copy_from_slice(&data[..n]);
 
-    let mut db = match Database::new(&mut f) {
-        Ok(x) => x,
-        Err(e) => {
-            //println!("create db failed: {:?}", e);
-            return;
-        }
-    };
+    let Ok(mut db) = Database::new(&mut f) else { return };
 
     let mut buf = [0; 64];
-    db.read_transaction().read(b"foo", &mut buf);
+    let Ok(mut rtx) = db.read_transaction() else { return };
+    _ = rtx.read(b"foo", &mut buf);
 }

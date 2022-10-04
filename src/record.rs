@@ -27,28 +27,28 @@ impl<F: Flash> Database<F> {
         Ok(Self { files: m })
     }
 
-    pub fn read_transaction(&mut self) -> ReadTransaction<'_, F> {
-        ReadTransaction { db: self }
+    pub fn read_transaction(&mut self) -> Result<ReadTransaction<'_, F>, Error> {
+        Ok(ReadTransaction { db: self })
     }
 
-    pub fn write_transaction(&mut self) -> WriteTransaction<'_, F> {
+    pub fn write_transaction(&mut self) -> Result<WriteTransaction<'_, F>, Error> {
         let num_compacts = (0..LEVEL_COUNT)
             .rev()
             .take_while(|&i| self.find_empty_file_in_level(i).is_none())
             .count();
 
         for level in (LEVEL_COUNT - num_compacts)..LEVEL_COUNT {
-            self.compact(level)
+            self.compact(level)?;
         }
 
         let file_id = self.find_empty_file_in_level(LEVEL_COUNT - 1).unwrap();
         println!("writing {}", file_id);
         let w = self.files.write(file_id);
-        WriteTransaction {
+        Ok(WriteTransaction {
             db: self,
             w,
             last_key: Vec::new(),
-        }
+        })
     }
 
     fn file_id(level: usize, index: usize) -> FileID {
@@ -68,7 +68,7 @@ impl<F: Flash> Database<F> {
 
     /// Compact all files within the level into a single file in the upper level.
     /// Upper level MUST not be full.
-    fn compact(&mut self, level: usize) {
+    fn compact(&mut self, level: usize) -> Result<(), Error> {
         // Open file in higher level for writing.
         let fw = match level {
             0 => 0,
@@ -93,10 +93,15 @@ impl<F: Flash> Database<F> {
 
         let m = &mut self.files;
 
-        fn read_key_or_empty<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader<F>, buf: &mut Vec<u8, MAX_KEY_SIZE>) {
+        fn read_key_or_empty<F: Flash>(
+            m: &mut FileManager<F>,
+            r: &mut FileReader<F>,
+            buf: &mut Vec<u8, MAX_KEY_SIZE>,
+        ) -> Result<(), Error> {
             match read_key(m, r, buf) {
-                Ok(()) => {}
-                Err(ReadError::Eof) => buf.truncate(0),
+                Ok(()) => Ok(()),
+                Err(ReadError::Eof) => Ok(buf.truncate(0)),
+                Err(ReadError::Corrupted) => Err(Error::Corrupted),
             }
         }
 
@@ -104,7 +109,7 @@ impl<F: Flash> Database<F> {
         let mut k = [NEW_VEC; BRANCHING_FACTOR];
 
         for i in 0..BRANCHING_FACTOR {
-            read_key_or_empty(m, &mut r[i], &mut k[i]);
+            read_key_or_empty(m, &mut r[i], &mut k[i])?;
         }
 
         loop {
@@ -143,15 +148,15 @@ impl<F: Flash> Database<F> {
                 None => break,
                 Some(i) => {
                     // Copy value from the highest bit (so newest file)
-                    write_key(m, &mut w, &k[i]);
-                    copy_value(m, &mut r[i], &mut w);
-                    read_key_or_empty(m, &mut r[i], &mut k[i]);
+                    write_key(m, &mut w, &k[i])?;
+                    copy_value(m, &mut r[i], &mut w)?;
+                    read_key_or_empty(m, &mut r[i], &mut k[i])?;
 
                     // Advance all the others
                     for j in 0..BRANCHING_FACTOR {
                         if j != i && (bits & 1 << j) != 0 {
-                            skip_value(m, &mut r[j]);
-                            read_key_or_empty(m, &mut r[j], &mut k[j]);
+                            skip_value(m, &mut r[j]).unwrap();
+                            read_key_or_empty(m, &mut r[j], &mut k[j])?;
                         }
                     }
                 }
@@ -162,11 +167,13 @@ impl<F: Flash> Database<F> {
         for i in 0..BRANCHING_FACTOR {
             truncate[i] = (Self::file_id(level, i), u32::MAX);
         }
-        self.files.commit_and_truncate(Some(&mut w), &truncate);
+        self.files.commit_and_truncate(Some(&mut w), &truncate)?;
 
         if level == 0 {
-            self.files.rename(0, Self::file_id(level, 0));
+            self.files.rename(0, Self::file_id(level, 0))?;
         }
+
+        Ok(())
     }
 }
 
@@ -175,17 +182,17 @@ pub struct ReadTransaction<'a, F: Flash + 'a> {
 }
 
 impl<'a, F: Flash + 'a> ReadTransaction<'a, F> {
-    pub fn read(&mut self, key: &[u8], value: &mut [u8]) -> usize {
+    pub fn read(&mut self, key: &[u8], value: &mut [u8]) -> Result<usize, Error> {
         for file_id in (0..FILE_COUNT).rev() {
-            let res = self.read_in_file(file_id as _, key, value);
+            let res = self.read_in_file(file_id as _, key, value)?;
             if res != 0 {
-                return res;
+                return Ok(res);
             }
         }
-        0
+        Ok(0)
     }
 
-    fn read_in_file(&mut self, file_id: FileID, key: &[u8], value: &mut [u8]) -> usize {
+    fn read_in_file(&mut self, file_id: FileID, key: &[u8], value: &mut [u8]) -> Result<usize, Error> {
         let r = &mut self.db.files.read(file_id);
         let m = &mut self.db.files;
 
@@ -196,12 +203,19 @@ impl<'a, F: Flash + 'a> ReadTransaction<'a, F> {
         loop {
             match read_key(m, r, &mut key_buf) {
                 Ok(()) => {}
-                Err(ReadError::Eof) => return 0, // key not present.
+                Err(ReadError::Eof) => return Ok(0), // key not present.
+                Err(ReadError::Corrupted) => return Err(Error::Corrupted),
             };
 
             // Found?
             let dir = match key_buf[..].cmp(key) {
-                Ordering::Equal => return read_value(m, r, value),
+                Ordering::Equal => {
+                    return match read_value(m, r, value) {
+                        Ok(n) => Ok(n),
+                        Err(ReadError::Eof) => Err(Error::Corrupted),
+                        Err(ReadError::Corrupted) => Err(Error::Corrupted),
+                    }
+                }
                 Ordering::Less => SeekDirection::Right,
                 Ordering::Greater => SeekDirection::Left,
             };
@@ -210,7 +224,12 @@ impl<'a, F: Flash + 'a> ReadTransaction<'a, F> {
             if !r.binary_search_seek(m, dir) {
                 // Can't seek anymore. In this case, the read pointer wasn't moved.
                 // Skip the value from the key we read above, then go do linear search.
-                skip_value(m, r);
+
+                match skip_value(m, r) {
+                    Ok(()) => {}
+                    Err(ReadError::Eof) => return Err(Error::Corrupted),
+                    Err(ReadError::Corrupted) => return Err(Error::Corrupted),
+                };
                 break;
             }
         }
@@ -219,15 +238,24 @@ impl<'a, F: Flash + 'a> ReadTransaction<'a, F> {
         loop {
             match read_key(m, r, &mut key_buf) {
                 Ok(()) => {}
-                Err(ReadError::Eof) => return 0, // key not present.
+                Err(ReadError::Eof) => return Ok(0), // key not present.
+                Err(ReadError::Corrupted) => return Err(Error::Corrupted),
             };
 
             // Found?
             if key_buf == key {
-                return read_value(m, r, value);
+                return match read_value(m, r, value) {
+                    Ok(n) => Ok(n),
+                    Err(ReadError::Eof) => Err(Error::Corrupted),
+                    Err(ReadError::Corrupted) => Err(Error::Corrupted),
+                };
             }
 
-            skip_value(m, r);
+            match skip_value(m, r) {
+                Ok(()) => {}
+                Err(ReadError::Eof) => return Err(Error::Corrupted),
+                Err(ReadError::Corrupted) => return Err(Error::Corrupted),
+            };
         }
     }
 }
@@ -239,7 +267,7 @@ pub struct WriteTransaction<'a, F: Flash + 'a> {
 }
 
 impl<'a, F: Flash + 'a> WriteTransaction<'a, F> {
-    pub fn write(&mut self, key: &[u8], value: &[u8]) {
+    pub fn write(&mut self, key: &[u8], value: &[u8]) -> Result<(), Error> {
         if key.is_empty() {
             panic!("key cannot be empty.")
         }
@@ -252,35 +280,45 @@ impl<'a, F: Flash + 'a> WriteTransaction<'a, F> {
         }
         self.last_key = Vec::from_slice(key).unwrap();
 
-        write_record(&mut self.db.files, &mut self.w, key, value)
+        write_record(&mut self.db.files, &mut self.w, key, value)?;
+
+        Ok(())
     }
 
-    pub fn commit(mut self) {
+    pub fn commit(mut self) -> Result<(), Error> {
         self.db.files.commit(&mut self.w)
     }
 }
 
-fn write_record<F: Flash>(m: &mut FileManager<F>, w: &mut FileWriter<F>, key: &[u8], value: &[u8]) {
-    write_key(m, w, key);
-    write_value(m, w, value);
+fn write_record<F: Flash>(
+    m: &mut FileManager<F>,
+    w: &mut FileWriter<F>,
+    key: &[u8],
+    value: &[u8],
+) -> Result<(), Error> {
+    write_key(m, w, key)?;
+    write_value(m, w, value)?;
+    Ok(())
 }
 
-fn write_key<F: Flash>(m: &mut FileManager<F>, w: &mut FileWriter<F>, key: &[u8]) {
+fn write_key<F: Flash>(m: &mut FileManager<F>, w: &mut FileWriter<F>, key: &[u8]) -> Result<(), Error> {
     let key_len: u32 = key.len().try_into().unwrap();
-    write_leb128(m, w, key_len);
-    w.write(m, key);
+    write_leb128(m, w, key_len)?;
+    w.write(m, key)?;
+    Ok(())
 }
 
-fn write_value<F: Flash>(m: &mut FileManager<F>, w: &mut FileWriter<F>, value: &[u8]) {
+fn write_value<F: Flash>(m: &mut FileManager<F>, w: &mut FileWriter<F>, value: &[u8]) -> Result<(), Error> {
     let value_len: u32 = value.len().try_into().unwrap();
-    write_leb128(m, w, value_len);
-    w.write(m, value);
+    write_leb128(m, w, value_len)?;
+    w.write(m, value)?;
     w.record_end();
+    Ok(())
 }
 
-fn copy_value<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader<F>, w: &mut FileWriter<F>) {
+fn copy_value<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader<F>, w: &mut FileWriter<F>) -> Result<(), Error> {
     let mut len = read_leb128(m, r).unwrap() as usize;
-    write_leb128(m, w, len as _);
+    write_leb128(m, w, len as _)?;
 
     let mut buf = [0; 128];
     while len != 0 {
@@ -288,12 +326,13 @@ fn copy_value<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader<F>, w: &mut F
         len -= n;
 
         r.read(m, &mut buf[..n]).unwrap();
-        w.write(m, &buf[..n]);
+        w.write(m, &buf[..n])?;
     }
     w.record_end();
+    Ok(())
 }
 
-fn write_leb128<F: Flash>(m: &mut FileManager<F>, w: &mut FileWriter<F>, mut val: u32) {
+fn write_leb128<F: Flash>(m: &mut FileManager<F>, w: &mut FileWriter<F>, mut val: u32) -> Result<(), Error> {
     loop {
         let mut part = val & 0x7F;
         let rest = val >> 7;
@@ -301,13 +340,14 @@ fn write_leb128<F: Flash>(m: &mut FileManager<F>, w: &mut FileWriter<F>, mut val
             part |= 0x80
         }
 
-        w.write(m, &[part as u8]);
+        w.write(m, &[part as u8])?;
 
         if rest == 0 {
-            return;
+            break;
         }
         val = rest
     }
+    Ok(())
 }
 
 fn read_key<F: Flash>(
@@ -322,16 +362,17 @@ fn read_key<F: Flash>(
     Ok(())
 }
 
-fn read_value<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader<F>, value: &mut [u8]) -> usize {
-    let len = read_leb128(m, r).unwrap() as usize;
+fn read_value<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader<F>, value: &mut [u8]) -> Result<usize, ReadError> {
+    let len = read_leb128(m, r)? as usize;
     assert!(value.len() >= len);
-    r.read(m, &mut value[..len]).unwrap();
-    len
+    r.read(m, &mut value[..len])?;
+    Ok(len)
 }
 
-fn skip_value<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader<F>) {
-    let len = read_leb128(m, r).unwrap() as usize;
-    r.skip(m, len).unwrap();
+fn skip_value<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader<F>) -> Result<(), ReadError> {
+    let len = read_leb128(m, r)? as usize;
+    r.skip(m, len)?;
+    Ok(())
 }
 
 fn read_u8<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader<F>) -> Result<u8, ReadError> {
@@ -369,45 +410,45 @@ mod tests {
 
         let mut buf = [0u8; 1024];
 
-        let mut wtx = db.write_transaction();
-        wtx.write(b"bar", b"4321");
-        wtx.write(b"foo", b"1234");
-        wtx.commit();
+        let mut wtx = db.write_transaction().unwrap();
+        wtx.write(b"bar", b"4321").unwrap();
+        wtx.write(b"foo", b"1234").unwrap();
+        wtx.commit().unwrap();
 
-        let mut rtx = db.read_transaction();
-        let n = rtx.read(b"foo", &mut buf);
+        let mut rtx = db.read_transaction().unwrap();
+        let n = rtx.read(b"foo", &mut buf).unwrap();
         assert_eq!(&buf[..n], b"1234");
-        let n = rtx.read(b"bar", &mut buf);
+        let n = rtx.read(b"bar", &mut buf).unwrap();
         assert_eq!(&buf[..n], b"4321");
-        let n = rtx.read(b"baz", &mut buf);
+        let n = rtx.read(b"baz", &mut buf).unwrap();
         assert_eq!(&buf[..n], b"");
 
-        let mut wtx = db.write_transaction();
-        wtx.write(b"bar", b"8765");
-        wtx.write(b"baz", b"4242");
-        wtx.write(b"foo", b"5678");
-        wtx.commit();
+        let mut wtx = db.write_transaction().unwrap();
+        wtx.write(b"bar", b"8765").unwrap();
+        wtx.write(b"baz", b"4242").unwrap();
+        wtx.write(b"foo", b"5678").unwrap();
+        wtx.commit().unwrap();
 
-        let mut rtx = db.read_transaction();
-        let n = rtx.read(b"foo", &mut buf);
+        let mut rtx = db.read_transaction().unwrap();
+        let n = rtx.read(b"foo", &mut buf).unwrap();
         assert_eq!(&buf[..n], b"5678");
-        let n = rtx.read(b"bar", &mut buf);
+        let n = rtx.read(b"bar", &mut buf).unwrap();
         assert_eq!(&buf[..n], b"8765");
-        let n = rtx.read(b"baz", &mut buf);
+        let n = rtx.read(b"baz", &mut buf).unwrap();
         assert_eq!(&buf[..n], b"4242");
 
-        let mut wtx = db.write_transaction();
-        wtx.write(b"lol", b"9999");
-        wtx.commit();
+        let mut wtx = db.write_transaction().unwrap();
+        wtx.write(b"lol", b"9999").unwrap();
+        wtx.commit().unwrap();
 
-        let mut rtx = db.read_transaction();
-        let n = rtx.read(b"foo", &mut buf);
+        let mut rtx = db.read_transaction().unwrap();
+        let n = rtx.read(b"foo", &mut buf).unwrap();
         assert_eq!(&buf[..n], b"5678");
-        let n = rtx.read(b"bar", &mut buf);
+        let n = rtx.read(b"bar", &mut buf).unwrap();
         assert_eq!(&buf[..n], b"8765");
-        let n = rtx.read(b"baz", &mut buf);
+        let n = rtx.read(b"baz", &mut buf).unwrap();
         assert_eq!(&buf[..n], b"4242");
-        let n = rtx.read(b"lol", &mut buf);
+        let n = rtx.read(b"lol", &mut buf).unwrap();
         assert_eq!(&buf[..n], b"9999");
     }
 
@@ -420,54 +461,54 @@ mod tests {
 
         let mut buf = [0u8; 1024];
 
-        let mut wtx = db.write_transaction();
-        wtx.write(b"bar", b"4321");
-        wtx.write(b"foo", b"1234");
-        wtx.commit();
+        let mut wtx = db.write_transaction().unwrap();
+        wtx.write(b"bar", b"4321").unwrap();
+        wtx.write(b"foo", b"1234").unwrap();
+        wtx.commit().unwrap();
 
         // remount
         let mut db = Database::new(&mut f).unwrap();
 
-        let mut rtx = db.read_transaction();
-        let n = rtx.read(b"foo", &mut buf);
+        let mut rtx = db.read_transaction().unwrap();
+        let n = rtx.read(b"foo", &mut buf).unwrap();
         assert_eq!(&buf[..n], b"1234");
-        let n = rtx.read(b"bar", &mut buf);
+        let n = rtx.read(b"bar", &mut buf).unwrap();
         assert_eq!(&buf[..n], b"4321");
-        let n = rtx.read(b"baz", &mut buf);
+        let n = rtx.read(b"baz", &mut buf).unwrap();
         assert_eq!(&buf[..n], b"");
 
-        let mut wtx = db.write_transaction();
-        wtx.write(b"bar", b"8765");
-        wtx.write(b"baz", b"4242");
-        wtx.write(b"foo", b"5678");
-        wtx.commit();
+        let mut wtx = db.write_transaction().unwrap();
+        wtx.write(b"bar", b"8765").unwrap();
+        wtx.write(b"baz", b"4242").unwrap();
+        wtx.write(b"foo", b"5678").unwrap();
+        wtx.commit().unwrap();
 
         // remount
         let mut db = Database::new(&mut f).unwrap();
 
-        let mut rtx = db.read_transaction();
-        let n = rtx.read(b"foo", &mut buf);
+        let mut rtx = db.read_transaction().unwrap();
+        let n = rtx.read(b"foo", &mut buf).unwrap();
         assert_eq!(&buf[..n], b"5678");
-        let n = rtx.read(b"bar", &mut buf);
+        let n = rtx.read(b"bar", &mut buf).unwrap();
         assert_eq!(&buf[..n], b"8765");
-        let n = rtx.read(b"baz", &mut buf);
+        let n = rtx.read(b"baz", &mut buf).unwrap();
         assert_eq!(&buf[..n], b"4242");
 
-        let mut wtx = db.write_transaction();
-        wtx.write(b"lol", b"9999");
-        wtx.commit();
+        let mut wtx = db.write_transaction().unwrap();
+        wtx.write(b"lol", b"9999").unwrap();
+        wtx.commit().unwrap();
 
         // remount
         let mut db = Database::new(&mut f).unwrap();
 
-        let mut rtx = db.read_transaction();
-        let n = rtx.read(b"foo", &mut buf);
+        let mut rtx = db.read_transaction().unwrap();
+        let n = rtx.read(b"foo", &mut buf).unwrap();
         assert_eq!(&buf[..n], b"5678");
-        let n = rtx.read(b"bar", &mut buf);
+        let n = rtx.read(b"bar", &mut buf).unwrap();
         assert_eq!(&buf[..n], b"8765");
-        let n = rtx.read(b"baz", &mut buf);
+        let n = rtx.read(b"baz", &mut buf).unwrap();
         assert_eq!(&buf[..n], b"4242");
-        let n = rtx.read(b"lol", &mut buf);
+        let n = rtx.read(b"lol", &mut buf).unwrap();
         assert_eq!(&buf[..n], b"9999");
     }
 }

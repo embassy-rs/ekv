@@ -122,7 +122,7 @@ impl<F: Flash> FileManager<F> {
         };
         self.meta_page_id = meta_page_id;
         self.meta_seq = meta_seq;
-        self.alloc.mark_used(meta_page_id)?;
+        self.alloc.mark_used(meta_page_id);
 
         #[derive(Clone, Copy)]
         struct FileInfo {
@@ -190,8 +190,12 @@ impl<F: Flash> FileManager<F> {
             };
 
             while let Some(pp) = p {
-                self.alloc.mark_used(pp.page_id)?;
-                p = pp.prev(self, fi.first_seq);
+                if self.alloc.is_used(pp.page_id) {
+                    info!("page used by multiple files at the same time. page_id={}", pp.page_id);
+                    return Err(Error::Corrupted);
+                }
+                self.alloc.mark_used(pp.page_id);
+                p = pp.prev(self, fi.first_seq)?;
             }
         }
 
@@ -199,16 +203,20 @@ impl<F: Flash> FileManager<F> {
     }
 
     // TODO remove this
-    pub fn rename(&mut self, from: FileID, to: FileID) {
+    pub fn rename(&mut self, from: FileID, to: FileID) -> Result<(), Error> {
         self.files.swap(from as usize, to as usize);
-        self.commit_and_truncate(None, &[]);
+        self.commit_and_truncate(None, &[])
     }
 
-    pub fn commit(&mut self, w: &mut FileWriter<F>) {
+    pub fn commit(&mut self, w: &mut FileWriter<F>) -> Result<(), Error> {
         self.commit_and_truncate(Some(w), &[])
     }
 
-    pub fn commit_and_truncate(&mut self, w: Option<&mut FileWriter<F>>, truncate: &[(FileID, u32)]) {
+    pub fn commit_and_truncate(
+        &mut self,
+        w: Option<&mut FileWriter<F>>,
+        truncate: &[(FileID, u32)],
+    ) -> Result<(), Error> {
         if let Some(w) = w {
             w.do_commit(self);
         }
@@ -226,9 +234,9 @@ impl<F: Flash> FileManager<F> {
             let p = if seq == f.last_seq {
                 f.last_page
             } else {
-                self.get_file_page(file_id, seq).unwrap().prev(self, old_seq)
+                self.get_file_page(file_id, seq)?.unwrap().prev(self, old_seq)?
             };
-            self.free_between(p, None, old_seq);
+            self.free_between(p, None, old_seq)?;
 
             let f = &mut self.files[file_id as usize];
             if seq == f.last_seq {
@@ -266,19 +274,28 @@ impl<F: Flash> FileManager<F> {
 
         self.alloc.free(self.meta_page_id);
         self.meta_page_id = page_id;
+
+        Ok(())
     }
 
-    fn get_file_page(&mut self, file_id: FileID, seq: u32) -> Option<PagePointer> {
+    fn get_file_page(&mut self, file_id: FileID, seq: u32) -> Result<Option<PagePointer>, Error> {
         let f = &self.files[file_id as usize];
-        let last = f.last_page?;
+        let Some(last) = f.last_page else {
+            return Ok(None)
+        };
         if seq < f.first_seq || seq >= f.last_seq {
-            None
+            Ok(None)
         } else {
             last.prev_seq(self, seq)
         }
     }
 
-    fn free_between(&mut self, mut from: Option<PagePointer>, to: Option<PagePointer>, seq_limit: u32) {
+    fn free_between(
+        &mut self,
+        mut from: Option<PagePointer>,
+        to: Option<PagePointer>,
+        seq_limit: u32,
+    ) -> Result<(), Error> {
         while let Some(pp) = from {
             if let Some(to) = to {
                 if pp.page_id == to.page_id {
@@ -286,8 +303,9 @@ impl<F: Flash> FileManager<F> {
                 }
             }
             self.alloc.free(pp.page_id);
-            from = pp.prev(self, seq_limit);
+            from = pp.prev(self, seq_limit)?;
         }
+        Ok(())
     }
 
     fn read_page(&mut self, page_id: PageID) -> Result<(Header, PageReader<F>), Error> {
@@ -311,30 +329,33 @@ struct PagePointer {
 }
 
 impl PagePointer {
-    fn prev(self, m: &mut FileManager<impl Flash>, seq_limit: u32) -> Option<PagePointer> {
+    fn prev(self, m: &mut FileManager<impl Flash>, seq_limit: u32) -> Result<Option<PagePointer>, Error> {
         if self.header.seq <= seq_limit {
-            return None;
+            return Ok(None);
         }
 
         let p2 = self.header.previous_page_id;
         if p2 == PageID::MAX {
-            return None;
+            return Ok(None);
         }
 
-        let h2 = m.read_header(p2).unwrap();
+        let h2 = m.read_header(p2)?;
         assert!(h2.seq < self.header.seq);
-        Some(PagePointer {
+        Ok(Some(PagePointer {
             page_id: p2,
             header: h2,
-        })
+        }))
     }
 
-    fn prev_seq(self, m: &mut FileManager<impl Flash>, seq: u32) -> Option<PagePointer> {
+    fn prev_seq(self, m: &mut FileManager<impl Flash>, seq: u32) -> Result<Option<PagePointer>, Error> {
         let mut p = self;
         while p.header.seq > seq {
-            p = p.prev(m, 0)?;
+            p = match p.prev(m, 0)? {
+                Some(p) => p,
+                None => return Ok(None),
+            }
         }
-        Some(p)
+        Ok(Some(p))
     }
 }
 
@@ -370,13 +391,13 @@ impl<F: Flash> FileReader<F> {
         false
     }
 
-    fn next_page(&mut self, m: &mut FileManager<F>) {
+    fn next_page(&mut self, m: &mut FileManager<F>) -> Result<(), Error> {
         let seq = match &self.state {
             ReaderState::Created => m.files[self.file_id as usize].first_seq,
             ReaderState::Reading(s) => s.seq,
             ReaderState::Finished => unreachable!(),
         };
-        self.state = match m.get_file_page(self.file_id, seq) {
+        self.state = match m.get_file_page(self.file_id, seq)? {
             Some(pp) => {
                 let (h, mut r) = m.read_page(pp.page_id).unwrap();
                 r.seek((seq - h.seq) as usize);
@@ -384,6 +405,7 @@ impl<F: Flash> FileReader<F> {
             }
             None => ReaderState::Finished,
         };
+        Ok(())
     }
 
     pub fn read(&mut self, m: &mut FileManager<F>, mut data: &mut [u8]) -> Result<(), ReadError> {
@@ -391,7 +413,7 @@ impl<F: Flash> FileReader<F> {
             match &mut self.state {
                 ReaderState::Finished => return Err(ReadError::Eof),
                 ReaderState::Created => {
-                    self.next_page(m);
+                    self.next_page(m)?;
                     continue;
                 }
                 ReaderState::Reading(s) => {
@@ -399,7 +421,7 @@ impl<F: Flash> FileReader<F> {
                     data = &mut data[n..];
                     s.seq = s.seq.checked_add(n.try_into().unwrap()).unwrap();
                     if n == 0 {
-                        self.next_page(m);
+                        self.next_page(m)?;
                     }
                 }
             }
@@ -412,7 +434,7 @@ impl<F: Flash> FileReader<F> {
             match &mut self.state {
                 ReaderState::Finished => return Err(ReadError::Eof),
                 ReaderState::Created => {
-                    self.next_page(m);
+                    self.next_page(m)?;
                     continue;
                 }
                 ReaderState::Reading(s) => {
@@ -420,7 +442,7 @@ impl<F: Flash> FileReader<F> {
                     len -= n;
                     s.seq = s.seq.checked_add(n.try_into().unwrap()).unwrap();
                     if n == 0 {
-                        self.next_page(m);
+                        self.next_page(m)?;
                     }
                 }
             }
@@ -470,7 +492,7 @@ impl<F: Flash> FileWriter<F> {
         self.writer = Some(m.write_page(page_id));
     }
 
-    pub fn write(&mut self, m: &mut FileManager<F>, mut data: &[u8]) {
+    pub fn write(&mut self, m: &mut FileManager<F>, mut data: &[u8]) -> Result<(), Error> {
         while !data.is_empty() {
             match &mut self.writer {
                 None => {
@@ -486,6 +508,7 @@ impl<F: Flash> FileWriter<F> {
                 }
             }
         }
+        Ok(())
     }
 
     fn do_commit(&mut self, m: &mut FileManager<F>) {
@@ -505,7 +528,7 @@ impl<F: Flash> FileWriter<F> {
 
             // Free previous pages, if any
             let f = &m.files[self.file_id as usize];
-            m.free_between(self.last_page, f.last_page, 0);
+            m.free_between(self.last_page, f.last_page, 0).unwrap();
         };
     }
 
@@ -530,8 +553,8 @@ mod tests {
         let data = dummy_data(24);
 
         let mut w = m.write(0);
-        w.write(&mut m, &data);
-        m.commit(&mut w);
+        w.write(&mut m, &data).unwrap();
+        m.commit(&mut w).unwrap();
 
         let mut r = m.read(0);
         let mut buf = vec![0; data.len()];
@@ -554,11 +577,11 @@ mod tests {
         m.format();
         m.mount().unwrap();
 
-        let data = dummy_data(65201);
+        let data = dummy_data(23456);
 
         let mut w = m.write(0);
-        w.write(&mut m, &data);
-        m.commit(&mut w);
+        w.write(&mut m, &data).unwrap();
+        m.commit(&mut w).unwrap();
         w.discard(&mut m);
 
         let mut r = m.read(0);
@@ -583,12 +606,12 @@ mod tests {
         m.mount().unwrap();
 
         let mut w = m.write(0);
-        w.write(&mut m, &[1, 2, 3, 4, 5]);
-        m.commit(&mut w);
+        w.write(&mut m, &[1, 2, 3, 4, 5]).unwrap();
+        m.commit(&mut w).unwrap();
 
         let mut w = m.write(0);
-        w.write(&mut m, &[6, 7, 8, 9]);
-        m.commit(&mut w);
+        w.write(&mut m, &[6, 7, 8, 9]).unwrap();
+        m.commit(&mut w).unwrap();
 
         let mut r = m.read(0);
         let mut buf = vec![0; 9];
@@ -611,17 +634,17 @@ mod tests {
         m.mount().unwrap();
 
         let mut w = m.write(0);
-        w.write(&mut m, &[1, 2, 3, 4, 5]);
-        m.commit(&mut w);
+        w.write(&mut m, &[1, 2, 3, 4, 5]).unwrap();
+        m.commit(&mut w).unwrap();
 
-        m.commit_and_truncate(None, &[(0, 2)]);
+        m.commit_and_truncate(None, &[(0, 2)]).unwrap();
 
         let mut r = m.read(0);
         let mut buf = [0; 3];
         r.read(&mut m, &mut buf).unwrap();
         assert_eq!(buf, [3, 4, 5]);
 
-        m.commit_and_truncate(None, &[(0, 3)]);
+        m.commit_and_truncate(None, &[(0, 3)]).unwrap();
 
         let mut r = m.read(0);
         let mut buf = [0; 2];
@@ -645,27 +668,27 @@ mod tests {
         m.mount().unwrap();
 
         let mut w = m.write(0);
-        w.write(&mut m, &[1, 2, 3, 4, 5]);
-        m.commit(&mut w);
+        w.write(&mut m, &[1, 2, 3, 4, 5]).unwrap();
+        m.commit(&mut w).unwrap();
 
         let mut w = m.write(0);
-        w.write(&mut m, &[6, 7, 8, 9]);
+        w.write(&mut m, &[6, 7, 8, 9]).unwrap();
 
-        m.commit_and_truncate(Some(&mut w), &[(0, 2)]);
+        m.commit_and_truncate(Some(&mut w), &[(0, 2)]).unwrap();
 
         let mut r = m.read(0);
         let mut buf = [0; 7];
         r.read(&mut m, &mut buf).unwrap();
         assert_eq!(buf, [3, 4, 5, 6, 7, 8, 9]);
 
-        m.commit_and_truncate(None, &[(0, 3)]);
+        m.commit_and_truncate(None, &[(0, 3)]).unwrap();
 
         let mut r = m.read(0);
         let mut buf = [0; 6];
         r.read(&mut m, &mut buf).unwrap();
         assert_eq!(buf, [4, 5, 6, 7, 8, 9]);
 
-        m.commit_and_truncate(None, &[(0, 8)]);
+        m.commit_and_truncate(None, &[(0, 8)]).unwrap();
 
         let mut r = m.read(0);
         let mut buf = [0; 1];
@@ -681,8 +704,8 @@ mod tests {
         assert_eq!(buf, [9]);
 
         let mut w = m.write(0);
-        w.write(&mut m, &[10, 11, 12]);
-        m.commit(&mut w);
+        w.write(&mut m, &[10, 11, 12]).unwrap();
+        m.commit(&mut w).unwrap();
 
         let mut r = m.read(0);
         let mut buf = [0; 4];
@@ -698,12 +721,12 @@ mod tests {
         m.mount().unwrap();
 
         let mut w = m.write(0);
-        w.write(&mut m, &[1, 2, 3, 4, 5]);
-        m.commit(&mut w);
+        w.write(&mut m, &[1, 2, 3, 4, 5]).unwrap();
+        m.commit(&mut w).unwrap();
 
         assert_eq!(m.alloc.is_used(1), true);
 
-        m.commit_and_truncate(None, &[(0, 5)]);
+        m.commit_and_truncate(None, &[(0, 5)]).unwrap();
 
         assert_eq!(m.alloc.is_used(1), false);
 
@@ -728,12 +751,12 @@ mod tests {
         assert_eq!(m.alloc.is_used(1), false);
 
         let mut w = m.write(0);
-        w.write(&mut m, &[1, 2, 3, 4, 5]);
-        m.commit(&mut w);
+        w.write(&mut m, &[1, 2, 3, 4, 5]).unwrap();
+        m.commit(&mut w).unwrap();
 
         assert_eq!(m.alloc.is_used(1), true);
 
-        m.commit_and_truncate(None, &[(0, 5)]);
+        m.commit_and_truncate(None, &[(0, 5)]).unwrap();
 
         assert_eq!(m.alloc.is_used(1), false);
 
@@ -760,18 +783,19 @@ mod tests {
         let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE);
 
         let mut w = m.write(0);
-        w.write(&mut m, &data);
-        w.write(&mut m, &data);
-        m.commit(&mut w);
+        w.write(&mut m, &data).unwrap();
+        w.write(&mut m, &data).unwrap();
+        m.commit(&mut w).unwrap();
 
         assert_eq!(m.alloc.is_used(1), true);
         assert_eq!(m.alloc.is_used(2), true);
 
-        m.commit_and_truncate(None, &[(0, PAGE_MAX_PAYLOAD_SIZE as _)]);
+        m.commit_and_truncate(None, &[(0, PAGE_MAX_PAYLOAD_SIZE as _)]).unwrap();
         assert_eq!(m.alloc.is_used(1), false);
         assert_eq!(m.alloc.is_used(2), true);
 
-        m.commit_and_truncate(None, &[(0, PAGE_MAX_PAYLOAD_SIZE as u32 * 2)]);
+        m.commit_and_truncate(None, &[(0, PAGE_MAX_PAYLOAD_SIZE as u32 * 2)])
+            .unwrap();
         assert_eq!(m.alloc.is_used(1), false);
         assert_eq!(m.alloc.is_used(2), false);
 
@@ -795,11 +819,11 @@ mod tests {
         m.mount().unwrap();
 
         let mut w = m.write(0);
-        w.write(&mut m, &[1, 2, 3, 4, 5]);
-        m.commit(&mut w);
+        w.write(&mut m, &[1, 2, 3, 4, 5]).unwrap();
+        m.commit(&mut w).unwrap();
 
         let mut w = m.write(0);
-        w.write(&mut m, &[6, 7, 8, 9]);
+        w.write(&mut m, &[6, 7, 8, 9]).unwrap();
         w.discard(&mut m);
 
         let mut r = m.read(0);
@@ -811,8 +835,8 @@ mod tests {
         assert!(matches!(res, Err(ReadError::Eof)));
 
         let mut w = m.write(0);
-        w.write(&mut m, &[10, 11]);
-        m.commit(&mut w);
+        w.write(&mut m, &[10, 11]).unwrap();
+        m.commit(&mut w).unwrap();
 
         let mut r = m.read(0);
         let mut buf = [0; 7];
@@ -840,10 +864,10 @@ mod tests {
         m.format();
         m.mount().unwrap();
 
-        let data = dummy_data(65201);
+        let data = dummy_data(1234);
 
         let mut w = m.write(0);
-        w.write(&mut m, &data);
+        w.write(&mut m, &data).unwrap();
         w.discard(&mut m); // don't commit
 
         let mut r = m.read(0);
@@ -865,19 +889,19 @@ mod tests {
         let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE);
         let mut w = m.write(0);
 
-        w.write(&mut m, &data);
+        w.write(&mut m, &data).unwrap();
         assert_eq!(m.alloc.is_used(0), true); // old meta
         assert_eq!(m.alloc.is_used(1), true);
         assert_eq!(m.alloc.is_used(2), false);
         assert_eq!(m.alloc.is_used(3), false);
 
-        w.write(&mut m, &data);
+        w.write(&mut m, &data).unwrap();
         assert_eq!(m.alloc.is_used(0), true); // old meta
         assert_eq!(m.alloc.is_used(1), true);
         assert_eq!(m.alloc.is_used(2), true);
         assert_eq!(m.alloc.is_used(3), false);
 
-        m.commit(&mut w);
+        m.commit(&mut w).unwrap();
         assert_eq!(m.alloc.is_used(0), false); // old meta
         assert_eq!(m.alloc.is_used(1), true);
         assert_eq!(m.alloc.is_used(2), true);
@@ -904,7 +928,7 @@ mod tests {
         let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE);
         let mut w = m.write(0);
 
-        w.write(&mut m, &data);
+        w.write(&mut m, &data).unwrap();
         assert_eq!(m.alloc.is_used(0), true);
         assert_eq!(m.alloc.is_used(1), true);
         assert_eq!(m.alloc.is_used(2), false);
@@ -934,12 +958,12 @@ mod tests {
         let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE);
         let mut w = m.write(0);
 
-        w.write(&mut m, &data);
+        w.write(&mut m, &data).unwrap();
         assert_eq!(m.alloc.is_used(0), true);
         assert_eq!(m.alloc.is_used(1), true);
         assert_eq!(m.alloc.is_used(2), false);
 
-        w.write(&mut m, &data);
+        w.write(&mut m, &data).unwrap();
         assert_eq!(m.alloc.is_used(0), true);
         assert_eq!(m.alloc.is_used(1), true);
         assert_eq!(m.alloc.is_used(2), true);
@@ -973,7 +997,7 @@ mod tests {
 
         let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE * 3);
         let mut w = m.write(0);
-        w.write(&mut m, &data);
+        w.write(&mut m, &data).unwrap();
         assert_eq!(m.alloc.is_used(0), true);
         assert_eq!(m.alloc.is_used(1), true);
         assert_eq!(m.alloc.is_used(2), true);
@@ -1008,15 +1032,15 @@ mod tests {
 
         let data = dummy_data(24);
         let mut w = m.write(0);
-        w.write(&mut m, &data);
-        m.commit(&mut w);
+        w.write(&mut m, &data).unwrap();
+        m.commit(&mut w).unwrap();
         assert_eq!(m.alloc.is_used(0), false); // old meta
         assert_eq!(m.alloc.is_used(1), true);
         assert_eq!(m.alloc.is_used(2), true); // new meta
         assert_eq!(m.alloc.is_used(3), false);
 
         let mut w = m.write(0);
-        w.write(&mut m, &data);
+        w.write(&mut m, &data).unwrap();
         assert_eq!(m.alloc.is_used(0), false);
         assert_eq!(m.alloc.is_used(1), true);
         assert_eq!(m.alloc.is_used(2), true);
@@ -1046,13 +1070,13 @@ mod tests {
         let data = dummy_data(32);
 
         let mut w1 = m.write(1);
-        w1.write(&mut m, &data);
+        w1.write(&mut m, &data).unwrap();
 
         let mut w2 = m.write(2);
-        w2.write(&mut m, &data);
+        w2.write(&mut m, &data).unwrap();
 
-        m.commit(&mut w2);
-        m.commit(&mut w1);
+        m.commit(&mut w2).unwrap();
+        m.commit(&mut w1).unwrap();
 
         let mut r = m.read(1);
         let mut buf = [0; 32];

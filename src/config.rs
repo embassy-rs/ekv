@@ -2,8 +2,8 @@ use crate::page::PageHeader;
 
 // Flash parameters -- TODO unhardcode
 pub const WRITE_SIZE: usize = 4;
-pub const PAGE_SIZE: usize = 4096;
-pub const PAGE_COUNT: usize = 256;
+pub const PAGE_SIZE: usize = 256;
+pub const PAGE_COUNT: usize = 128;
 pub const ERASE_VALUE: u8 = 0xFF;
 
 pub const PAGE_MAX_PAYLOAD_SIZE: usize = PAGE_SIZE - PageHeader::SIZE;
