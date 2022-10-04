@@ -7,7 +7,7 @@ use crate::config::*;
 use crate::file::{FileManager, FileReader, FileWriter, SeekDirection, Seq};
 use crate::flash::Flash;
 use crate::page::ReadError;
-use crate::Error;
+use crate::{Error, ReadKeyError};
 
 pub const MAX_KEY_SIZE: usize = 64;
 
@@ -182,7 +182,7 @@ pub struct ReadTransaction<'a, F: Flash + 'a> {
 }
 
 impl<'a, F: Flash + 'a> ReadTransaction<'a, F> {
-    pub fn read(&mut self, key: &[u8], value: &mut [u8]) -> Result<usize, Error> {
+    pub fn read(&mut self, key: &[u8], value: &mut [u8]) -> Result<usize, ReadKeyError> {
         for file_id in (0..FILE_COUNT).rev() {
             let res = self.read_in_file(file_id as _, key, value)?;
             if res != 0 {
@@ -192,7 +192,7 @@ impl<'a, F: Flash + 'a> ReadTransaction<'a, F> {
         Ok(0)
     }
 
-    fn read_in_file(&mut self, file_id: FileID, key: &[u8], value: &mut [u8]) -> Result<usize, Error> {
+    fn read_in_file(&mut self, file_id: FileID, key: &[u8], value: &mut [u8]) -> Result<usize, ReadKeyError> {
         let r = &mut self.db.files.read(file_id);
         let m = &mut self.db.files;
 
@@ -202,20 +202,13 @@ impl<'a, F: Flash + 'a> ReadTransaction<'a, F> {
         r.binary_search_start(m);
         loop {
             match read_key(m, r, &mut key_buf) {
-                Ok(()) => {}
                 Err(ReadError::Eof) => return Ok(0), // key not present.
-                Err(ReadError::Corrupted) => return Err(Error::Corrupted),
+                x => x?,
             };
 
             // Found?
             let dir = match key_buf[..].cmp(key) {
-                Ordering::Equal => {
-                    return match read_value(m, r, value) {
-                        Ok(n) => Ok(n),
-                        Err(ReadError::Eof) => Err(Error::Corrupted),
-                        Err(ReadError::Corrupted) => Err(Error::Corrupted),
-                    }
-                }
+                Ordering::Equal => return read_value(m, r, value),
                 Ordering::Less => SeekDirection::Right,
                 Ordering::Greater => SeekDirection::Left,
             };
@@ -225,11 +218,7 @@ impl<'a, F: Flash + 'a> ReadTransaction<'a, F> {
                 // Can't seek anymore. In this case, the read pointer wasn't moved.
                 // Skip the value from the key we read above, then go do linear search.
 
-                match skip_value(m, r) {
-                    Ok(()) => {}
-                    Err(ReadError::Eof) => return Err(Error::Corrupted),
-                    Err(ReadError::Corrupted) => return Err(Error::Corrupted),
-                };
+                skip_value(m, r)?;
                 break;
             }
         }
@@ -237,25 +226,16 @@ impl<'a, F: Flash + 'a> ReadTransaction<'a, F> {
         // Linear search
         loop {
             match read_key(m, r, &mut key_buf) {
-                Ok(()) => {}
                 Err(ReadError::Eof) => return Ok(0), // key not present.
-                Err(ReadError::Corrupted) => return Err(Error::Corrupted),
+                x => x?,
             };
 
             // Found?
             if key_buf == key {
-                return match read_value(m, r, value) {
-                    Ok(n) => Ok(n),
-                    Err(ReadError::Eof) => Err(Error::Corrupted),
-                    Err(ReadError::Corrupted) => Err(Error::Corrupted),
-                };
+                return read_value(m, r, value);
             }
 
-            match skip_value(m, r) {
-                Ok(()) => {}
-                Err(ReadError::Eof) => return Err(Error::Corrupted),
-                Err(ReadError::Corrupted) => return Err(Error::Corrupted),
-            };
+            skip_value(m, r)?;
         }
     }
 }
@@ -364,9 +344,15 @@ fn read_key<F: Flash>(
     r.read(m, buf)
 }
 
-fn read_value<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader<F>, value: &mut [u8]) -> Result<usize, ReadError> {
-    let len = read_leb128(m, r)? as usize;
-    assert!(value.len() >= len);
+fn read_value<F: Flash>(
+    m: &mut FileManager<F>,
+    r: &mut FileReader<F>,
+    value: &mut [u8],
+) -> Result<usize, ReadKeyError> {
+    let len = read_leb128(m, r).map_err(|_| ReadKeyError::Corrupted)? as usize;
+    if len > value.len() {
+        return Err(ReadKeyError::BufferTooSmall);
+    }
     r.read(m, &mut value[..len])?;
     Ok(len)
 }
@@ -452,6 +438,23 @@ mod tests {
         assert_eq!(&buf[..n], b"4242");
         let n = rtx.read(b"lol", &mut buf).unwrap();
         assert_eq!(&buf[..n], b"9999");
+    }
+
+    #[test]
+    fn test_buf_too_small() {
+        let mut f = MemFlash::new();
+        Database::format(&mut f);
+
+        let mut db = Database::new(&mut f).unwrap();
+
+        let mut wtx = db.write_transaction().unwrap();
+        wtx.write(b"foo", b"1234").unwrap();
+        wtx.commit().unwrap();
+
+        let mut rtx = db.read_transaction().unwrap();
+        let mut buf = [0u8; 1];
+        let r = rtx.read(b"foo", &mut buf);
+        assert!(matches!(r, Err(ReadKeyError::BufferTooSmall)));
     }
 
     #[test]
