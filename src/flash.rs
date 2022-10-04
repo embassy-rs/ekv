@@ -10,7 +10,7 @@ pub trait Flash {
 
 /// Fake in-memory flash
 pub struct MemFlash {
-    data: Vec<u8>,
+    pub data: Vec<u8>,
 }
 
 impl MemFlash {
