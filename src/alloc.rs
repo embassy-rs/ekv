@@ -20,6 +20,10 @@ impl Allocator {
         }
     }
 
+    pub fn reset(&mut self) {
+        self.pages.fill(PageState::Free);
+    }
+
     pub fn allocate(&mut self) -> PageID {
         let start = self.next_page_id;
         loop {

@@ -16,13 +16,14 @@ pub struct Database<F: Flash> {
 
 impl<F: Flash> Database<F> {
     pub fn format(flash: F) {
-        FileManager::format(flash);
+        let mut m = FileManager::new(flash);
+        m.format();
     }
 
     pub fn new(flash: F) -> Self {
-        Self {
-            files: FileManager::new(flash),
-        }
+        let mut m = FileManager::new(flash);
+        m.mount();
+        Self { files: m }
     }
 
     pub fn read_transaction(&mut self) -> ReadTransaction<'_, F> {
