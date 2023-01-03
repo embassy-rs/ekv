@@ -384,6 +384,9 @@ fn read_leb128<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader<F>) -> Resul
     let mut shift = 0;
     loop {
         let x = read_u8(m, r)?;
+        if shift >= 32 {
+            return Err(ReadError::Corrupted);
+        }
         res |= (x as u32 & 0x7F) << shift;
         if x & 0x80 == 0 {
             break;
