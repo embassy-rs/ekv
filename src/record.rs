@@ -24,6 +24,12 @@ impl<F: Flash> Database<F> {
     pub fn new(flash: F) -> Result<Self, Error> {
         let mut m = FileManager::new(flash);
         m.mount()?;
+
+        // TODO recover from this
+        if !m.is_empty(0) {
+            return Err(Error::Corrupted);
+        }
+
         Ok(Self { files: m })
     }
 
@@ -42,7 +48,7 @@ impl<F: Flash> Database<F> {
         }
 
         let file_id = self.find_empty_file_in_level(LEVEL_COUNT - 1).unwrap();
-        println!("writing {}", file_id);
+        trace!("record wtx: writing file {}", file_id);
         let w = self.files.write(file_id);
         Ok(WriteTransaction {
             db: self,
@@ -77,8 +83,8 @@ impl<F: Flash> Database<F> {
         assert!(self.files.is_empty(fw));
         let mut w = self.files.write(fw);
 
-        println!(
-            "compacting {}..{} -> {}",
+        trace!(
+            "record: compacting {}..{} -> {}",
             Self::file_id(level, 0),
             Self::file_id(level, BRANCHING_FACTOR - 1),
             fw
@@ -155,7 +161,7 @@ impl<F: Flash> Database<F> {
                     // Advance all the others
                     for j in 0..BRANCHING_FACTOR {
                         if j != i && (bits & 1 << j) != 0 {
-                            skip_value(m, &mut r[j]).unwrap();
+                            skip_value(m, &mut r[j]).map_err(|_| Error::Corrupted)?;
                             read_key_or_empty(m, &mut r[j], &mut k[j])?;
                         }
                     }
@@ -297,7 +303,7 @@ fn write_value<F: Flash>(m: &mut FileManager<F>, w: &mut FileWriter<F>, value: &
 }
 
 fn copy_value<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader<F>, w: &mut FileWriter<F>) -> Result<(), Error> {
-    let mut len = read_leb128(m, r).unwrap() as usize;
+    let mut len = read_leb128(m, r).map_err(|_| Error::Corrupted)? as usize;
     write_leb128(m, w, len as _)?;
 
     let mut buf = [0; 128];
@@ -305,7 +311,7 @@ fn copy_value<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader<F>, w: &mut F
         let n = len.min(buf.len());
         len -= n;
 
-        r.read(m, &mut buf[..n]).unwrap();
+        r.read(m, &mut buf[..n]).map_err(|_| Error::Corrupted)?;
         w.write(m, &buf[..n])?;
     }
     w.record_end();
