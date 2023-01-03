@@ -185,7 +185,7 @@ mod tests {
 
         let h = PageHeader {
             magic: PAGE_HEADER_MAGIC,
-            len: 1234,
+            len: 5,
             file_header: Header::DUMMY,
         };
         PageManager::write_page_header(f, 0, h);
