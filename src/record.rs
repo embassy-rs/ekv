@@ -33,6 +33,10 @@ impl<F: Flash> Database<F> {
         Ok(Self { files: m })
     }
 
+    pub fn flash_mut(&mut self) -> &mut F {
+        self.files.flash_mut()
+    }
+
     pub fn read_transaction(&mut self) -> Result<ReadTransaction<'_, F>, Error> {
         Ok(ReadTransaction { db: self })
     }

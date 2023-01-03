@@ -69,6 +69,10 @@ impl<F: Flash> FileManager<F> {
         }
     }
 
+    pub fn flash_mut(&mut self) -> &mut F {
+        &mut self.flash
+    }
+
     pub fn is_empty(&mut self, file_id: FileID) -> bool {
         self.files[file_id as usize].last_page.is_none()
     }
