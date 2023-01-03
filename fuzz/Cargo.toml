@@ -9,9 +9,8 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-
-[dependencies.ekv]
-path = ".."
+pretty_env_logger = "0.4"
+ekv = { path = ".." }
 
 
 [[bin]]
