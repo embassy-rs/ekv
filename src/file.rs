@@ -463,11 +463,11 @@ impl FileReader {
         if let ReaderState::Reading(s) = &mut self.state {
             // Only worth trying if the skip might not exhaust the current page
             if len < PAGE_MAX_PAYLOAD_SIZE {
-                    let n = s.reader.skip(len);
-                    len -= n;
-                    s.seq = s.seq.add(n).unwrap();
-                    }
-                }
+                let n = s.reader.skip(len);
+                len -= n;
+                s.seq = s.seq.add(n).unwrap();
+            }
+        }
 
         // If we got more to skip
         if len != 0 {
@@ -478,7 +478,7 @@ impl FileReader {
             };
 
             self.seek_seq(m, seq.add(len).unwrap())?;
-            }
+        }
 
         Ok(())
     }
@@ -606,6 +606,8 @@ impl Seq {
 
 #[cfg(test)]
 mod tests {
+
+    use rand::Rng;
 
     use super::*;
     use crate::flash::MemFlash;
@@ -1174,5 +1176,103 @@ mod tests {
             *v = i as u8 ^ (i >> 8) as u8 ^ (i >> 16) as u8 ^ (i >> 24) as u8;
         }
         res
+    }
+
+    fn rand(max: usize) -> usize {
+        rand::thread_rng().gen_range(0..max)
+    }
+
+    fn rand_between(from: usize, to: usize) -> usize {
+        rand::thread_rng().gen_range(from..=to)
+    }
+
+    #[test]
+    fn test_smoke() {
+        let mut f = MemFlash::new();
+        let mut m = FileManager::new(&mut f);
+        m.format();
+        m.mount().unwrap();
+
+        let mut seq_min = 0;
+        let mut seq_max = 0;
+        let file_id = 0;
+
+        let max_size = 2000;
+
+        for _ in 0..100000 {
+            match rand(20) {
+                // truncate
+                0 => {
+                    let s = rand_between(0, seq_max - seq_min);
+                    debug!("{} {}, truncate {}", seq_min, seq_max, s);
+                    m.commit_and_truncate(None, &[(file_id, s)]).unwrap();
+                    seq_min += s;
+                }
+                // append
+                _ => {
+                    let n = rand(1024);
+                    if seq_max - seq_min + n > max_size {
+                        continue;
+                    }
+
+                    debug!("{} {}, append {}", seq_min, seq_max, n);
+
+                    let data: Vec<_> = (0..n).map(|i| (seq_max + i) as u8).collect();
+
+                    let mut w = m.write(file_id);
+                    w.write(&mut m, &data).unwrap();
+                    m.commit(&mut w).unwrap();
+
+                    seq_max += n;
+                }
+            }
+
+            // ============ Check read all
+            debug!("{} {}, read_all", seq_min, seq_max);
+
+            let mut r = m.read(file_id);
+            let mut data = vec![0; seq_max - seq_min];
+            r.read(&mut m, &mut data).unwrap();
+            let want_data: Vec<_> = (0..seq_max - seq_min).map(|i| (seq_min + i) as u8).collect();
+            assert_eq!(data, want_data);
+
+            // Check we're at EOF
+            let mut buf = [0; 1];
+            assert_eq!(r.read(&mut m, &mut buf), Err(ReadError::Eof));
+
+            // ============ Check read seek
+            let s = rand_between(0, seq_max - seq_min);
+            debug!("{} {}, read_seek {}", seq_min, seq_max, s);
+
+            let mut r = m.read(file_id);
+            r.seek(&mut m, s).unwrap();
+            let mut data = vec![0; seq_max - seq_min - s];
+            r.read(&mut m, &mut data).unwrap();
+            let want_data: Vec<_> = (0..seq_max - seq_min - s).map(|i| (seq_min + s + i) as u8).collect();
+            assert_eq!(data, want_data);
+
+            // Check we're at EOF
+            let mut buf = [0; 1];
+            assert_eq!(r.read(&mut m, &mut buf), Err(ReadError::Eof));
+
+            // ============ Check read skip
+            let s1 = rand_between(0, seq_max - seq_min);
+            let s2 = rand_between(0, seq_max - seq_min - s1);
+            debug!("{} {}, read_skip {} {}", seq_min, seq_max, s1, s2);
+
+            let mut r = m.read(file_id);
+            r.skip(&mut m, s1).unwrap();
+            r.skip(&mut m, s2).unwrap();
+            let mut data = vec![0; seq_max - seq_min - s1 - s2];
+            r.read(&mut m, &mut data).unwrap();
+            let want_data: Vec<_> = (0..seq_max - seq_min - s1 - s2)
+                .map(|i| (seq_min + s1 + s2 + i) as u8)
+                .collect();
+            assert_eq!(data, want_data);
+
+            // Check we're at EOF
+            let mut buf = [0; 1];
+            assert_eq!(r.read(&mut m, &mut buf), Err(ReadError::Eof));
+        }
     }
 }
