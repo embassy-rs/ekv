@@ -30,6 +30,8 @@ None yet. This is a work in progress. Don't use it. When it's done, it will have
 - Add optional encryption + authentication support (which disables CRCs)
 - Async
 - Integrate with `embedded-storage`.
+- Free uncommitted pages on transaction drop.
+- Refactor page header: make meta and file pages have different magic so they can have different headers, instead of meta "abusing" the file header with prev_page_id = PageID::MAX-1 etc.
 
 ## Why the name?
 
