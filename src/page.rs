@@ -67,12 +67,11 @@ impl<F: Flash> PageManager<F> {
         Ok(h.file_header)
     }
 
-    pub fn read(&mut self, flash: &mut F, page_id: PageID) -> Result<(Header, PageReader<F>), Error> {
+    pub fn read(&mut self, flash: &mut F, page_id: PageID) -> Result<(Header, PageReader), Error> {
         let header = Self::read_page_header(flash, page_id)?;
         Ok((
             header.file_header,
             PageReader {
-                _phantom: PhantomData,
                 page_id,
                 len: header.len as _,
                 offset: 0,
@@ -80,23 +79,18 @@ impl<F: Flash> PageManager<F> {
         ))
     }
 
-    pub fn write(&mut self, _flash: &mut F, page_id: PageID) -> PageWriter<F> {
-        PageWriter {
-            _phantom: PhantomData,
-            page_id,
-            offset: 0,
-        }
+    pub fn write(&mut self, _flash: &mut F, page_id: PageID) -> PageWriter {
+        PageWriter { page_id, offset: 0 }
     }
 }
 
-pub struct PageReader<F: Flash> {
-    _phantom: PhantomData<F>,
+pub struct PageReader {
     page_id: PageID,
     offset: usize,
     len: usize,
 }
 
-impl<F: Flash> PageReader<F> {
+impl PageReader {
     pub fn available(&self) -> usize {
         self.len - self.offset
     }
@@ -110,7 +104,7 @@ impl<F: Flash> PageReader<F> {
         self.offset = offset;
     }
 
-    pub fn read(&mut self, flash: &mut F, data: &mut [u8]) -> usize {
+    pub fn read(&mut self, flash: &mut impl Flash, data: &mut [u8]) -> usize {
         let n = data.len().min(self.len - self.offset);
         let offset = PageHeader::SIZE + self.offset;
         flash.read(self.page_id as _, offset, &mut data[..n]);
@@ -125,13 +119,12 @@ impl<F: Flash> PageReader<F> {
     }
 }
 
-pub struct PageWriter<F: Flash> {
-    _phantom: PhantomData<F>,
+pub struct PageWriter {
     page_id: PageID,
     offset: usize,
 }
 
-impl<F: Flash> PageWriter<F> {
+impl PageWriter {
     pub fn offset(&self) -> usize {
         self.offset
     }
@@ -140,7 +133,7 @@ impl<F: Flash> PageWriter<F> {
         self.page_id
     }
 
-    pub fn write(&mut self, flash: &mut F, data: &[u8]) -> usize {
+    pub fn write(&mut self, flash: &mut impl Flash, data: &[u8]) -> usize {
         if data.len() == 0 {
             return 0;
         }
@@ -156,7 +149,7 @@ impl<F: Flash> PageWriter<F> {
         n
     }
 
-    pub fn commit(self, flash: &mut F, header: Header) {
+    pub fn commit(self, flash: &mut impl Flash, header: Header) {
         if self.offset == 0 {
             flash.erase(self.page_id as _);
         }

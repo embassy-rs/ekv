@@ -77,11 +77,11 @@ impl<F: Flash> FileManager<F> {
         self.files[file_id as usize].last_page.is_none()
     }
 
-    pub fn read(&mut self, file_id: FileID) -> FileReader<F> {
+    pub fn read(&mut self, file_id: FileID) -> FileReader {
         FileReader::new(self, file_id)
     }
 
-    pub fn write(&mut self, file_id: FileID) -> FileWriter<F> {
+    pub fn write(&mut self, file_id: FileID) -> FileWriter {
         FileWriter::new(self, file_id)
     }
 
@@ -211,15 +211,11 @@ impl<F: Flash> FileManager<F> {
         self.commit_and_truncate(None, &[])
     }
 
-    pub fn commit(&mut self, w: &mut FileWriter<F>) -> Result<(), Error> {
+    pub fn commit(&mut self, w: &mut FileWriter) -> Result<(), Error> {
         self.commit_and_truncate(Some(w), &[])
     }
 
-    pub fn commit_and_truncate(
-        &mut self,
-        w: Option<&mut FileWriter<F>>,
-        truncate: &[(FileID, Seq)],
-    ) -> Result<(), Error> {
+    pub fn commit_and_truncate(&mut self, w: Option<&mut FileWriter>, truncate: &[(FileID, Seq)]) -> Result<(), Error> {
         if let Some(w) = w {
             w.do_commit(self)?;
         }
@@ -311,7 +307,7 @@ impl<F: Flash> FileManager<F> {
         Ok(())
     }
 
-    fn read_page(&mut self, page_id: PageID) -> Result<(Header, PageReader<F>), Error> {
+    fn read_page(&mut self, page_id: PageID) -> Result<(Header, PageReader), Error> {
         self.pages.read(&mut self.flash, page_id)
     }
 
@@ -319,7 +315,7 @@ impl<F: Flash> FileManager<F> {
         self.pages.read_header(&mut self.flash, page_id)
     }
 
-    fn write_page(&mut self, page_id: PageID) -> PageWriter<F> {
+    fn write_page(&mut self, page_id: PageID) -> PageWriter {
         self.pages.write(&mut self.flash, page_id)
     }
 }
@@ -375,39 +371,39 @@ impl PagePointer {
     }
 }
 
-pub struct FileReader<F: Flash> {
+pub struct FileReader {
     file_id: FileID,
-    state: ReaderState<F>,
+    state: ReaderState,
 }
 
-enum ReaderState<F: Flash> {
+enum ReaderState {
     Created,
-    Reading(ReaderStateReading<F>),
+    Reading(ReaderStateReading),
     Finished,
 }
-struct ReaderStateReading<F: Flash> {
+struct ReaderStateReading {
     seq: Seq,
-    reader: PageReader<F>,
+    reader: PageReader,
 }
 
-impl<F: Flash> FileReader<F> {
-    fn new(_m: &mut FileManager<F>, file_id: FileID) -> Self {
+impl FileReader {
+    fn new(_m: &mut FileManager<impl Flash>, file_id: FileID) -> Self {
         Self {
             file_id,
             state: ReaderState::Created,
         }
     }
 
-    pub fn binary_search_start(&mut self, _m: &mut FileManager<F>) {
+    pub fn binary_search_start(&mut self, _m: &mut FileManager<impl Flash>) {
         // TODO
     }
 
-    pub fn binary_search_seek(&mut self, _m: &mut FileManager<F>, _direction: SeekDirection) -> bool {
+    pub fn binary_search_seek(&mut self, _m: &mut FileManager<impl Flash>, _direction: SeekDirection) -> bool {
         // TODO
         false
     }
 
-    fn next_page(&mut self, m: &mut FileManager<F>) -> Result<(), Error> {
+    fn next_page(&mut self, m: &mut FileManager<impl Flash>) -> Result<(), Error> {
         let seq = match &self.state {
             ReaderState::Created => m.files[self.file_id as usize].first_seq,
             ReaderState::Reading(s) => s.seq,
@@ -436,7 +432,7 @@ impl<F: Flash> FileReader<F> {
         Ok(())
     }
 
-    pub fn read(&mut self, m: &mut FileManager<F>, mut data: &mut [u8]) -> Result<(), ReadError> {
+    pub fn read(&mut self, m: &mut FileManager<impl Flash>, mut data: &mut [u8]) -> Result<(), ReadError> {
         while !data.is_empty() {
             match &mut self.state {
                 ReaderState::Finished => return Err(ReadError::Eof),
@@ -457,7 +453,7 @@ impl<F: Flash> FileReader<F> {
         Ok(())
     }
 
-    pub fn skip(&mut self, m: &mut FileManager<F>, mut len: usize) -> Result<(), ReadError> {
+    pub fn skip(&mut self, m: &mut FileManager<impl Flash>, mut len: usize) -> Result<(), ReadError> {
         while len != 0 {
             match &mut self.state {
                 ReaderState::Finished => return Err(ReadError::Eof),
@@ -479,15 +475,15 @@ impl<F: Flash> FileReader<F> {
     }
 }
 
-pub struct FileWriter<F: Flash> {
+pub struct FileWriter {
     file_id: FileID,
     last_page: Option<PagePointer>,
     seq: Seq,
-    writer: Option<PageWriter<F>>,
+    writer: Option<PageWriter>,
 }
 
-impl<F: Flash> FileWriter<F> {
-    fn new(m: &mut FileManager<F>, file_id: FileID) -> Self {
+impl FileWriter {
+    fn new(m: &mut FileManager<impl Flash>, file_id: FileID) -> Self {
         let f = &m.files[file_id as usize];
 
         Self {
@@ -498,7 +494,7 @@ impl<F: Flash> FileWriter<F> {
         }
     }
 
-    fn flush_header(&mut self, m: &mut FileManager<F>, w: PageWriter<F>) -> Result<(), Error> {
+    fn flush_header(&mut self, m: &mut FileManager<impl Flash>, w: PageWriter) -> Result<(), Error> {
         let page_size = w.offset().try_into().unwrap();
         let page_id = w.page_id();
         let header = Header {
@@ -513,7 +509,7 @@ impl<F: Flash> FileWriter<F> {
         Ok(())
     }
 
-    fn next_page(&mut self, m: &mut FileManager<F>) -> Result<(), Error> {
+    fn next_page(&mut self, m: &mut FileManager<impl Flash>) -> Result<(), Error> {
         if let Some(w) = mem::replace(&mut self.writer, None) {
             self.flush_header(m, w)?;
         }
@@ -523,7 +519,7 @@ impl<F: Flash> FileWriter<F> {
         Ok(())
     }
 
-    pub fn write(&mut self, m: &mut FileManager<F>, mut data: &[u8]) -> Result<(), Error> {
+    pub fn write(&mut self, m: &mut FileManager<impl Flash>, mut data: &[u8]) -> Result<(), Error> {
         while !data.is_empty() {
             match &mut self.writer {
                 None => {
@@ -542,7 +538,7 @@ impl<F: Flash> FileWriter<F> {
         Ok(())
     }
 
-    fn do_commit(&mut self, m: &mut FileManager<F>) -> Result<(), Error> {
+    fn do_commit(&mut self, m: &mut FileManager<impl Flash>) -> Result<(), Error> {
         if let Some(w) = mem::replace(&mut self.writer, None) {
             self.flush_header(m, w)?;
             let f = &mut m.files[self.file_id as usize];
@@ -552,7 +548,7 @@ impl<F: Flash> FileWriter<F> {
         Ok(())
     }
 
-    pub fn discard(&mut self, m: &mut FileManager<F>) {
+    pub fn discard(&mut self, m: &mut FileManager<impl Flash>) {
         if let Some(w) = &self.writer {
             // Free the page we're writing now (not yet committed)
             let page_id = w.page_id();

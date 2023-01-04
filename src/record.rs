@@ -95,17 +95,17 @@ impl<F: Flash> Database<F> {
         );
 
         // Open all files in level for reading.
-        let mut r: [MaybeUninit<FileReader<F>>; BRANCHING_FACTOR] = unsafe { MaybeUninit::uninit().assume_init() };
+        let mut r: [MaybeUninit<FileReader>; BRANCHING_FACTOR] = unsafe { MaybeUninit::uninit().assume_init() };
         for i in 0..BRANCHING_FACTOR {
             r[i].write(self.files.read(Self::file_id(level, i)));
         }
-        let r = unsafe { &mut *(&mut r as *mut _ as *mut [FileReader<F>; BRANCHING_FACTOR]) };
+        let r = unsafe { &mut *(&mut r as *mut _ as *mut [FileReader; BRANCHING_FACTOR]) };
 
         let m = &mut self.files;
 
         fn read_key_or_empty<F: Flash>(
             m: &mut FileManager<F>,
-            r: &mut FileReader<F>,
+            r: &mut FileReader,
             buf: &mut Vec<u8, MAX_KEY_SIZE>,
         ) -> Result<(), Error> {
             match read_key(m, r, buf) {
@@ -252,7 +252,7 @@ impl<'a, F: Flash + 'a> ReadTransaction<'a, F> {
 
 pub struct WriteTransaction<'a, F: Flash + 'a> {
     db: &'a mut Database<F>,
-    w: FileWriter<F>,
+    w: FileWriter,
     last_key: Vec<u8, MAX_KEY_SIZE>,
 }
 
@@ -280,25 +280,20 @@ impl<'a, F: Flash + 'a> WriteTransaction<'a, F> {
     }
 }
 
-fn write_record<F: Flash>(
-    m: &mut FileManager<F>,
-    w: &mut FileWriter<F>,
-    key: &[u8],
-    value: &[u8],
-) -> Result<(), Error> {
+fn write_record<F: Flash>(m: &mut FileManager<F>, w: &mut FileWriter, key: &[u8], value: &[u8]) -> Result<(), Error> {
     write_key(m, w, key)?;
     write_value(m, w, value)?;
     Ok(())
 }
 
-fn write_key<F: Flash>(m: &mut FileManager<F>, w: &mut FileWriter<F>, key: &[u8]) -> Result<(), Error> {
+fn write_key<F: Flash>(m: &mut FileManager<F>, w: &mut FileWriter, key: &[u8]) -> Result<(), Error> {
     let key_len: u32 = key.len().try_into().unwrap();
     write_leb128(m, w, key_len)?;
     w.write(m, key)?;
     Ok(())
 }
 
-fn write_value<F: Flash>(m: &mut FileManager<F>, w: &mut FileWriter<F>, value: &[u8]) -> Result<(), Error> {
+fn write_value<F: Flash>(m: &mut FileManager<F>, w: &mut FileWriter, value: &[u8]) -> Result<(), Error> {
     let value_len: u32 = value.len().try_into().unwrap();
     write_leb128(m, w, value_len)?;
     w.write(m, value)?;
@@ -306,7 +301,7 @@ fn write_value<F: Flash>(m: &mut FileManager<F>, w: &mut FileWriter<F>, value: &
     Ok(())
 }
 
-fn copy_value<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader<F>, w: &mut FileWriter<F>) -> Result<(), Error> {
+fn copy_value<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader, w: &mut FileWriter) -> Result<(), Error> {
     let mut len = read_leb128(m, r).map_err(|_| Error::Corrupted)? as usize;
     write_leb128(m, w, len as _)?;
 
@@ -322,7 +317,7 @@ fn copy_value<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader<F>, w: &mut F
     Ok(())
 }
 
-fn write_leb128<F: Flash>(m: &mut FileManager<F>, w: &mut FileWriter<F>, mut val: u32) -> Result<(), Error> {
+fn write_leb128<F: Flash>(m: &mut FileManager<F>, w: &mut FileWriter, mut val: u32) -> Result<(), Error> {
     loop {
         let mut part = val & 0x7F;
         let rest = val >> 7;
@@ -342,7 +337,7 @@ fn write_leb128<F: Flash>(m: &mut FileManager<F>, w: &mut FileWriter<F>, mut val
 
 fn read_key<F: Flash>(
     m: &mut FileManager<F>,
-    r: &mut FileReader<F>,
+    r: &mut FileReader,
     buf: &mut Vec<u8, MAX_KEY_SIZE>,
 ) -> Result<(), ReadError> {
     let len = read_leb128(m, r)? as usize;
@@ -354,11 +349,7 @@ fn read_key<F: Flash>(
     r.read(m, buf)
 }
 
-fn read_value<F: Flash>(
-    m: &mut FileManager<F>,
-    r: &mut FileReader<F>,
-    value: &mut [u8],
-) -> Result<usize, ReadKeyError> {
+fn read_value<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader, value: &mut [u8]) -> Result<usize, ReadKeyError> {
     let len = read_leb128(m, r).map_err(|_| ReadKeyError::Corrupted)? as usize;
     if len > value.len() {
         return Err(ReadKeyError::BufferTooSmall);
@@ -367,19 +358,19 @@ fn read_value<F: Flash>(
     Ok(len)
 }
 
-fn skip_value<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader<F>) -> Result<(), ReadError> {
+fn skip_value<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader) -> Result<(), ReadError> {
     let len = read_leb128(m, r)? as usize;
     r.skip(m, len)?;
     Ok(())
 }
 
-fn read_u8<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader<F>) -> Result<u8, ReadError> {
+fn read_u8<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader) -> Result<u8, ReadError> {
     let mut buf = [0u8; 1];
     r.read(m, &mut buf)?;
     Ok(buf[0])
 }
 
-fn read_leb128<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader<F>) -> Result<u32, ReadError> {
+fn read_leb128<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader) -> Result<u32, ReadError> {
     let mut res = 0;
     let mut shift = 0;
     loop {
