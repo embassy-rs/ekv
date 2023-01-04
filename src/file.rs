@@ -215,19 +215,20 @@ impl<F: Flash> FileManager<F> {
         self.commit_and_truncate(Some(w), &[])
     }
 
-    pub fn commit_and_truncate(&mut self, w: Option<&mut FileWriter>, truncate: &[(FileID, Seq)]) -> Result<(), Error> {
+    pub fn commit_and_truncate(
+        &mut self,
+        w: Option<&mut FileWriter>,
+        truncate: &[(FileID, usize)],
+    ) -> Result<(), Error> {
         if let Some(w) = w {
             w.do_commit(self)?;
         }
 
-        for &(file_id, mut seq) in truncate {
+        for &(file_id, trunc_len) in truncate {
             let f = &mut self.files[file_id as usize];
-            assert!(seq >= f.first_seq);
-            // TODO remove
-            if seq > f.last_seq {
-                seq = f.last_seq
-            }
-            assert!(seq <= f.last_seq);
+
+            let len = f.last_seq.sub(f.first_seq);
+            let seq = f.first_seq.add(len.min(trunc_len))?;
 
             let old_seq = f.first_seq;
             let p = if seq == f.last_seq {
@@ -691,14 +692,14 @@ mod tests {
         w.write(&mut m, &[1, 2, 3, 4, 5]).unwrap();
         m.commit(&mut w).unwrap();
 
-        m.commit_and_truncate(None, &[(0, Seq(2))]).unwrap();
+        m.commit_and_truncate(None, &[(0, 2)]).unwrap();
 
         let mut r = m.read(0);
         let mut buf = [0; 3];
         r.read(&mut m, &mut buf).unwrap();
         assert_eq!(buf, [3, 4, 5]);
 
-        m.commit_and_truncate(None, &[(0, Seq(3))]).unwrap();
+        m.commit_and_truncate(None, &[(0, 1)]).unwrap();
 
         let mut r = m.read(0);
         let mut buf = [0; 2];
@@ -728,21 +729,21 @@ mod tests {
         let mut w = m.write(0);
         w.write(&mut m, &[6, 7, 8, 9]).unwrap();
 
-        m.commit_and_truncate(Some(&mut w), &[(0, Seq(2))]).unwrap();
+        m.commit_and_truncate(Some(&mut w), &[(0, 2)]).unwrap();
 
         let mut r = m.read(0);
         let mut buf = [0; 7];
         r.read(&mut m, &mut buf).unwrap();
         assert_eq!(buf, [3, 4, 5, 6, 7, 8, 9]);
 
-        m.commit_and_truncate(None, &[(0, Seq(3))]).unwrap();
+        m.commit_and_truncate(None, &[(0, 1)]).unwrap();
 
         let mut r = m.read(0);
         let mut buf = [0; 6];
         r.read(&mut m, &mut buf).unwrap();
         assert_eq!(buf, [4, 5, 6, 7, 8, 9]);
 
-        m.commit_and_truncate(None, &[(0, Seq(8))]).unwrap();
+        m.commit_and_truncate(None, &[(0, 5)]).unwrap();
 
         let mut r = m.read(0);
         let mut buf = [0; 1];
@@ -780,7 +781,7 @@ mod tests {
 
         assert_eq!(m.alloc.is_used(1), true);
 
-        m.commit_and_truncate(None, &[(0, Seq(5))]).unwrap();
+        m.commit_and_truncate(None, &[(0, 5)]).unwrap();
 
         assert_eq!(m.alloc.is_used(1), false);
 
@@ -810,7 +811,7 @@ mod tests {
 
         assert_eq!(m.alloc.is_used(1), true);
 
-        m.commit_and_truncate(None, &[(0, Seq(5))]).unwrap();
+        m.commit_and_truncate(None, &[(0, 5)]).unwrap();
 
         assert_eq!(m.alloc.is_used(1), false);
 
@@ -844,13 +845,11 @@ mod tests {
         assert_eq!(m.alloc.is_used(1), true);
         assert_eq!(m.alloc.is_used(2), true);
 
-        m.commit_and_truncate(None, &[(0, Seq(PAGE_MAX_PAYLOAD_SIZE as _))])
-            .unwrap();
+        m.commit_and_truncate(None, &[(0, PAGE_MAX_PAYLOAD_SIZE)]).unwrap();
         assert_eq!(m.alloc.is_used(1), false);
         assert_eq!(m.alloc.is_used(2), true);
 
-        m.commit_and_truncate(None, &[(0, Seq(PAGE_MAX_PAYLOAD_SIZE as u32 * 2))])
-            .unwrap();
+        m.commit_and_truncate(None, &[(0, PAGE_MAX_PAYLOAD_SIZE)]).unwrap();
         assert_eq!(m.alloc.is_used(1), false);
         assert_eq!(m.alloc.is_used(2), false);
 

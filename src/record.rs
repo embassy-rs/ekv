@@ -173,9 +173,9 @@ impl<F: Flash> Database<F> {
             }
         }
 
-        let mut truncate = [(0, Seq::MAX); BRANCHING_FACTOR];
+        let mut truncate = [(0, usize::MAX); BRANCHING_FACTOR];
         for i in 0..BRANCHING_FACTOR {
-            truncate[i] = (Self::file_id(level, i), Seq::MAX);
+            truncate[i] = (Self::file_id(level, i), usize::MAX);
         }
         self.files.commit_and_truncate(Some(&mut w), &truncate)?;
 
