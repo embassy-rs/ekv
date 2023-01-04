@@ -410,6 +410,10 @@ impl FileReader {
             ReaderState::Reading(s) => s.seq,
             ReaderState::Finished => unreachable!(),
         };
+        self.seek_seq(m, seq)
+    }
+
+    fn seek_seq(&mut self, m: &mut FileManager<impl Flash>, seq: Seq) -> Result<(), Error> {
         self.state = match m.get_file_page(self.file_id, seq)? {
             Some(pp) => {
                 let (h, mut r) = m.read_page(pp.page_id).inspect_err(|e| {
@@ -455,24 +459,32 @@ impl FileReader {
     }
 
     pub fn skip(&mut self, m: &mut FileManager<impl Flash>, mut len: usize) -> Result<(), ReadError> {
-        while len != 0 {
-            match &mut self.state {
-                ReaderState::Finished => return Err(ReadError::Eof),
-                ReaderState::Created => {
-                    self.next_page(m)?;
-                    continue;
-                }
-                ReaderState::Reading(s) => {
+        // advance within the current page.
+        if let ReaderState::Reading(s) = &mut self.state {
+            // Only worth trying if the skip might not exhaust the current page
+            if len < PAGE_MAX_PAYLOAD_SIZE {
                     let n = s.reader.skip(len);
                     len -= n;
                     s.seq = s.seq.add(n).unwrap();
-                    if n == 0 {
-                        self.next_page(m)?;
                     }
                 }
+
+        // If we got more to skip
+        if len != 0 {
+            let seq = match &self.state {
+                ReaderState::Created => m.files[self.file_id as usize].first_seq,
+                ReaderState::Reading(s) => s.seq,
+                ReaderState::Finished => unreachable!(),
+            };
+
+            self.seek_seq(m, seq.add(len).unwrap())?;
             }
-        }
+
         Ok(())
+    }
+
+    pub fn seek(&mut self, m: &mut FileManager<impl Flash>, offs: usize) -> Result<(), Error> {
+        self.seek_seq(m, m.files[self.file_id as usize].first_seq.add(offs).unwrap())
     }
 }
 
