@@ -190,6 +190,15 @@ impl<F: Flash> FileManager<F> {
                 header: h,
             });
 
+            // note: first_seq == last_seq is corruption too, because in that case what we do is delete the file.
+            if fi.first_seq >= last_seq {
+                debug!(
+                    "meta: file {} first_seq {:?} not smaller than last_seq {:?}",
+                    file_id, fi.first_seq, last_seq
+                );
+                return Err(Error::Corrupted);
+            }
+
             self.files[file_id as usize] = FileState {
                 last_page: p,
                 first_seq: fi.first_seq,
