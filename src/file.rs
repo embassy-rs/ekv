@@ -517,14 +517,26 @@ impl FileReader {
                 ReaderState::Finished => unreachable!(),
             };
 
-            self.seek_seq(m, seq.add(len).unwrap())?;
+            let new_seq = seq.add(len).map_err(|_| ReadError::Eof)?;
+            if new_seq > m.files[self.file_id as usize].last_seq {
+                return Err(ReadError::Eof);
+            }
+
+            self.seek_seq(m, new_seq)?;
         }
 
         Ok(())
     }
 
-    pub fn seek(&mut self, m: &mut FileManager<impl Flash>, offs: usize) -> Result<(), Error> {
-        self.seek_seq(m, m.files[self.file_id as usize].first_seq.add(offs).unwrap())
+    pub fn seek(&mut self, m: &mut FileManager<impl Flash>, offs: usize) -> Result<(), ReadError> {
+        let first_seq = m.files[self.file_id as usize].first_seq;
+        let new_seq = first_seq.add(offs).map_err(|_| ReadError::Eof)?;
+        if new_seq > m.files[self.file_id as usize].last_seq {
+            return Err(ReadError::Eof);
+        }
+
+        self.seek_seq(m, new_seq)?;
+        Ok(())
     }
 }
 
