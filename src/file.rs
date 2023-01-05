@@ -16,14 +16,17 @@ pub enum SeekDirection {
 #[repr(C)]
 pub struct Header {
     seq: Seq,
-    previous_page_id: PageID, // TODO add a skiplist for previous pages, instead of just storing the immediately previous one.
+
+    // skiplist[0] = previous page, always.
+    // skiplist[i] = latest page that contains a byte with seq multiple of 2**(SKIPLIST_SHIFT+i)
+    skiplist: [PageID; SKIPLIST_LEN],
 }
 
 impl Header {
     #[cfg(test)]
     pub const DUMMY: Self = Self {
         seq: Seq(3),
-        previous_page_id: 2,
+        skiplist: [4; SKIPLIST_LEN],
     };
 }
 
@@ -36,6 +39,7 @@ pub struct FileMeta {
 }
 impl_bytes!(FileMeta);
 
+#[derive(Debug)]
 struct FileState {
     last_page: Option<PagePointer>,
     first_seq: Seq,
@@ -89,7 +93,7 @@ impl<F: Flash> FileManager<F> {
         // Erase all meta pages.
         for page_id in 0..PAGE_COUNT {
             if let Ok(h) = self.read_header(page_id as _) {
-                if h.previous_page_id == PageID::MAX - 1 {
+                if h.skiplist[0] == PageID::MAX - 1 {
                     self.flash.erase(page_id);
                 }
             }
@@ -101,7 +105,7 @@ impl<F: Flash> FileManager<F> {
             &mut self.flash,
             Header {
                 seq: Seq(1),
-                previous_page_id: PageID::MAX - 1,
+                skiplist: [PageID::MAX - 1; SKIPLIST_LEN],
             },
         );
     }
@@ -113,7 +117,7 @@ impl<F: Flash> FileManager<F> {
         let mut meta_seq = Seq::ZERO;
         for page_id in 0..PAGE_COUNT {
             if let Ok(h) = self.read_header(page_id as _) {
-                if h.previous_page_id == PageID::MAX - 1 && h.seq > meta_seq {
+                if h.skiplist[0] == PageID::MAX - 1 && h.seq > meta_seq {
                     meta_page_id = Some(page_id as PageID);
                     meta_seq = h.seq;
                 }
@@ -268,7 +272,7 @@ impl<F: Flash> FileManager<F> {
             &mut self.flash,
             Header {
                 seq: self.meta_seq,
-                previous_page_id: PageID::MAX - 1,
+                skiplist: [PageID::MAX - 1; SKIPLIST_LEN],
             },
         );
 
@@ -286,7 +290,7 @@ impl<F: Flash> FileManager<F> {
         if seq < f.first_seq || seq >= f.last_seq {
             Ok(None)
         } else {
-            last.prev_seq(self, seq)
+            Ok(Some(last.prev_seq(self, seq)?))
         }
     }
 
@@ -319,6 +323,13 @@ impl<F: Flash> FileManager<F> {
     fn write_page(&mut self, page_id: PageID) -> PageWriter {
         self.pages.write(&mut self.flash, page_id)
     }
+
+    fn dump(&mut self) {
+        for (file_id, f) in self.files.iter().enumerate() {
+            debug!("==== FILE {}", file_id);
+            debug!("{:?}", f);
+        }
+    }
 }
 
 /// "cursor" pointing to a page within a file.
@@ -334,7 +345,7 @@ impl PagePointer {
             return Ok(None);
         }
 
-        let p2 = self.header.previous_page_id;
+        let p2 = self.header.skiplist[0];
         if p2 == PageID::MAX {
             return Ok(None);
         }
@@ -360,15 +371,35 @@ impl PagePointer {
         }))
     }
 
-    fn prev_seq(self, m: &mut FileManager<impl Flash>, seq: Seq) -> Result<Option<PagePointer>, Error> {
-        let mut p = self;
-        while p.header.seq > seq {
-            p = match p.prev(m, Seq::ZERO)? {
-                Some(p) => p,
-                None => return Ok(None),
+    fn prev_seq(mut self, m: &mut FileManager<impl Flash>, seq: Seq) -> Result<PagePointer, Error> {
+        while self.header.seq > seq {
+            let i = skiplist_index(seq, self.header.seq);
+            let p2 = self.header.skiplist[i];
+            if p2 == PageID::MAX {
+                debug!("no prev page??");
+                return Err(Error::Corrupted);
+            }
+            if p2 >= PAGE_COUNT as _ {
+                debug!("prev page out of range {}", p2);
+                return Err(Error::Corrupted);
+            }
+
+            let h2 = m.read_header(p2)?;
+
+            // Check seq always decreases. This avoids infinite loops
+            if h2.seq >= self.header.seq {
+                debug!(
+                    "seq not decreasing when walking back: curr={:?} prev={:?}",
+                    self.header.seq, h2.seq
+                );
+                return Err(Error::Corrupted);
+            }
+            self = PagePointer {
+                page_id: p2,
+                header: h2,
             }
         }
-        Ok(Some(p))
+        Ok(self)
     }
 }
 
@@ -510,9 +541,17 @@ impl FileWriter {
     fn flush_header(&mut self, m: &mut FileManager<impl Flash>, w: PageWriter) -> Result<(), Error> {
         let page_size = w.offset().try_into().unwrap();
         let page_id = w.page_id();
+        let mut skiplist = [PageID::MAX; SKIPLIST_LEN];
+        if let Some(last_page) = &self.last_page {
+            skiplist = last_page.header.skiplist;
+
+            let top = skiplist_index(last_page.header.seq, self.seq) + 1;
+            skiplist[..top].fill(last_page.page_id);
+        }
+
         let header = Header {
-            previous_page_id: self.last_page.map(|p| p.page_id).unwrap_or(PageID::MAX),
             seq: self.seq,
+            skiplist,
         };
         w.commit(&mut m.flash, header);
 
@@ -602,6 +641,25 @@ impl Seq {
         };
         Ok(Self(res))
     }
+}
+
+/// Find the highest amount of trailing zeros in all numbers in `a..b`.
+///
+/// Requires a < b.
+/// Thanks @jannic for figuring out the beautiful bitwise hack!
+fn max_trailing_zeros_between(a: u32, b: u32) -> u32 {
+    assert!(a < b);
+
+    if a == 0 {
+        return 32;
+    }
+
+    31u32 - ((a - 1) ^ (b - 1)).leading_zeros()
+}
+
+fn skiplist_index(from: Seq, to: Seq) -> usize {
+    let bits = max_trailing_zeros_between(from.0, to.0) as usize;
+    bits.saturating_sub(SKIPLIST_SHIFT).min(SKIPLIST_LEN - 1)
 }
 
 #[cfg(test)]
@@ -1273,6 +1331,67 @@ mod tests {
             // Check we're at EOF
             let mut buf = [0; 1];
             assert_eq!(r.read(&mut m, &mut buf), Err(ReadError::Eof));
+        }
+    }
+
+    #[test]
+    fn test_max_trailing_zeros_between() {
+        fn slow(a: u32, b: u32) -> u32 {
+            assert!(a < b);
+            (a..b).map(|x| x.trailing_zeros()).max().unwrap()
+        }
+
+        fn meh(a: u32, b: u32) -> u32 {
+            assert!(a < b);
+
+            if a == 0 {
+                return 32;
+            }
+
+            for i in (0..32).rev() {
+                let x = (b - 1) >> i << i;
+                if x >= a && x < b {
+                    return i;
+                }
+            }
+            0
+        }
+
+        // Test slow matches meh and fast.
+        for a in 0..100 {
+            for b in a + 1..100 {
+                assert_eq!(slow(a, b), max_trailing_zeros_between(a, b), "failed at {} {}", a, b);
+                assert_eq!(slow(a, b), meh(a, b), "failed at {} {}", a, b);
+            }
+        }
+
+        // Test meh matches fast, for bigger numbers.
+        let interesting = [
+            0x0000_0000,
+            0x0000_0001,
+            0x0000_0002,
+            0x3FFF_FFFE,
+            0x3FFF_FFFF,
+            0x4000_0000,
+            0x4000_0001,
+            0x7FFF_FFFE,
+            0x7FFF_FFFF,
+            0x8000_0000,
+            0x8000_0001,
+            0xBFFF_FFFE,
+            0xBFFF_FFFF,
+            0xC000_0000,
+            0xC000_0001,
+            0xFFFF_FFFE,
+            0x7FFF_FFFF,
+        ];
+
+        for a in interesting {
+            for b in interesting {
+                if a < b {
+                    assert_eq!(meh(a, b), max_trailing_zeros_between(a, b), "failed at {} {}", a, b);
+                }
+            }
         }
     }
 }

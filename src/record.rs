@@ -9,8 +9,6 @@ use crate::flash::Flash;
 use crate::page::ReadError;
 use crate::{Error, ReadKeyError};
 
-pub const MAX_KEY_SIZE: usize = 64;
-
 pub struct Database<F: Flash> {
     files: FileManager<F>,
 }
