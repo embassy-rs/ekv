@@ -4,7 +4,7 @@ use std::mem::MaybeUninit;
 use heapless::Vec;
 
 use crate::config::*;
-use crate::file::{FileManager, FileReader, FileWriter, SeekDirection, Seq};
+use crate::file::{FileManager, FileReader, FileSearcher, FileWriter, SeekDirection, Seq};
 use crate::flash::Flash;
 use crate::page::ReadError;
 use crate::{Error, ReadKeyError};
@@ -201,46 +201,46 @@ impl<'a, F: Flash + 'a> ReadTransaction<'a, F> {
     }
 
     fn read_in_file(&mut self, file_id: FileID, key: &[u8], value: &mut [u8]) -> Result<usize, ReadKeyError> {
-        let r = &mut self.db.files.read(file_id);
+        let r = self.db.files.read(file_id);
         let m = &mut self.db.files;
+        let mut s = FileSearcher::new(r);
 
         let mut key_buf = Vec::new();
 
         // Binary search
-        r.binary_search_start(m);
-        loop {
-            match read_key(m, r, &mut key_buf) {
+        //let mut ok = s.start(m)?;
+        let mut ok = false;
+        while ok {
+            match read_key(m, s.reader(), &mut key_buf) {
                 Err(ReadError::Eof) => return Ok(0), // key not present.
                 x => x?,
             };
 
             // Found?
             let dir = match key_buf[..].cmp(key) {
-                Ordering::Equal => return read_value(m, r, value),
+                Ordering::Equal => return read_value(m, s.reader(), value),
                 Ordering::Less => SeekDirection::Right,
                 Ordering::Greater => SeekDirection::Left,
             };
 
             // Not found, do a binary search step.
-            if !r.binary_search_seek(m, dir) {
-                // Can't seek anymore. In this case, the read pointer wasn't moved.
-                // Skip the value from the key we read above, then go do linear search.
-
-                skip_value(m, r)?;
-                break;
-            }
+            ok = s.seek(m, dir)?;
         }
+
+        let r = s.reader();
 
         // Linear search
         loop {
             match read_key(m, r, &mut key_buf) {
                 Err(ReadError::Eof) => return Ok(0), // key not present.
                 x => x?,
-            };
+            }
 
             // Found?
-            if key_buf == key {
-                return read_value(m, r, value);
+            match key_buf[..].cmp(key) {
+                Ordering::Equal => return read_value(m, r, value),
+                Ordering::Less => {}               // keep going
+                Ordering::Greater => return Ok(0), // not present.
             }
 
             skip_value(m, r)?;
@@ -387,6 +387,7 @@ fn read_leb128<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader) -> Result<u
 
 #[cfg(test)]
 mod tests {
+    use test_log::test;
 
     use super::*;
     use crate::flash::MemFlash;

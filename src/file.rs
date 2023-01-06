@@ -328,14 +328,17 @@ impl<F: Flash> FileManager<F> {
     }
 
     fn read_page(&mut self, page_id: PageID) -> Result<(Header, PageReader), Error> {
+        assert!(page_id != PageID::MAX);
         self.pages.read(&mut self.flash, page_id)
     }
 
     fn read_header(&mut self, page_id: PageID) -> Result<Header, Error> {
+        assert!(page_id != PageID::MAX);
         self.pages.read_header(&mut self.flash, page_id)
     }
 
     fn write_page(&mut self, page_id: PageID) -> PageWriter {
+        assert!(page_id != PageID::MAX);
         self.pages.write(&mut self.flash, page_id)
     }
 
@@ -441,21 +444,16 @@ impl FileReader {
         }
     }
 
-    pub fn binary_search_start(&mut self, _m: &mut FileManager<impl Flash>) {
-        // TODO
-    }
-
-    pub fn binary_search_seek(&mut self, _m: &mut FileManager<impl Flash>, _direction: SeekDirection) -> bool {
-        // TODO
-        false
-    }
-
-    fn next_page(&mut self, m: &mut FileManager<impl Flash>) -> Result<(), Error> {
-        let seq = match &self.state {
+    fn curr_seq(&mut self, m: &mut FileManager<impl Flash>) -> Seq {
+        match &self.state {
             ReaderState::Created => m.files[self.file_id as usize].first_seq,
             ReaderState::Reading(s) => s.seq,
             ReaderState::Finished => unreachable!(),
-        };
+        }
+    }
+
+    fn next_page(&mut self, m: &mut FileManager<impl Flash>) -> Result<(), Error> {
+        let seq = self.curr_seq(m);
         self.seek_seq(m, seq)
     }
 
@@ -534,6 +532,11 @@ impl FileReader {
         Ok(())
     }
 
+    pub fn offset(&mut self, m: &mut FileManager<impl Flash>) -> usize {
+        let first_seq = m.files[self.file_id as usize].first_seq;
+        self.curr_seq(m).sub(first_seq)
+    }
+
     pub fn seek(&mut self, m: &mut FileManager<impl Flash>, offs: usize) -> Result<(), ReadError> {
         let first_seq = m.files[self.file_id as usize].first_seq;
         let new_seq = first_seq.add(offs).map_err(|_| ReadError::Eof)?;
@@ -543,6 +546,125 @@ impl FileReader {
 
         self.seek_seq(m, new_seq)?;
         Ok(())
+    }
+}
+
+pub struct FileSearcher {
+    r: FileReader,
+
+    left: Seq,
+    left_page: PageID,
+
+    right: Seq,
+    right_skiplist: [PageID; SKIPLIST_LEN],
+
+    curr: Seq,
+    curr_page: PageID,
+    curr_skiplist: [PageID; SKIPLIST_LEN],
+}
+
+impl FileSearcher {
+    pub fn new(r: FileReader) -> Self {
+        Self {
+            r,
+            left: Seq::MAX,
+            left_page: PageID::MAX,
+            right: Seq::MAX,
+            right_skiplist: [PageID::MAX; SKIPLIST_LEN],
+            curr: Seq::MAX,
+            curr_page: PageID::MAX,
+            curr_skiplist: [PageID::MAX; SKIPLIST_LEN],
+        }
+    }
+
+    pub fn start(&mut self, m: &mut FileManager<impl Flash>) -> Result<bool, Error> {
+        let f = &m.files[self.r.file_id as usize];
+        self.left = f.first_seq;
+        self.right = f.last_seq;
+
+        match f.last_page {
+            Some(pp) => {
+                // Create skiplist.
+                self.right_skiplist = pp.header.skiplist;
+                let top = skiplist_index(pp.header.seq, f.last_seq) + 1;
+                self.right_skiplist[..top].fill(pp.page_id);
+
+                trace!(
+                    "search start: left {:?} right {:?} right_skiplist {:?}",
+                    self.left,
+                    self.right,
+                    self.right_skiplist
+                );
+                self.really_seek(m)
+            }
+            None => {
+                trace!("search start: empty file");
+                Ok(false)
+            }
+        }
+    }
+
+    pub fn reader(&mut self) -> &mut FileReader {
+        &mut self.r
+    }
+
+    fn really_seek(&mut self, m: &mut FileManager<impl Flash>) -> Result<bool, Error> {
+        let left = self.left.add(1).unwrap();
+        let mut i = if left >= self.right {
+            0
+        } else {
+            skiplist_index(left, self.right)
+        };
+        while self.right_skiplist[i] == self.left_page || self.right_skiplist[i] == PageID::MAX {
+            if i == 0 {
+                self.seek_to_page(m, self.left_page)?;
+                return Ok(false);
+            }
+            i -= 1;
+        }
+        self.seek_to_page(m, self.right_skiplist[i])?;
+        Ok(true)
+    }
+
+    fn seek_to_page(&mut self, m: &mut FileManager<impl Flash>, page_id: PageID) -> Result<(), Error> {
+        let (h, mut r) = m.read_page(page_id).inspect_err(|e| {
+            debug!("failed read next page={}: {:?}", page_id, e);
+        })?;
+        self.r.state = ReaderState::Reading(ReaderStateReading { seq: h.seq, reader: r });
+        self.curr = h.seq;
+        self.curr_skiplist = h.skiplist;
+        self.curr_page = page_id;
+        trace!(
+            "search: curr page {:?} seq {:?} skiplist {:?}",
+            self.curr_page,
+            self.curr,
+            self.curr_skiplist
+        );
+
+        if h.skiplist[0] == PageID::MAX {
+            self.left_page = page_id;
+        }
+
+        // TODO seek to record start.
+
+        Ok(())
+    }
+
+    pub fn seek(&mut self, m: &mut FileManager<impl Flash>, dir: SeekDirection) -> Result<bool, Error> {
+        match dir {
+            SeekDirection::Left => {
+                trace!("search seek left");
+                self.right = self.curr;
+                self.right_skiplist = self.curr_skiplist;
+            }
+            SeekDirection::Right => {
+                trace!("search seek right");
+                self.left = self.curr;
+                self.left_page = self.curr_page;
+            }
+        }
+
+        self.really_seek(m)
     }
 }
 
@@ -695,15 +817,42 @@ fn max_trailing_zeros_between(a: u32, b: u32) -> u32 {
     31u32 - ((a - 1) ^ (b - 1)).leading_zeros()
 }
 
-fn skiplist_index(from: Seq, to: Seq) -> usize {
-    let bits = max_trailing_zeros_between(from.0, to.0) as usize;
+/// Calculate skiplist index.
+///
+/// Requires `left < right`.
+///
+/// For building the skiplist: if the previous page has sequence numbers `left..right`,
+/// what's the highest index that should be made to point to the previous page?
+///
+/// For iterating the skiplist: if we're at `right` and we want to seek backwards until
+/// `left`, what's the highest index that we can use to jump back, without overshooting?
+fn skiplist_index(left: Seq, right: Seq) -> usize {
+    let bits = max_trailing_zeros_between(left.0, right.0) as usize;
     bits.saturating_sub(SKIPLIST_SHIFT).min(SKIPLIST_LEN - 1)
+}
+
+/// Calculate the destination seq of a skiplist jump.
+///
+/// If the current page starts at seq `curr`, and we jump backwards using the skiplist index
+/// `index`, what's the sequence number the destination page is guaranteed to contain?
+///
+/// Note that the destination page will *contain* the returned seq, but it can *start*
+/// earlier.
+///
+/// This is the inverse operation to `skiplist_index`, sort of.
+fn skiplist_seq(curr: Seq, index: usize) -> Seq {
+    let curr = curr.0.checked_sub(1).unwrap();
+    let bits = match index {
+        0 => 0,
+        _ => index + SKIPLIST_SHIFT,
+    };
+    Seq(curr >> bits << bits)
 }
 
 #[cfg(test)]
 mod tests {
-
     use rand::Rng;
+    use test_log::test;
 
     use super::*;
     use crate::flash::MemFlash;
@@ -1264,6 +1413,123 @@ mod tests {
         let mut buf = [0; 32];
         r.read(&mut m, &mut buf).unwrap();
         assert_eq!(buf[..], data[..]);
+    }
+
+    #[test]
+    fn test_search_empty() {
+        let mut f = MemFlash::new();
+        let mut m = FileManager::new(&mut f);
+        m.format();
+        m.mount().unwrap();
+
+        let mut s = FileSearcher::new(m.read(1));
+        assert_eq!(s.start(&mut m).unwrap(), false);
+        assert_eq!(s.reader().offset(&mut m), 0);
+    }
+
+    #[test]
+    fn test_search_one_page() {
+        let mut f = MemFlash::new();
+        let mut m = FileManager::new(&mut f);
+        m.format();
+        m.mount().unwrap();
+
+        let mut w = m.write(1);
+        w.write(&mut m, &[0x00]).unwrap();
+        m.commit(&mut w).unwrap();
+
+        let mut buf = [0u8; 1];
+        // Seek left
+        let mut s = FileSearcher::new(m.read(1));
+        assert_eq!(s.start(&mut m).unwrap(), true);
+        assert_eq!(s.reader().offset(&mut m), 0);
+        s.reader().read(&mut m, &mut buf).unwrap();
+        assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), false);
+        assert_eq!(s.reader().offset(&mut m), 0);
+
+        // Seek right
+        let mut s = FileSearcher::new(m.read(1));
+        assert_eq!(s.start(&mut m).unwrap(), true);
+        assert_eq!(s.reader().offset(&mut m), 0);
+        s.reader().read(&mut m, &mut buf).unwrap();
+        assert_eq!(s.seek(&mut m, SeekDirection::Right).unwrap(), false);
+        assert_eq!(s.reader().offset(&mut m), 0);
+    }
+
+    #[test]
+    fn test_search_two_pages() {
+        let mut f = MemFlash::new();
+        let mut m = FileManager::new(&mut f);
+        m.format();
+        m.mount().unwrap();
+
+        for _ in 0..2 {
+            let mut w = m.write(1);
+            w.write(&mut m, &[0x00]).unwrap();
+            m.commit(&mut w).unwrap();
+        }
+
+        let mut s = FileSearcher::new(m.read(1));
+        assert_eq!(s.start(&mut m).unwrap(), true);
+        assert_eq!(s.reader().offset(&mut m), 1);
+        assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), true);
+        assert_eq!(s.reader().offset(&mut m), 0);
+        assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), false);
+        assert_eq!(s.reader().offset(&mut m), 0);
+
+        let mut s = FileSearcher::new(m.read(1));
+        assert_eq!(s.start(&mut m).unwrap(), true);
+        assert_eq!(s.reader().offset(&mut m), 1);
+        assert_eq!(s.seek(&mut m, SeekDirection::Right).unwrap(), false);
+        assert_eq!(s.reader().offset(&mut m), 1);
+    }
+
+    #[test]
+    fn test_search_long() {
+        let mut f = MemFlash::new();
+        let mut m = FileManager::new(&mut f);
+        m.format();
+        m.mount().unwrap();
+
+        let count = 20000 / 4;
+
+        let mut w = m.write(1);
+        for i in 1..=count {
+            w.write(&mut m, &(i as u32).to_le_bytes()).unwrap();
+        }
+        m.commit(&mut w).unwrap();
+
+        for want in 0..count + 1 {
+            debug!("searching for {}", want);
+
+            let mut s = FileSearcher::new(m.read(1));
+            assert_eq!(s.start(&mut m).unwrap(), true);
+
+            loop {
+                let mut record = [0; 4];
+                s.reader().read(&mut m, &mut record).unwrap();
+                let record = u32::from_le_bytes(record);
+
+                let dir = if record >= want {
+                    SeekDirection::Left
+                } else {
+                    SeekDirection::Right
+                };
+                let ok = s.seek(&mut m, dir).unwrap();
+                if !ok {
+                    break;
+                }
+            }
+
+            let mut record = [0; 4];
+            s.reader().read(&mut m, &mut record).unwrap();
+            let record = u32::from_le_bytes(record);
+
+            if want != 0 {
+                assert!(want >= record);
+                assert!(want - record <= PAGE_MAX_PAYLOAD_SIZE as u32 / 4);
+            }
+        }
     }
 
     fn dummy_data(len: usize) -> Vec<u8> {

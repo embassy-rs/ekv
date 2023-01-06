@@ -19,4 +19,12 @@ log = { version = "0.4.17", optional = true }
 rand = "0.8.5"
 
 [dev-dependencies]
+env_logger = "0.10.0"
 plotters = "0.3.4"
+test-log = "0.2.11"
+
+# Do asserts and overflow checks when doing `cargo test --release`
+# Release makes smoke tests faster, but we still want the full checking.
+[profile.release]
+debug-assertions = true
+overflow-checks = true

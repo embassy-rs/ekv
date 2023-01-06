@@ -168,6 +168,7 @@ impl PageWriter {
 
 #[cfg(test)]
 mod tests {
+    use test_log::test;
 
     use super::*;
     use crate::flash::MemFlash;
