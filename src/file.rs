@@ -672,7 +672,7 @@ pub struct FileWriter {
     file_id: FileID,
     last_page: Option<PagePointer>,
     seq: Seq,
-    record_boundary_seq: Seq,
+    record_boundary: Option<usize>,
     writer: Option<PageWriter>,
 }
 
@@ -684,7 +684,7 @@ impl FileWriter {
             file_id,
             last_page: f.last_page,
             seq: f.last_seq,
-            record_boundary_seq: Seq(0),
+            record_boundary: Some(0),
             writer: None,
         }
     }
@@ -702,10 +702,13 @@ impl FileWriter {
 
         let next_seq = self.seq.add(page_size)?;
 
-        let record_boundary = if self.record_boundary_seq >= self.seq && self.record_boundary_seq < next_seq {
-            self.record_boundary_seq.sub(self.seq).try_into().unwrap()
-        } else {
-            u16::MAX
+        let record_boundary = match self.record_boundary {
+            Some(b) if b >= page_size => u16::MAX,
+            Some(b) => {
+                self.record_boundary = None;
+                b as u16
+            }
+            None => u16::MAX,
         };
         let header = Header {
             seq: self.seq,
@@ -713,6 +716,13 @@ impl FileWriter {
             record_boundary,
         };
         w.commit(&mut m.flash, header);
+
+        trace!(
+            "flush_header: page={:?} h={:?} record_boundary={:?}",
+            page_id,
+            header,
+            self.record_boundary
+        );
 
         self.seq = next_seq;
         self.last_page = Some(PagePointer { page_id, header });
@@ -772,8 +782,9 @@ impl FileWriter {
     }
 
     pub fn record_end(&mut self) {
-        let offs = self.writer.as_mut().unwrap().offset();
-        self.record_boundary_seq = self.seq.add(offs).unwrap()
+        if self.record_boundary.is_none() {
+            self.record_boundary = Some(self.writer.as_mut().unwrap().offset());
+        }
     }
 }
 
@@ -1413,6 +1424,179 @@ mod tests {
         let mut buf = [0; 32];
         r.read(&mut m, &mut buf).unwrap();
         assert_eq!(buf[..], data[..]);
+    }
+
+    #[test]
+    fn test_record_boundary_one() {
+        let mut f = MemFlash::new();
+        let mut m = FileManager::new(&mut f);
+        m.format();
+        m.mount().unwrap();
+
+        let mut w = m.write(1);
+        w.write(&mut m, &[0x00]).unwrap();
+        w.record_end();
+        m.commit(&mut w).unwrap();
+
+        let h = m.read_header(1).unwrap();
+        assert_eq!(h.seq, Seq(0));
+        assert_eq!(h.record_boundary, 0);
+    }
+
+    #[test]
+    fn test_record_boundary_two() {
+        let mut f = MemFlash::new();
+        let mut m = FileManager::new(&mut f);
+        m.format();
+        m.mount().unwrap();
+
+        let mut w = m.write(1);
+        w.write(&mut m, &[0x00]).unwrap();
+        w.record_end();
+        w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE + 1]).unwrap();
+        w.record_end();
+        m.commit(&mut w).unwrap();
+
+        let h = m.read_header(1).unwrap();
+        assert_eq!(h.seq, Seq(0));
+        assert_eq!(h.record_boundary, 0);
+
+        let h = m.read_header(2).unwrap();
+        assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32));
+        assert_eq!(h.record_boundary, u16::MAX);
+    }
+
+    #[test]
+    fn test_record_boundary_three() {
+        let mut f = MemFlash::new();
+        let mut m = FileManager::new(&mut f);
+        m.format();
+        m.mount().unwrap();
+
+        let mut w = m.write(1);
+        w.write(&mut m, &[0x00]).unwrap();
+        w.record_end();
+        w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE + 1]).unwrap();
+        w.record_end();
+        w.write(&mut m, &[0x00]).unwrap();
+        w.record_end();
+        m.commit(&mut w).unwrap();
+
+        let h = m.read_header(1).unwrap();
+        assert_eq!(h.seq, Seq(0));
+        assert_eq!(h.record_boundary, 0);
+
+        let h = m.read_header(2).unwrap();
+        assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32));
+        assert_eq!(h.record_boundary, 2);
+    }
+
+    #[test]
+    fn test_record_boundary_overlong() {
+        let mut f = MemFlash::new();
+        let mut m = FileManager::new(&mut f);
+        m.format();
+        m.mount().unwrap();
+
+        let mut w = m.write(1);
+        w.write(&mut m, &[0x00]).unwrap();
+        w.record_end();
+        w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE * 2 + 1]).unwrap();
+        w.record_end();
+        m.commit(&mut w).unwrap();
+
+        let h = m.read_header(1).unwrap();
+        assert_eq!(h.seq, Seq(0));
+        assert_eq!(h.record_boundary, 0);
+
+        let h = m.read_header(2).unwrap();
+        assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32));
+        assert_eq!(h.record_boundary, u16::MAX);
+
+        let h = m.read_header(3).unwrap();
+        assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32 * 2));
+        assert_eq!(h.record_boundary, u16::MAX);
+    }
+
+    #[test]
+    fn test_record_boundary_overlong_2() {
+        let mut f = MemFlash::new();
+        let mut m = FileManager::new(&mut f);
+        m.format();
+        m.mount().unwrap();
+
+        let mut w = m.write(1);
+        w.write(&mut m, &[0x00]).unwrap();
+        w.record_end();
+        w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE * 2 + 1]).unwrap();
+        w.record_end();
+        w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE * 2 + 1]).unwrap();
+        w.record_end();
+        m.commit(&mut w).unwrap();
+
+        let h = m.read_header(1).unwrap();
+        assert_eq!(h.seq, Seq(0));
+        assert_eq!(h.record_boundary, 0);
+
+        let h = m.read_header(2).unwrap();
+        assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32));
+        assert_eq!(h.record_boundary, u16::MAX);
+
+        let h = m.read_header(3).unwrap();
+        assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32 * 2));
+        assert_eq!(h.record_boundary, 2);
+
+        let h = m.read_header(4).unwrap();
+        assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32 * 3));
+        assert_eq!(h.record_boundary, u16::MAX);
+
+        let h = m.read_header(5).unwrap();
+        assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32 * 4));
+        assert_eq!(h.record_boundary, u16::MAX);
+    }
+
+    #[test]
+    fn test_record_boundary_overlong_3() {
+        let mut f = MemFlash::new();
+        let mut m = FileManager::new(&mut f);
+        m.format();
+        m.mount().unwrap();
+
+        let mut w = m.write(1);
+        w.write(&mut m, &[0x00]).unwrap();
+        w.record_end();
+        w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE * 2 + 1]).unwrap();
+        w.record_end();
+        w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE * 2 + 1]).unwrap();
+        w.record_end();
+        w.write(&mut m, &[0x00]).unwrap();
+        w.record_end();
+        w.write(&mut m, &[0x00]).unwrap();
+        w.record_end();
+        w.write(&mut m, &[0x00]).unwrap();
+        w.record_end();
+
+        m.commit(&mut w).unwrap();
+
+        let h = m.read_header(1).unwrap();
+        assert_eq!(h.seq, Seq(0));
+        assert_eq!(h.record_boundary, 0);
+
+        let h = m.read_header(2).unwrap();
+        assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32));
+        assert_eq!(h.record_boundary, u16::MAX);
+
+        let h = m.read_header(3).unwrap();
+        assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32 * 2));
+        assert_eq!(h.record_boundary, 2);
+
+        let h = m.read_header(4).unwrap();
+        assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32 * 3));
+        assert_eq!(h.record_boundary, u16::MAX);
+
+        let h = m.read_header(5).unwrap();
+        assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32 * 4));
+        assert_eq!(h.record_boundary, 3);
     }
 
     #[test]
