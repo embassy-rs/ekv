@@ -192,15 +192,14 @@ pub struct ReadTransaction<'a, F: Flash + 'a> {
 impl<'a, F: Flash + 'a> ReadTransaction<'a, F> {
     pub fn read(&mut self, key: &[u8], value: &mut [u8]) -> Result<usize, ReadKeyError> {
         for file_id in (0..FILE_COUNT).rev() {
-            let res = self.read_in_file(file_id as _, key, value)?;
-            if res != 0 {
+            if let Some(res) = self.read_in_file(file_id as _, key, value)? {
                 return Ok(res);
             }
         }
         Ok(0)
     }
 
-    fn read_in_file(&mut self, file_id: FileID, key: &[u8], value: &mut [u8]) -> Result<usize, ReadKeyError> {
+    fn read_in_file(&mut self, file_id: FileID, key: &[u8], value: &mut [u8]) -> Result<Option<usize>, ReadKeyError> {
         let r = self.db.files.read(file_id);
         let m = &mut self.db.files;
         let mut s = FileSearcher::new(r);
@@ -212,13 +211,13 @@ impl<'a, F: Flash + 'a> ReadTransaction<'a, F> {
         let mut ok = false;
         while ok {
             match read_key(m, s.reader(), &mut key_buf) {
-                Err(ReadError::Eof) => return Ok(0), // key not present.
+                Err(ReadError::Eof) => return Ok(None), // key not present.
                 x => x?,
             };
 
             // Found?
             let dir = match key_buf[..].cmp(key) {
-                Ordering::Equal => return read_value(m, s.reader(), value),
+                Ordering::Equal => return Ok(Some(read_value(m, s.reader(), value)?)),
                 Ordering::Less => SeekDirection::Right,
                 Ordering::Greater => SeekDirection::Left,
             };
@@ -232,15 +231,15 @@ impl<'a, F: Flash + 'a> ReadTransaction<'a, F> {
         // Linear search
         loop {
             match read_key(m, r, &mut key_buf) {
-                Err(ReadError::Eof) => return Ok(0), // key not present.
+                Err(ReadError::Eof) => return Ok(None), // key not present.
                 x => x?,
             }
 
             // Found?
             match key_buf[..].cmp(key) {
-                Ordering::Equal => return read_value(m, r, value),
-                Ordering::Less => {}               // keep going
-                Ordering::Greater => return Ok(0), // not present.
+                Ordering::Equal => return Ok(Some(read_value(m, r, value)?)),
+                Ordering::Less => {}                  // keep going
+                Ordering::Greater => return Ok(None), // not present.
             }
 
             skip_value(m, r)?;
