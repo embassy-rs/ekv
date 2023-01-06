@@ -17,9 +17,14 @@ pub enum SeekDirection {
 pub struct Header {
     seq: Seq,
 
-    // skiplist[0] = previous page, always.
-    // skiplist[i] = latest page that contains a byte with seq multiple of 2**(SKIPLIST_SHIFT+i)
+    /// skiplist[0] = previous page, always.
+    /// skiplist[i] = latest page that contains a byte with seq multiple of 2**(SKIPLIST_SHIFT+i)
     skiplist: [PageID; SKIPLIST_LEN],
+
+    /// Offset of the first record boundary within this page.
+    /// u16::MAX if there's no boundary within the page. This can happen if a very big record
+    /// starts at a previous page, and ends at a later page.
+    record_boundary: u16,
 }
 
 impl Header {
@@ -27,12 +32,14 @@ impl Header {
     pub const DUMMY: Self = Self {
         seq: Seq(3),
         skiplist: [4; SKIPLIST_LEN],
+        record_boundary: 5,
     };
 
     fn meta(seq: Seq) -> Self {
         Self {
             seq,
             skiplist: [PageID::MAX - 1; SKIPLIST_LEN],
+            record_boundary: 0,
         }
     }
 
@@ -543,6 +550,7 @@ pub struct FileWriter {
     file_id: FileID,
     last_page: Option<PagePointer>,
     seq: Seq,
+    record_boundary_seq: Seq,
     writer: Option<PageWriter>,
 }
 
@@ -554,12 +562,13 @@ impl FileWriter {
             file_id,
             last_page: f.last_page,
             seq: f.last_seq,
+            record_boundary_seq: Seq(0),
             writer: None,
         }
     }
 
     fn flush_header(&mut self, m: &mut FileManager<impl Flash>, w: PageWriter) -> Result<(), Error> {
-        let page_size = w.offset().try_into().unwrap();
+        let page_size = w.offset();
         let page_id = w.page_id();
         let mut skiplist = [PageID::MAX; SKIPLIST_LEN];
         if let Some(last_page) = &self.last_page {
@@ -569,13 +578,21 @@ impl FileWriter {
             skiplist[..top].fill(last_page.page_id);
         }
 
+        let next_seq = self.seq.add(page_size)?;
+
+        let record_boundary = if self.record_boundary_seq >= self.seq && self.record_boundary_seq < next_seq {
+            self.record_boundary_seq.sub(self.seq).try_into().unwrap()
+        } else {
+            u16::MAX
+        };
         let header = Header {
             seq: self.seq,
             skiplist,
+            record_boundary,
         };
         w.commit(&mut m.flash, header);
 
-        self.seq = self.seq.add(page_size)?;
+        self.seq = next_seq;
         self.last_page = Some(PagePointer { page_id, header });
 
         Ok(())
@@ -633,7 +650,8 @@ impl FileWriter {
     }
 
     pub fn record_end(&mut self) {
-        // TODO
+        let offs = self.writer.as_mut().unwrap().offset();
+        self.record_boundary_seq = self.seq.add(offs).unwrap()
     }
 }
 
