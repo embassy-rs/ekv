@@ -28,6 +28,17 @@ impl Header {
         seq: Seq(3),
         skiplist: [4; SKIPLIST_LEN],
     };
+
+    fn meta(seq: Seq) -> Self {
+        Self {
+            seq,
+            skiplist: [PageID::MAX - 1; SKIPLIST_LEN],
+        }
+    }
+
+    fn is_meta(&self) -> bool {
+        self.skiplist[0] == PageID::MAX - 1
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -93,7 +104,7 @@ impl<F: Flash> FileManager<F> {
         // Erase all meta pages.
         for page_id in 0..PAGE_COUNT {
             if let Ok(h) = self.read_header(page_id as _) {
-                if h.skiplist[0] == PageID::MAX - 1 {
+                if h.is_meta() {
                     self.flash.erase(page_id);
                 }
             }
@@ -101,13 +112,7 @@ impl<F: Flash> FileManager<F> {
 
         // Write initial meta page.
         let w = self.write_page(0);
-        w.commit(
-            &mut self.flash,
-            Header {
-                seq: Seq(1),
-                skiplist: [PageID::MAX - 1; SKIPLIST_LEN],
-            },
-        );
+        w.commit(&mut self.flash, Header::meta(Seq(1)));
     }
 
     pub fn mount(&mut self) -> Result<(), Error> {
@@ -117,7 +122,7 @@ impl<F: Flash> FileManager<F> {
         let mut meta_seq = Seq::ZERO;
         for page_id in 0..PAGE_COUNT {
             if let Ok(h) = self.read_header(page_id as _) {
-                if h.skiplist[0] == PageID::MAX - 1 && h.seq > meta_seq {
+                if h.is_meta() && h.seq > meta_seq {
                     meta_page_id = Some(page_id as PageID);
                     meta_seq = h.seq;
                 }
@@ -277,13 +282,7 @@ impl<F: Flash> FileManager<F> {
         }
 
         self.meta_seq = self.meta_seq.add(1)?; // TODO handle wraparound
-        w.commit(
-            &mut self.flash,
-            Header {
-                seq: self.meta_seq,
-                skiplist: [PageID::MAX - 1; SKIPLIST_LEN],
-            },
-        );
+        w.commit(&mut self.flash, Header::meta(self.meta_seq));
 
         self.alloc.free(self.meta_page_id);
         self.meta_page_id = page_id;
