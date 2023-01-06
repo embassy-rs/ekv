@@ -626,10 +626,28 @@ impl FileSearcher {
         Ok(true)
     }
 
-    fn seek_to_page(&mut self, m: &mut FileManager<impl Flash>, page_id: PageID) -> Result<(), Error> {
-        let (h, mut r) = m.read_page(page_id).inspect_err(|e| {
-            debug!("failed read next page={}: {:?}", page_id, e);
-        })?;
+    fn seek_to_page(&mut self, m: &mut FileManager<impl Flash>, mut page_id: PageID) -> Result<(), Error> {
+        let (h, mut r) = loop {
+            let (h, mut r) = m.read_page(page_id).inspect_err(|e| {
+                debug!("failed read next page={}: {:?}", page_id, e);
+            })?;
+
+            if h.record_boundary != u16::MAX {
+                break (h, r);
+            }
+
+            // No record boundary within this page. Try the previous one.
+            page_id = h.skiplist[0];
+            if page_id == PageID::MAX {
+                debug!("first page in file has no record boundary!");
+                return Err(Error::Corrupted);
+            }
+        };
+
+        // seek to record start.
+        let s = r.skip(h.record_boundary as usize);
+        assert_eq!(s, h.record_boundary as usize);
+
         self.r.state = ReaderState::Reading(ReaderStateReading { seq: h.seq, reader: r });
         self.curr = h.seq;
         self.curr_skiplist = h.skiplist;
@@ -644,8 +662,6 @@ impl FileSearcher {
         if h.skiplist[0] == PageID::MAX {
             self.left_page = page_id;
         }
-
-        // TODO seek to record start.
 
         Ok(())
     }
@@ -1650,6 +1666,7 @@ mod tests {
         for _ in 0..2 {
             let mut w = m.write(1);
             w.write(&mut m, &[0x00]).unwrap();
+            w.record_end();
             m.commit(&mut w).unwrap();
         }
 
@@ -1680,6 +1697,9 @@ mod tests {
         let mut w = m.write(1);
         for i in 1..=count {
             w.write(&mut m, &(i as u32).to_le_bytes()).unwrap();
+            // make records not line up with page boundaries.
+            w.write(&mut m, &[0x00]).unwrap();
+            w.record_end();
         }
         m.commit(&mut w).unwrap();
 
