@@ -549,6 +549,21 @@ impl FileReader {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum SearchSeekError {
+    TooMuchLeft,
+    Corrupted,
+}
+
+impl From<Error> for SearchSeekError {
+    fn from(e: Error) -> Self {
+        match e {
+            Error::Corrupted => Self::Corrupted,
+        }
+    }
+}
+
 pub struct FileSearcher {
     r: FileReader,
 
@@ -615,22 +630,56 @@ impl FileSearcher {
         } else {
             skiplist_index(left, self.right)
         };
-        while self.right_skiplist[i] == self.left_page || self.right_skiplist[i] == PageID::MAX {
-            if i == 0 {
-                self.seek_to_page(m, self.left_page)?;
-                return Ok(false);
+
+        loop {
+            if self.right_skiplist[i] != PageID::MAX {
+                let seq = skiplist_seq(self.right, i);
+                if seq >= self.left {
+                    match self.seek_to_page(m, self.right_skiplist[i], Some(self.left)) {
+                        Ok(()) => {
+                            self.curr = seq;
+                            return Ok(true);
+                        }
+                        Err(SearchSeekError::Corrupted) => return Err(Error::Corrupted),
+                        Err(SearchSeekError::TooMuchLeft) => self.left = seq.add(1).unwrap(),
+                    }
+                }
             }
+
+            if i == 0 {
+                return match self.seek_to_page(m, self.left_page, None) {
+                    Ok(()) => Ok(false),
+                    Err(SearchSeekError::Corrupted) => Err(Error::Corrupted),
+                    Err(SearchSeekError::TooMuchLeft) => unreachable!(),
+                };
+            }
+
+            // Seek failed. Try again less hard.
             i -= 1;
         }
-        self.seek_to_page(m, self.right_skiplist[i])?;
-        Ok(true)
     }
 
-    fn seek_to_page(&mut self, m: &mut FileManager<impl Flash>, mut page_id: PageID) -> Result<(), Error> {
+    fn seek_to_page(
+        &mut self,
+        m: &mut FileManager<impl Flash>,
+        mut page_id: PageID,
+        left_limit: Option<Seq>,
+    ) -> Result<(), SearchSeekError> {
         let (h, mut r) = loop {
             let (h, mut r) = m.read_page(page_id).inspect_err(|e| {
                 debug!("failed read next page={}: {:?}", page_id, e);
             })?;
+
+            if h.skiplist[0] == PageID::MAX {
+                trace!("search: arrived to first file page, setting left_page to {:?}", page_id);
+                self.left_page = page_id;
+            }
+
+            if let Some(left_limit) = left_limit {
+                if h.seq < left_limit {
+                    return Err(SearchSeekError::TooMuchLeft);
+                }
+            }
 
             if h.record_boundary != u16::MAX {
                 break (h, r);
@@ -640,7 +689,7 @@ impl FileSearcher {
             page_id = h.skiplist[0];
             if page_id == PageID::MAX {
                 debug!("first page in file has no record boundary!");
-                return Err(Error::Corrupted);
+                return Err(SearchSeekError::Corrupted);
             }
         };
 
@@ -653,15 +702,17 @@ impl FileSearcher {
         self.curr_skiplist = h.skiplist;
         self.curr_page = page_id;
         trace!(
-            "search: curr page {:?} seq {:?} skiplist {:?}",
-            self.curr_page,
+            "search: curr seq={:?} page{:?} skiplist={:?}",
             self.curr,
+            self.curr_page,
             self.curr_skiplist
         );
-
-        if h.skiplist[0] == PageID::MAX {
-            self.left_page = page_id;
-        }
+        trace!("        left seq={:?} page{:?}", self.left, self.left_page,);
+        trace!(
+            "        right seq={:?}   skiplist={:?}",
+            self.right,
+            self.right_skiplist
+        );
 
         Ok(())
     }
@@ -675,7 +726,7 @@ impl FileSearcher {
             }
             SeekDirection::Right => {
                 trace!("search seek right");
-                self.left = self.curr;
+                self.left = self.curr.add(1).unwrap();
                 self.left_page = self.curr_page;
             }
         }
@@ -1683,6 +1734,66 @@ mod tests {
         assert_eq!(s.reader().offset(&mut m), 1);
         assert_eq!(s.seek(&mut m, SeekDirection::Right).unwrap(), false);
         assert_eq!(s.reader().offset(&mut m), 1);
+    }
+
+    #[test]
+    fn test_search_no_boundary_on_second_page() {
+        let mut f = MemFlash::new();
+        let mut m = FileManager::new(&mut f);
+        m.format();
+        m.mount().unwrap();
+
+        let mut w = m.write(1);
+        w.write(&mut m, &[0x00; 238]).unwrap();
+        w.record_end();
+        m.commit(&mut w).unwrap();
+
+        let mut buf = [0u8; 1];
+        // Seek left
+        let mut s = FileSearcher::new(m.read(1));
+        assert_eq!(s.start(&mut m).unwrap(), true);
+        assert_eq!(s.reader().offset(&mut m), 0);
+        s.reader().read(&mut m, &mut buf).unwrap();
+        assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), false);
+        assert_eq!(s.reader().offset(&mut m), 0);
+
+        // Seek right
+        let mut s = FileSearcher::new(m.read(1));
+        assert_eq!(s.start(&mut m).unwrap(), true);
+        assert_eq!(s.reader().offset(&mut m), 0);
+        s.reader().read(&mut m, &mut buf).unwrap();
+        assert_eq!(s.seek(&mut m, SeekDirection::Right).unwrap(), false);
+        assert_eq!(s.reader().offset(&mut m), 0);
+    }
+
+    #[test]
+    fn test_search_no_boundary_more_pages() {
+        let mut f = MemFlash::new();
+        let mut m = FileManager::new(&mut f);
+        m.format();
+        m.mount().unwrap();
+
+        let mut w = m.write(1);
+        w.write(&mut m, &[0x00; 4348]).unwrap();
+        w.record_end();
+        m.commit(&mut w).unwrap();
+
+        let mut buf = [0u8; 1];
+        // Seek left
+        let mut s = FileSearcher::new(m.read(1));
+        assert_eq!(s.start(&mut m).unwrap(), true);
+        assert_eq!(s.reader().offset(&mut m), 0);
+        s.reader().read(&mut m, &mut buf).unwrap();
+        assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), false);
+        assert_eq!(s.reader().offset(&mut m), 0);
+
+        // Seek right
+        let mut s = FileSearcher::new(m.read(1));
+        assert_eq!(s.start(&mut m).unwrap(), true);
+        assert_eq!(s.reader().offset(&mut m), 0);
+        s.reader().read(&mut m, &mut buf).unwrap();
+        assert_eq!(s.seek(&mut m, SeekDirection::Right).unwrap(), false);
+        assert_eq!(s.reader().offset(&mut m), 0);
     }
 
     #[test]
