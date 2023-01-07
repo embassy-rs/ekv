@@ -8,6 +8,7 @@ edition = "2021"
 cargo-fuzz = true
 
 [dependencies]
+arbitrary = { version = "1.2.2", features = ["derive"] }
 libfuzzer-sys = "0.4"
 pretty_env_logger = "0.4"
 ekv = { path = ".." }
@@ -16,5 +17,11 @@ ekv = { path = ".." }
 [[bin]]
 name = "read"
 path = "fuzz_targets/read.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "ops"
+path = "fuzz_targets/ops.rs"
 test = false
 doc = false
