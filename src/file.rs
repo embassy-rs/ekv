@@ -695,9 +695,13 @@ impl FileSearcher {
 
         // seek to record start.
         let s = r.skip(h.record_boundary as usize);
+        let state_seq = h.seq.add(h.record_boundary as usize).unwrap();
         assert_eq!(s, h.record_boundary as usize);
 
-        self.r.state = ReaderState::Reading(ReaderStateReading { seq: h.seq, reader: r });
+        self.r.state = ReaderState::Reading(ReaderStateReading {
+            seq: state_seq,
+            reader: r,
+        });
         self.curr = h.seq;
         self.curr_skiplist = h.skiplist;
         self.curr_page = page_id;
