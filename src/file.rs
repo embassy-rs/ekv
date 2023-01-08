@@ -573,7 +573,8 @@ pub struct FileSearcher {
     right: Seq,
     right_skiplist: [PageID; SKIPLIST_LEN],
 
-    curr: Seq,
+    curr_low: Seq,
+    curr_high: Seq,
     curr_page: PageID,
     curr_skiplist: [PageID; SKIPLIST_LEN],
 }
@@ -586,7 +587,8 @@ impl FileSearcher {
             left_page: PageID::MAX,
             right: Seq::MAX,
             right_skiplist: [PageID::MAX; SKIPLIST_LEN],
-            curr: Seq::MAX,
+            curr_low: Seq::MAX,
+            curr_high: Seq::MAX,
             curr_page: PageID::MAX,
             curr_skiplist: [PageID::MAX; SKIPLIST_LEN],
         }
@@ -635,11 +637,9 @@ impl FileSearcher {
             if self.right_skiplist[i] != PageID::MAX {
                 let seq = skiplist_seq(self.right, i);
                 if seq >= self.left {
+                    self.curr_high = seq;
                     match self.seek_to_page(m, self.right_skiplist[i], Some(self.left)) {
-                        Ok(()) => {
-                            self.curr = seq;
-                            return Ok(true);
-                        }
+                        Ok(()) => return Ok(true),
                         Err(SearchSeekError::Corrupted) => return Err(Error::Corrupted),
                         Err(SearchSeekError::TooMuchLeft) => self.left = seq.add(1).unwrap(),
                     }
@@ -708,16 +708,17 @@ impl FileSearcher {
             seq: state_seq,
             reader: r,
         });
-        self.curr = h.seq;
+        self.curr_low = h.seq;
         self.curr_skiplist = h.skiplist;
         self.curr_page = page_id;
         trace!(
-            "search: curr seq={:?} page{:?} skiplist={:?}",
-            self.curr,
+            "search: curr seq={:?}..{:?} page {:?} skiplist={:?}",
+            self.curr_low,
+            self.curr_high,
             self.curr_page,
             self.curr_skiplist
         );
-        trace!("        left seq={:?} page{:?}", self.left, self.left_page,);
+        trace!("        left seq={:?} page {:?}", self.left, self.left_page,);
         trace!(
             "        right seq={:?}   skiplist={:?}",
             self.right,
@@ -731,12 +732,12 @@ impl FileSearcher {
         match dir {
             SeekDirection::Left => {
                 trace!("search seek left");
-                self.right = self.curr;
+                self.right = self.curr_low;
                 self.right_skiplist = self.curr_skiplist;
             }
             SeekDirection::Right => {
                 trace!("search seek right");
-                self.left = self.curr.add(1).unwrap();
+                self.left = self.curr_high.add(1).unwrap();
                 self.left_page = self.curr_page;
             }
         }
@@ -920,6 +921,8 @@ fn skiplist_index(left: Seq, right: Seq) -> usize {
 }
 
 /// Calculate the destination seq of a skiplist jump.
+///
+/// Requires `curr` != 0.
 ///
 /// If the current page starts at seq `curr`, and we jump backwards using the skiplist index
 /// `index`, what's the sequence number the destination page is guaranteed to contain?
