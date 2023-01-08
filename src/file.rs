@@ -666,6 +666,9 @@ impl FileSearcher {
         left_limit: Option<Seq>,
     ) -> Result<(), SearchSeekError> {
         let (h, mut r) = loop {
+            if page_id as usize >= PAGE_COUNT {
+                return Err(SearchSeekError::Corrupted);
+            }
             let (h, mut r) = m.read_page(page_id).inspect_err(|e| {
                 debug!("failed read next page={}: {:?}", page_id, e);
             })?;
