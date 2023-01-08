@@ -1810,6 +1810,106 @@ mod tests {
     }
 
     #[test]
+    fn test_search_no_boundary_more_pages_two() {
+        let mut f = MemFlash::new();
+        let mut m = FileManager::new(&mut f);
+        m.format();
+        m.mount().unwrap();
+
+        let mut w = m.write(1);
+        w.write(&mut m, &[0x00; 4348]).unwrap();
+        w.record_end();
+        w.write(&mut m, &[0x00; 4348]).unwrap();
+        w.record_end();
+        m.commit(&mut w).unwrap();
+
+        let mut buf = [0u8; 1];
+        // Seek left
+        let mut s = FileSearcher::new(m.read(1));
+        assert_eq!(s.start(&mut m).unwrap(), true);
+        assert_eq!(s.reader().offset(&mut m), 4348);
+        s.reader().read(&mut m, &mut buf).unwrap();
+        assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), true);
+        assert_eq!(s.reader().offset(&mut m), 0);
+        s.reader().read(&mut m, &mut buf).unwrap();
+        assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), false);
+        assert_eq!(s.reader().offset(&mut m), 0);
+
+        // Seek right
+        let mut s = FileSearcher::new(m.read(1));
+        assert_eq!(s.start(&mut m).unwrap(), true);
+        assert_eq!(s.reader().offset(&mut m), 4348);
+        s.reader().read(&mut m, &mut buf).unwrap();
+        assert_eq!(s.seek(&mut m, SeekDirection::Right).unwrap(), false);
+        assert_eq!(s.reader().offset(&mut m), 4348);
+    }
+
+    #[test]
+    fn test_search_no_boundary_more_pages_three() {
+        let mut f = MemFlash::new();
+        let mut m = FileManager::new(&mut f);
+        m.format();
+        m.mount().unwrap();
+
+        let mut w = m.write(1);
+        w.write(&mut m, &[0x00; 4348]).unwrap();
+        w.record_end();
+        w.write(&mut m, &[0x00; 4348]).unwrap();
+        w.record_end();
+        w.write(&mut m, &[0x00; 4348]).unwrap();
+        w.record_end();
+        m.commit(&mut w).unwrap();
+
+        let mut buf = [0u8; 1];
+        // Seek left
+        let mut s = FileSearcher::new(m.read(1));
+        assert_eq!(s.start(&mut m).unwrap(), true);
+        assert_eq!(s.reader().offset(&mut m), 8696);
+        s.reader().read(&mut m, &mut buf).unwrap();
+        assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), true);
+        assert_eq!(s.reader().offset(&mut m), 4348);
+        s.reader().read(&mut m, &mut buf).unwrap();
+        assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), true);
+        assert_eq!(s.reader().offset(&mut m), 0);
+        s.reader().read(&mut m, &mut buf).unwrap();
+        assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), false);
+        assert_eq!(s.reader().offset(&mut m), 0);
+
+        // Seek less left
+        let mut s = FileSearcher::new(m.read(1));
+        assert_eq!(s.start(&mut m).unwrap(), true);
+        assert_eq!(s.reader().offset(&mut m), 8696);
+        s.reader().read(&mut m, &mut buf).unwrap();
+        assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), true);
+        assert_eq!(s.reader().offset(&mut m), 4348);
+        s.reader().read(&mut m, &mut buf).unwrap();
+        assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), true);
+        assert_eq!(s.reader().offset(&mut m), 0);
+        s.reader().read(&mut m, &mut buf).unwrap();
+        assert_eq!(s.seek(&mut m, SeekDirection::Right).unwrap(), false);
+        assert_eq!(s.reader().offset(&mut m), 0);
+
+        // Seek middle
+        let mut s = FileSearcher::new(m.read(1));
+        assert_eq!(s.start(&mut m).unwrap(), true);
+        assert_eq!(s.reader().offset(&mut m), 8696);
+        s.reader().read(&mut m, &mut buf).unwrap();
+        assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), true);
+        assert_eq!(s.reader().offset(&mut m), 4348);
+        s.reader().read(&mut m, &mut buf).unwrap();
+        assert_eq!(s.seek(&mut m, SeekDirection::Right).unwrap(), false);
+        assert_eq!(s.reader().offset(&mut m), 4348);
+
+        // Seek right
+        let mut s = FileSearcher::new(m.read(1));
+        assert_eq!(s.start(&mut m).unwrap(), true);
+        assert_eq!(s.reader().offset(&mut m), 8696);
+        s.reader().read(&mut m, &mut buf).unwrap();
+        assert_eq!(s.seek(&mut m, SeekDirection::Right).unwrap(), false);
+        assert_eq!(s.reader().offset(&mut m), 8696);
+    }
+
+    #[test]
     fn test_search_long() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
