@@ -230,8 +230,7 @@ impl<'a, F: Flash + 'a> ReadTransaction<'a, F> {
         let mut key_buf = Vec::new();
 
         // Binary search
-        //let mut ok = s.start(m)?;
-        let mut ok = false;
+        let mut ok = s.start(m)?;
         while ok {
             match read_key(m, s.reader(), &mut key_buf) {
                 Err(ReadError::Eof) => return Ok(None), // key not present.
