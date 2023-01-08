@@ -1,4 +1,4 @@
-use core::mem;
+use core::{fmt, mem};
 
 use crate::alloc::Allocator;
 use crate::config::*;
@@ -57,7 +57,7 @@ pub struct FileMeta {
 }
 impl_bytes!(FileMeta);
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct FileState {
     last_page: Option<PagePointer>,
     first_seq: Seq,
@@ -342,10 +342,61 @@ impl<F: Flash> FileManager<F> {
         self.pages.write(&mut self.flash, page_id)
     }
 
-    fn dump(&mut self) {
-        for (file_id, f) in self.files.iter().enumerate() {
-            debug!("==== FILE {}", file_id);
-            debug!("{:?}", f);
+    pub(crate) fn dump(&mut self) {
+        for file_id in 0..FILE_COUNT {
+            debug!("====== FILE {} ======", file_id);
+            self.dump_file(file_id as _)
+        }
+    }
+
+    pub(crate) fn dump_file(&mut self, file_id: FileID) {
+        let f = self.files[file_id as usize];
+        debug!(
+            "  seq: {:?}..{:?} len {:?} last_page {:?}",
+            f.first_seq,
+            f.last_seq,
+            f.last_seq.sub(f.first_seq),
+            f.last_page.map(|p| p.page_id)
+        );
+
+        let mut pages = Vec::new();
+        let mut pp = f.last_page;
+        while let Some(p) = pp {
+            pages.push(p);
+            pp = p.prev(self, f.first_seq).unwrap();
+        }
+
+        let mut buf = [0; 1024];
+        for p in pages.iter().rev() {
+            let (h, mut r) = self.read_page(p.page_id).unwrap();
+            let n = r.read(&mut self.flash, &mut buf);
+            let data = &buf[..n];
+
+            let rb = if h.record_boundary == u16::MAX {
+                "None".to_string()
+            } else {
+                format!(
+                    "{} (seq {:?})",
+                    h.record_boundary,
+                    h.seq.add(h.record_boundary as usize).unwrap()
+                )
+            };
+
+            debug!(
+                "  page {:?}: seq {:?}..{:?} len {:?} record_boundary {} skiplist {:?}",
+                p.page_id,
+                h.seq,
+                h.seq.add(n).unwrap(),
+                n,
+                rb,
+                h.skiplist
+            );
+
+            let mut s = h.seq;
+            for c in data.chunks(32) {
+                debug!("     {:04}: {:02x?}", s.0, c);
+                s = s.add(c.len()).unwrap();
+            }
         }
     }
 }
@@ -444,7 +495,7 @@ impl FileReader {
         }
     }
 
-    fn curr_seq(&mut self, m: &mut FileManager<impl Flash>) -> Seq {
+    pub(crate) fn curr_seq(&mut self, m: &mut FileManager<impl Flash>) -> Seq {
         match &self.state {
             ReaderState::Created => m.files[self.file_id as usize].first_seq,
             ReaderState::Reading(s) => s.seq,
@@ -607,7 +658,8 @@ impl FileSearcher {
                 self.right_skiplist[..top].fill(pp.page_id);
 
                 trace!(
-                    "search start: left {:?} right {:?} right_skiplist {:?}",
+                    "search start file={:?}: left {:?} right {:?} right_skiplist {:?}",
+                    self.r.file_id,
                     self.left,
                     self.right,
                     self.right_skiplist
@@ -615,7 +667,7 @@ impl FileSearcher {
                 self.really_seek(m)
             }
             None => {
-                trace!("search start: empty file");
+                trace!("search start file={:?}: empty file", self.r.file_id);
                 Ok(false)
             }
         }
@@ -665,11 +717,13 @@ impl FileSearcher {
         mut page_id: PageID,
         left_limit: Option<Seq>,
     ) -> Result<(), SearchSeekError> {
+        trace!("search: seek_to_page page_id={:?} left_limit={:?}", page_id, left_limit);
+
         let (h, mut r) = loop {
             if page_id as usize >= PAGE_COUNT {
                 return Err(SearchSeekError::Corrupted);
             }
-            let (h, mut r) = m.read_page(page_id).inspect_err(|e| {
+            let (h, r) = m.read_page(page_id).inspect_err(|e| {
                 debug!("failed read next page={}: {:?}", page_id, e);
             })?;
 
@@ -680,6 +734,7 @@ impl FileSearcher {
 
             if let Some(left_limit) = left_limit {
                 if h.seq < left_limit {
+                    trace!("search: seek_to_page hit left_limit");
                     return Err(SearchSeekError::TooMuchLeft);
                 }
             }
@@ -690,6 +745,7 @@ impl FileSearcher {
 
             // No record boundary within this page. Try the previous one.
             page_id = h.skiplist[0];
+            trace!("search: no record boundary, trying again with page {:?}", page_id);
             if page_id == PageID::MAX {
                 debug!("first page in file has no record boundary!");
                 return Err(SearchSeekError::Corrupted);
@@ -867,9 +923,21 @@ impl FileWriter {
 }
 
 #[repr(transparent)]
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Seq(u32);
+
+impl fmt::Display for Seq {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl fmt::Debug for Seq {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 impl Seq {
     pub const ZERO: Self = Self(0);

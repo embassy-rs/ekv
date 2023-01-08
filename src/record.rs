@@ -40,6 +40,7 @@ impl<F: Flash> Database<F> {
     }
 
     pub fn write_transaction(&mut self) -> Result<WriteTransaction<'_, F>, Error> {
+        trace!("record wtx: start");
         let num_compacts = (0..LEVEL_COUNT)
             .rev()
             .take_while(|&i| self.find_empty_file_in_level(i).is_none())
@@ -182,6 +183,28 @@ impl<F: Flash> Database<F> {
         }
 
         Ok(())
+    }
+
+    pub(crate) fn dump(&mut self) {
+        for file_id in 0..FILE_COUNT as u16 {
+            debug!("====== FILE {} ======", file_id);
+            self.files.dump_file(file_id);
+
+            let mut r = self.files.read(file_id);
+            let mut key = Vec::new();
+            let mut value = [0u8; 1024];
+            loop {
+                let seq = r.curr_seq(&mut self.files);
+                match read_key(&mut self.files, &mut r, &mut key) {
+                    Err(ReadError::Eof) => break,
+                    x => x.unwrap(),
+                }
+                let n = read_value(&mut self.files, &mut r, &mut value).unwrap();
+                let value = &value[..n];
+
+                debug!("record at seq={:?}: key={:02x?} value={:02x?}", seq, key, value);
+            }
+        }
     }
 }
 
