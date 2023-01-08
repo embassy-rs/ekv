@@ -694,9 +694,12 @@ impl FileSearcher {
         };
 
         // seek to record start.
-        let s = r.skip(h.record_boundary as usize);
-        let state_seq = h.seq.add(h.record_boundary as usize).unwrap();
-        assert_eq!(s, h.record_boundary as usize);
+        let b = h.record_boundary as usize;
+        let n = r.skip(b);
+        if n != b {
+            return Err(SearchSeekError::Corrupted);
+        }
+        let state_seq = h.seq.add(b).unwrap();
 
         self.r.state = ReaderState::Reading(ReaderStateReading {
             seq: state_seq,
