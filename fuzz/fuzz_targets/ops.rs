@@ -28,6 +28,10 @@ struct InsertOp {
 }
 
 fn fuzz(ops: Input) {
+    if std::env::var_os("RUST_LOG").is_some() {
+        env_logger::init();
+    }
+
     let mut f = MemFlash::new();
     Database::format(&mut f);
     let mut db = Database::new(&mut f).unwrap();

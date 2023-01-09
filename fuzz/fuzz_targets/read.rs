@@ -6,7 +6,9 @@ use libfuzzer_sys::fuzz_target;
 fuzz_target!(|data: &[u8]| { fuzz(data) });
 
 fn fuzz(data: &[u8]) {
-    //pretty_env_logger::init();
+    if std::env::var_os("RUST_LOG").is_some() {
+        env_logger::init();
+    }
 
     let mut f = MemFlash::new();
     let n = f.data.len().min(data.len());

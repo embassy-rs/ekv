@@ -10,7 +10,7 @@ cargo-fuzz = true
 [dependencies]
 arbitrary = { version = "1.2.2", features = ["derive"] }
 libfuzzer-sys = "0.4"
-pretty_env_logger = "0.4"
+env_logger = "0.10"
 ekv = { path = ".." }
 
 
