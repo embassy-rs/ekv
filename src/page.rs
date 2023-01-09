@@ -72,7 +72,7 @@ impl<F: Flash> PageManager<F> {
         let header = Self::read_page_header(flash, page_id)?;
         let mut r = PageReader {
             page_id,
-            total_pos: 0,
+            prev_chunks_len: 0,
             at_end: false,
             chunk_offset: PageHeader::SIZE,
             chunk_len: 0,
@@ -92,13 +92,47 @@ impl<F: Flash> PageManager<F> {
             chunk_pos: 0,
         }
     }
+
+    pub fn write_append(&mut self, flash: &mut F, page_id: PageID) -> Result<(Header, PageWriter), Error> {
+        trace!("page: write_append {:?}", page_id);
+        let (header, mut r) = self.read(flash, page_id)?;
+        while !r.at_end {
+            r.next_chunk(flash)?;
+        }
+
+        // Check all space after `r.chunk_offset` is erased.
+        if r.chunk_offset != PAGE_SIZE {
+            const CHUNK_LEN: usize = 128;
+            let mut buf = [ERASE_VALUE; CHUNK_LEN];
+            let ok = (r.chunk_offset..PAGE_SIZE).step_by(CHUNK_LEN).all(|start| {
+                let end = (start + CHUNK_LEN).min(PAGE_SIZE);
+                let len = end - start;
+                flash.read(page_id as _, start, &mut buf[..len]);
+                buf[..len].iter().all(|&x| x == ERASE_VALUE)
+            });
+            if !ok {
+                // setting this will make the writer fail writing as if the page was full.
+                r.chunk_offset = PAGE_SIZE;
+            }
+        }
+
+        let w = PageWriter {
+            page_id,
+            needs_erase: false,
+            total_pos: r.prev_chunks_len,
+            chunk_offset: r.chunk_offset,
+            chunk_pos: 0,
+        };
+
+        Ok((header, w))
+    }
 }
 
 pub struct PageReader {
     page_id: PageID,
 
-    /// Total pos within the page (all chunks)
-    total_pos: usize,
+    /// sum of lengths of all previous chunks (not counting current one)
+    prev_chunks_len: usize,
 
     /// true if we've reached the end of the page.
     at_end: bool,
@@ -169,7 +203,6 @@ impl PageReader {
         let n = data.len().min(self.chunk_len - self.chunk_pos);
         let offset = self.chunk_offset + ChunkHeader::SIZE + self.chunk_pos;
         flash.read(self.page_id as _, offset, &mut data[..n]);
-        self.total_pos += n;
         self.chunk_pos += n;
         trace!("read: done, n={}", n);
         Ok(n)
@@ -191,7 +224,7 @@ impl PageReader {
         }
 
         let n = len.min(self.chunk_len - self.chunk_pos);
-        self.total_pos += n;
+        self.prev_chunks_len += n;
         self.chunk_pos += n;
         trace!("skip: done, n={}", n);
         Ok(n)
@@ -504,6 +537,9 @@ mod tests {
         let n = r.read(f, &mut buf).unwrap();
         assert_eq!(n, 3);
         assert_eq!(buf[..3], [10, 11, 12]);
+
+        let n = r.read(f, &mut buf).unwrap();
+        assert_eq!(n, 0);
     }
 
     #[test]
@@ -520,6 +556,108 @@ mod tests {
         let n = w.write(f, &[10, 11, 12]);
         assert_eq!(n, 3);
         // no commit!
+
+        // Read
+        let (h, mut r) = b.read(f, 0).unwrap();
+        assert_eq!(h, Header::DUMMY);
+        let mut buf = vec![0; PAGE_MAX_PAYLOAD_SIZE];
+
+        let n = r.read(f, &mut buf).unwrap();
+        assert_eq!(n, 9);
+        assert_eq!(buf[..9], [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+
+        let n = r.read(f, &mut buf).unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn test_multichunk_append() {
+        let f = &mut MemFlash::new();
+        let mut b = PageManager::new();
+
+        // Write
+        let mut w = b.write(f, 0);
+        let n = w.write(f, &[1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(n, 9);
+        w.write_header(f, Header::DUMMY);
+        w.commit(f);
+
+        let (_, mut w) = b.write_append(f, 0).unwrap();
+        let n = w.write(f, &[10, 11, 12]);
+        assert_eq!(n, 3);
+        w.commit(f);
+
+        // Read
+        let (h, mut r) = b.read(f, 0).unwrap();
+        assert_eq!(h, Header::DUMMY);
+        let mut buf = vec![0; PAGE_MAX_PAYLOAD_SIZE];
+
+        let n = r.read(f, &mut buf).unwrap();
+        assert_eq!(n, 9);
+        assert_eq!(buf[..9], [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+
+        let n = r.read(f, &mut buf).unwrap();
+        assert_eq!(n, 3);
+        assert_eq!(buf[..3], [10, 11, 12]);
+
+        let n = r.read(f, &mut buf).unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn test_multichunk_append_no_commit() {
+        let f = &mut MemFlash::new();
+        let mut b = PageManager::new();
+
+        // Write
+        let mut w = b.write(f, 0);
+        let n = w.write(f, &[1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(n, 9);
+        w.write_header(f, Header::DUMMY);
+        w.commit(f);
+
+        let (_, mut w) = b.write_append(f, 0).unwrap();
+        let n = w.write(f, &[10, 11, 12]);
+        assert_eq!(n, 3);
+        // no commit!
+
+        // Read
+        let (h, mut r) = b.read(f, 0).unwrap();
+        assert_eq!(h, Header::DUMMY);
+        let mut buf = vec![0; PAGE_MAX_PAYLOAD_SIZE];
+
+        let n = r.read(f, &mut buf).unwrap();
+        assert_eq!(n, 9);
+        assert_eq!(buf[..9], [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+
+        let n = r.read(f, &mut buf).unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn test_multichunk_append_no_commit_then_retry() {
+        let f = &mut MemFlash::new();
+        let mut b = PageManager::new();
+
+        // Write
+        let mut w = b.write(f, 0);
+        let n = w.write(f, &[1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(n, 9);
+        w.write_header(f, Header::DUMMY);
+        w.commit(f);
+
+        // Append but don't commit
+        let (_, mut w) = b.write_append(f, 0).unwrap();
+        let n = w.write(f, &[10, 11, 12]);
+        assert_eq!(n, 3);
+        // no commit!
+
+        // Even though we didn't commit the appended stuff, it did get written to flash.
+        // If there's "left over garbage" we can non longer append to this page. It must
+        // behave as if it was full.
+        let (_, mut w) = b.write_append(f, 0).unwrap();
+        let n = w.write(f, &[13, 14, 15]);
+        assert_eq!(n, 0);
 
         // Read
         let (h, mut r) = b.read(f, 0).unwrap();
