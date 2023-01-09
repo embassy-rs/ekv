@@ -17,9 +17,7 @@ None yet. This is a work in progress. Don't use it. When it's done, it will have
 
 - Handle storage full condition. Currently panics. It should trigger compactions, then return error if still full.
 - Add (optional) CRCs to check data integrity. Both headers and data.
-- Allow appending to already-written pages.
-  - Use it to optimize the metadata page: append to the existing one instead of erasing+writing a new one if possible.
-  - Use it to optimize tiny write transactions: append to the last file if possible, instead of starting a new one.
+- Optimize tiny write transactions: append to the last file if possible, instead of starting a new one.
 - Allow writes within a transaction to be unsorted.
 - Allow reads within a write transaction. They should see the the not yet committed writes in the current transaction.
 - Allow N read transactions + 1 write transaction concurrently.

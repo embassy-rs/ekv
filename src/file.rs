@@ -179,6 +179,11 @@ impl<F: Flash> FileManager<F> {
                 return Err(Error::Corrupted);
             }
 
+            if meta.last_page_id == PageID::MAX && meta.first_seq.0 != 0 {
+                debug!("meta last_page_id invalid, but first seq nonzero: {}", meta.file_id);
+                return Err(Error::Corrupted);
+            }
+
             files[meta.file_id as usize] = FileInfo {
                 last_page_id: meta.last_page_id,
                 first_seq: meta.first_seq,
@@ -240,12 +245,27 @@ impl<F: Flash> FileManager<F> {
         self.commit_and_truncate(Some(w), &[])
     }
 
+    fn write_file_meta(&mut self, w: &mut PageWriter, file_id: FileID) -> Result<(), WriteError> {
+        let f = &self.files[file_id as usize];
+        let meta = FileMeta {
+            file_id,
+            first_seq: f.first_seq,
+            last_page_id: f.last_page.as_ref().map(|pp| pp.page_id).unwrap_or(PageID::MAX),
+        };
+        let n = w.write(&mut self.flash, &meta.to_bytes());
+        if n != FileMeta::SIZE {
+            return Err(WriteError::Full);
+        }
+
+        Ok(())
+    }
+
     pub fn commit_and_truncate(
         &mut self,
-        w: Option<&mut FileWriter>,
+        mut w: Option<&mut FileWriter>,
         truncate: &[(FileID, usize)],
     ) -> Result<(), Error> {
-        if let Some(w) = w {
+        if let Some(w) = &mut w {
             w.do_commit(self)?;
         }
 
@@ -273,29 +293,44 @@ impl<F: Flash> FileManager<F> {
             }
         }
 
-        let page_id = self.alloc.allocate();
-        let mut w = self.write_page(page_id);
-        for file_id in 0..FILE_COUNT as FileID {
-            let f = &self.files[file_id as usize];
-            if let Some(last) = f.last_page {
-                let meta = FileMeta {
-                    file_id,
-                    first_seq: f.first_seq,
-                    last_page_id: last.page_id,
-                };
-                let n = w.write(&mut self.flash, &meta.to_bytes());
-                assert_eq!(n, FileMeta::SIZE);
+        // Try appending to the existing meta page.
+        let res: Result<(), WriteError> = try {
+            let (_, mut mw) = self.pages.write_append(&mut self.flash, self.meta_page_id)?;
+            if let Some(w) = w {
+                self.write_file_meta(&mut mw, w.file_id)?;
+            }
+            for &(file_id, _) in truncate {
+                self.write_file_meta(&mut mw, file_id)?;
+            }
+            mw.commit(&mut self.flash);
+        };
+        match res {
+            Ok(()) => Ok(()),
+            Err(WriteError::Corrupted) => Err(Error::Corrupted),
+            Err(WriteError::Full) => {
+                // Existing meta page was full. Write a new one.
+
+                let page_id = self.alloc.allocate();
+                let mut w = self.write_page(page_id);
+                for file_id in 0..FILE_COUNT as FileID {
+                    // Since we're writing a new page from scratch, no need to
+                    // write metas for empty files.
+                    if self.files[file_id as usize].last_page.is_some() {
+                        self.write_file_meta(&mut w, file_id).unwrap();
+                    }
+                }
+
+                self.meta_seq = self.meta_seq.add(1)?; // TODO handle wraparound
+                w.write_header(&mut self.flash, Header::meta(self.meta_seq));
+                w.commit(&mut self.flash);
+
+                // free the old one.
+                self.alloc.free(self.meta_page_id);
+                self.meta_page_id = page_id;
+
+                Ok(())
             }
         }
-
-        self.meta_seq = self.meta_seq.add(1)?; // TODO handle wraparound
-        w.write_header(&mut self.flash, Header::meta(self.meta_seq));
-        w.commit(&mut self.flash);
-
-        self.alloc.free(self.meta_page_id);
-        self.meta_page_id = page_id;
-
-        Ok(())
     }
 
     fn get_file_page(&mut self, file_id: FileID, seq: Seq) -> Result<Option<PagePointer>, Error> {
@@ -608,6 +643,21 @@ pub enum SearchSeekError {
 }
 
 impl From<Error> for SearchSeekError {
+    fn from(e: Error) -> Self {
+        match e {
+            Error::Corrupted => Self::Corrupted,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum WriteError {
+    Full,
+    Corrupted,
+}
+
+impl From<Error> for WriteError {
     fn from(e: Error) -> Self {
         match e {
             Error::Corrupted => Self::Corrupted,
@@ -1383,16 +1433,17 @@ mod tests {
         assert_eq!(m.alloc.is_used(3), false);
 
         m.commit(&mut w).unwrap();
-        assert_eq!(m.alloc.is_used(0), false); // old meta
+        assert_eq!(m.alloc.is_used(0), true); // old meta, appended in-place.
         assert_eq!(m.alloc.is_used(1), true);
         assert_eq!(m.alloc.is_used(2), true);
-        assert_eq!(m.alloc.is_used(3), true); // new meta
+        assert_eq!(m.alloc.is_used(3), false);
 
         // Remount
         m.mount().unwrap();
+        assert_eq!(m.alloc.is_used(0), true); // old meta, appended in-place.
         assert_eq!(m.alloc.is_used(1), true);
         assert_eq!(m.alloc.is_used(2), true);
-        assert_eq!(m.alloc.is_used(3), true); // new meta
+        assert_eq!(m.alloc.is_used(3), false);
     }
 
     #[test]
@@ -1515,29 +1566,29 @@ mod tests {
         let mut w = m.write(0);
         w.write(&mut m, &data).unwrap();
         m.commit(&mut w).unwrap();
-        assert_eq!(m.alloc.is_used(0), false); // old meta
+        assert_eq!(m.alloc.is_used(0), true); // old meta, appended in-place.
         assert_eq!(m.alloc.is_used(1), true);
-        assert_eq!(m.alloc.is_used(2), true); // new meta
+        assert_eq!(m.alloc.is_used(2), false);
         assert_eq!(m.alloc.is_used(3), false);
 
         let mut w = m.write(0);
         w.write(&mut m, &data).unwrap();
-        assert_eq!(m.alloc.is_used(0), false);
-        assert_eq!(m.alloc.is_used(1), true);
-        assert_eq!(m.alloc.is_used(2), true);
-        assert_eq!(m.alloc.is_used(3), true);
-
-        w.discard(&mut m);
-        assert_eq!(m.alloc.is_used(0), false);
+        assert_eq!(m.alloc.is_used(0), true);
         assert_eq!(m.alloc.is_used(1), true);
         assert_eq!(m.alloc.is_used(2), true);
         assert_eq!(m.alloc.is_used(3), false);
 
+        w.discard(&mut m);
+        assert_eq!(m.alloc.is_used(0), true);
+        assert_eq!(m.alloc.is_used(1), true);
+        assert_eq!(m.alloc.is_used(2), false);
+        assert_eq!(m.alloc.is_used(3), false);
+
         // Remount
         m.mount().unwrap();
-        assert_eq!(m.alloc.is_used(0), false);
+        assert_eq!(m.alloc.is_used(0), true);
         assert_eq!(m.alloc.is_used(1), true);
-        assert_eq!(m.alloc.is_used(2), true);
+        assert_eq!(m.alloc.is_used(2), false);
         assert_eq!(m.alloc.is_used(3), false);
     }
 

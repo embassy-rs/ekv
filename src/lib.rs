@@ -1,5 +1,6 @@
 #![deny(unused_must_use)]
 #![feature(result_option_inspect)]
+#![feature(try_blocks)]
 
 // MUST go first.
 mod fmt;
