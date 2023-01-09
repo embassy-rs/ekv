@@ -652,6 +652,10 @@ impl FileSearcher {
 
         match f.last_page {
             Some(pp) => {
+                if f.last_seq <= pp.header.seq {
+                    return Err(Error::Corrupted);
+                }
+
                 // Create skiplist.
                 self.right_skiplist = pp.header.skiplist;
                 let top = skiplist_index(pp.header.seq, f.last_seq) + 1;
