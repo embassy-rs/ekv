@@ -16,8 +16,6 @@ None yet. This is a work in progress. Don't use it. When it's done, it will have
 ## TODO
 
 - Handle storage full condition. Currently panics. It should trigger compactions, then return error if still full.
-- Add skiplist to file header, to make seeking O(log n) instead of O(n)
-- Add binary search within a file. This makes reads O(log n).
 - Add (optional) CRCs to check data integrity. Both headers and data.
 - Allow appending to already-written pages.
   - Use it to optimize the metadata page: append to the existing one instead of erasing+writing a new one if possible.
@@ -32,6 +30,7 @@ None yet. This is a work in progress. Don't use it. When it's done, it will have
 - Integrate with `embedded-storage`.
 - Free uncommitted pages on transaction drop.
 - Refactor page header: make meta and file pages have different magic so they can have different headers, instead of meta "abusing" the file header with prev_page_id = PageID::MAX-1 etc.
+- Remove tombstone records when compacting the topmost level.
 
 ## Why the name?
 
