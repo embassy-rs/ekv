@@ -86,6 +86,7 @@ impl<F: Flash> PageManager<F> {
         trace!("page: write {:?}", page_id);
         PageWriter {
             page_id,
+            needs_erase: true,
             total_pos: 0,
             chunk_offset: PageHeader::SIZE,
             chunk_pos: 0,
@@ -211,6 +212,7 @@ impl PageReader {
 
 pub struct PageWriter {
     page_id: PageID,
+    needs_erase: bool,
 
     /// Total data bytes in page (all chunks)
     total_pos: usize,
@@ -238,9 +240,7 @@ impl PageWriter {
             return 0;
         }
 
-        if self.total_pos == 0 {
-            flash.erase(self.page_id as _);
-        }
+        self.erase_if_needed(flash);
 
         flash.write(self.page_id as _, offset, &data[..n]);
         self.total_pos += n;
@@ -248,12 +248,16 @@ impl PageWriter {
         n
     }
 
-    pub fn commit(&mut self, flash: &mut impl Flash, header: Header) {
-        if self.total_pos == 0 {
+    fn erase_if_needed(&mut self, flash: &mut impl Flash) {
+        if self.needs_erase {
             flash.erase(self.page_id as _);
+            self.needs_erase = false;
         }
+    }
 
-        // Write header.
+    pub fn write_header(&mut self, flash: &mut impl Flash, header: Header) {
+        self.erase_if_needed(flash);
+
         PageManager::write_page_header(
             flash,
             self.page_id,
@@ -262,6 +266,15 @@ impl PageWriter {
                 file_header: header,
             },
         );
+    }
+
+    pub fn commit(&mut self, flash: &mut impl Flash) {
+        if self.chunk_pos == 0 {
+            // nothing to commit.
+            return;
+        }
+
+        self.erase_if_needed(flash);
 
         let h = ChunkHeader {
             len: self.chunk_pos as u32,
@@ -340,7 +353,8 @@ mod tests {
         let mut w = b.write(f, 0);
         let n = w.write(f, &data);
         assert_eq!(n, 13);
-        w.commit(f, Header::DUMMY);
+        w.write_header(f, Header::DUMMY);
+        w.commit(f);
 
         // Read
         let (h, mut r) = b.read(f, 0).unwrap();
@@ -372,7 +386,8 @@ mod tests {
         // Write
         let mut w = b.write(f, 0);
         w.write(f, &data);
-        w.commit(f, Header::DUMMY);
+        w.write_header(f, Header::DUMMY);
+        w.commit(f);
 
         // Read
         let (h, mut r) = b.read(f, 0).unwrap();
@@ -394,7 +409,8 @@ mod tests {
         let mut w = b.write(f, 0);
         let n = w.write(f, &data);
         assert_eq!(n, PAGE_MAX_PAYLOAD_SIZE);
-        w.commit(f, Header::DUMMY);
+        w.write_header(f, Header::DUMMY);
+        w.commit(f);
 
         // Read
         let (h, mut r) = b.read(f, 0).unwrap();
@@ -416,7 +432,8 @@ mod tests {
         assert_eq!(n, 3);
         let n = w.write(f, &[4, 5, 6, 7, 8, 9]);
         assert_eq!(n, 6);
-        w.commit(f, Header::DUMMY);
+        w.write_header(f, Header::DUMMY);
+        w.commit(f);
 
         // Read
         let (h, mut r) = b.read(f, 0).unwrap();
@@ -436,7 +453,8 @@ mod tests {
         let mut w = b.write(f, 0);
         let n = w.write(f, &[1, 2, 3, 4, 5, 6, 7, 8, 9]);
         assert_eq!(n, 9);
-        w.commit(f, Header::DUMMY);
+        w.write_header(f, Header::DUMMY);
+        w.commit(f);
 
         // Read
         let (h, mut r) = b.read(f, 0).unwrap();
@@ -450,6 +468,67 @@ mod tests {
         let n = r.read(f, &mut buf).unwrap();
         assert_eq!(n, 6);
         assert_eq!(buf[..6], [4, 5, 6, 7, 8, 9]);
+
+        let n = r.read(f, &mut buf).unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn test_multichunk() {
+        let f = &mut MemFlash::new();
+        let mut b = PageManager::new();
+
+        // Write
+        let mut w = b.write(f, 0);
+        let n = w.write(f, &[1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(n, 9);
+        w.write_header(f, Header::DUMMY);
+        w.commit(f);
+        let n = w.write(f, &[10, 11, 12]);
+        assert_eq!(n, 3);
+        w.commit(f);
+
+        // Read
+        let (h, mut r) = b.read(f, 0).unwrap();
+        assert_eq!(h, Header::DUMMY);
+        let mut buf = vec![0; PAGE_MAX_PAYLOAD_SIZE];
+
+        let n = r.read(f, &mut buf[..3]).unwrap();
+        assert_eq!(n, 3);
+        assert_eq!(buf[..3], [1, 2, 3]);
+
+        let n = r.read(f, &mut buf).unwrap();
+        assert_eq!(n, 6);
+        assert_eq!(buf[..6], [4, 5, 6, 7, 8, 9]);
+
+        let n = r.read(f, &mut buf).unwrap();
+        assert_eq!(n, 3);
+        assert_eq!(buf[..3], [10, 11, 12]);
+    }
+
+    #[test]
+    fn test_multichunk_no_commit() {
+        let f = &mut MemFlash::new();
+        let mut b = PageManager::new();
+
+        // Write
+        let mut w = b.write(f, 0);
+        let n = w.write(f, &[1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(n, 9);
+        w.write_header(f, Header::DUMMY);
+        w.commit(f);
+        let n = w.write(f, &[10, 11, 12]);
+        assert_eq!(n, 3);
+        // no commit!
+
+        // Read
+        let (h, mut r) = b.read(f, 0).unwrap();
+        assert_eq!(h, Header::DUMMY);
+        let mut buf = vec![0; PAGE_MAX_PAYLOAD_SIZE];
+
+        let n = r.read(f, &mut buf).unwrap();
+        assert_eq!(n, 9);
+        assert_eq!(buf[..9], [1, 2, 3, 4, 5, 6, 7, 8, 9]);
 
         let n = r.read(f, &mut buf).unwrap();
         assert_eq!(n, 0);

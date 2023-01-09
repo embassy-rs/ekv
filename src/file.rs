@@ -119,7 +119,7 @@ impl<F: Flash> FileManager<F> {
 
         // Write initial meta page.
         let mut w = self.write_page(0);
-        w.commit(&mut self.flash, Header::meta(Seq(1)));
+        w.write_header(&mut self.flash, Header::meta(Seq(1)));
     }
 
     pub fn mount(&mut self) -> Result<(), Error> {
@@ -289,7 +289,8 @@ impl<F: Flash> FileManager<F> {
         }
 
         self.meta_seq = self.meta_seq.add(1)?; // TODO handle wraparound
-        w.commit(&mut self.flash, Header::meta(self.meta_seq));
+        w.write_header(&mut self.flash, Header::meta(self.meta_seq));
+        w.commit(&mut self.flash);
 
         self.alloc.free(self.meta_page_id);
         self.meta_page_id = page_id;
@@ -856,7 +857,8 @@ impl FileWriter {
             skiplist,
             record_boundary,
         };
-        w.commit(&mut m.flash, header);
+        w.write_header(&mut m.flash, header);
+        w.commit(&mut m.flash);
 
         trace!(
             "flush_header: page={:?} h={:?} record_boundary={:?}",
