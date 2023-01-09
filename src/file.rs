@@ -686,14 +686,18 @@ impl FileSearcher {
         };
 
         loop {
-            if self.right_skiplist[i] != PageID::MAX {
+            if self.right_skiplist[i] != PageID::MAX && self.right > self.left {
                 let seq = skiplist_seq(self.right, i);
                 if seq >= self.left {
                     self.curr_high = seq;
                     match self.seek_to_page(m, self.right_skiplist[i], Some(self.left)) {
                         Ok(()) => return Ok(true),
                         Err(SearchSeekError::Corrupted) => return Err(Error::Corrupted),
-                        Err(SearchSeekError::TooMuchLeft) => self.left = seq.add(1).unwrap(),
+                        Err(SearchSeekError::TooMuchLeft) => {
+                            let new_left = seq.add(1).unwrap();
+                            assert!(new_left >= self.left);
+                            self.left = new_left;
+                        }
                     }
                 }
             }
