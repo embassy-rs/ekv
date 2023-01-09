@@ -118,7 +118,7 @@ impl<F: Flash> FileManager<F> {
         }
 
         // Write initial meta page.
-        let w = self.write_page(0);
+        let mut w = self.write_page(0);
         w.commit(&mut self.flash, Header::meta(Seq(1)));
     }
 
@@ -159,7 +159,7 @@ impl<F: Flash> FileManager<F> {
         }; FILE_COUNT];
         loop {
             let mut meta = [0; FileMeta::SIZE];
-            let n = r.read(&mut self.flash, &mut meta);
+            let n = r.read(&mut self.flash, &mut meta)?;
             if n == 0 {
                 break;
             }
@@ -194,7 +194,7 @@ impl<F: Flash> FileManager<F> {
             let (h, mut r) = self.read_page(fi.last_page_id).inspect_err(|e| {
                 debug!("read last_page_id={} file_id={}: {:?}", file_id, fi.last_page_id, e);
             })?;
-            let page_len = r.skip(PAGE_SIZE);
+            let page_len = r.skip(&mut self.flash, PAGE_SIZE)?;
             let last_seq = h.seq.add(page_len)?;
 
             let mut p = Some(PagePointer {
@@ -369,7 +369,7 @@ impl<F: Flash> FileManager<F> {
         let mut buf = [0; 1024];
         for p in pages.iter().rev() {
             let (h, mut r) = self.read_page(p.page_id).unwrap();
-            let n = r.read(&mut self.flash, &mut buf);
+            let n = r.read(&mut self.flash, &mut buf).unwrap();
             let data = &buf[..n];
 
             let rb = if h.record_boundary == u16::MAX {
@@ -514,17 +514,16 @@ impl FileReader {
                 let (h, mut r) = m.read_page(pp.page_id).inspect_err(|e| {
                     debug!("failed read next page={}: {:?}", pp.page_id, e);
                 })?;
-                if r.available() <= seq.sub(h.seq) {
+                let n = (seq.sub(h.seq)) as usize;
+                let got_n = r.skip(&mut m.flash, n)?;
+                let eof = r.is_at_eof(&mut m.flash)?;
+                if n != got_n || eof {
                     debug!(
-                        "found seq hole in file. page={} h.seq={:?} seq={:?} avail={}",
-                        pp.page_id,
-                        h.seq,
-                        seq,
-                        r.available()
+                        "found seq hole in file. page={} h.seq={:?} seq={:?} n={} got_n={} eof={}",
+                        pp.page_id, h.seq, seq, n, got_n, eof
                     );
                     return Err(Error::Corrupted);
                 }
-                r.seek((seq.sub(h.seq)) as usize);
                 ReaderState::Reading(ReaderStateReading { seq, reader: r })
             }
             None => ReaderState::Finished,
@@ -541,7 +540,7 @@ impl FileReader {
                     continue;
                 }
                 ReaderState::Reading(s) => {
-                    let n = s.reader.read(&mut m.flash, data);
+                    let n = s.reader.read(&mut m.flash, data)?;
                     data = &mut data[n..];
                     s.seq = s.seq.add(n)?;
                     if n == 0 {
@@ -558,7 +557,7 @@ impl FileReader {
         if let ReaderState::Reading(s) = &mut self.state {
             // Only worth trying if the skip might not exhaust the current page
             if len < PAGE_MAX_PAYLOAD_SIZE {
-                let n = s.reader.skip(len);
+                let n = s.reader.skip(&mut m.flash, len)?;
                 len -= n;
                 s.seq = s.seq.add(n).unwrap();
             }
@@ -762,7 +761,7 @@ impl FileSearcher {
 
         // seek to record start.
         let b = h.record_boundary as usize;
-        let n = r.skip(b);
+        let n = r.skip(&mut m.flash, b)?;
         if n != b {
             return Err(SearchSeekError::Corrupted);
         }
@@ -831,8 +830,8 @@ impl FileWriter {
         }
     }
 
-    fn flush_header(&mut self, m: &mut FileManager<impl Flash>, w: PageWriter) -> Result<(), Error> {
-        let page_size = w.offset();
+    fn flush_header(&mut self, m: &mut FileManager<impl Flash>, mut w: PageWriter) -> Result<(), Error> {
+        let page_size = w.len();
         let page_id = w.page_id();
         let mut skiplist = [PageID::MAX; SKIPLIST_LEN];
         if let Some(last_page) = &self.last_page {
@@ -925,7 +924,7 @@ impl FileWriter {
 
     pub fn record_end(&mut self) {
         if self.record_boundary.is_none() {
-            self.record_boundary = Some(self.writer.as_mut().unwrap().offset());
+            self.record_boundary = Some(self.writer.as_mut().unwrap().len());
         }
     }
 }
