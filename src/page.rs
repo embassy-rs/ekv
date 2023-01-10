@@ -87,6 +87,7 @@ impl<F: Flash> PageManager<F> {
         PageWriter {
             page_id,
             needs_erase: true,
+            align_buf: [0; WRITE_SIZE],
             total_pos: 0,
             chunk_offset: PageHeader::SIZE,
             chunk_pos: 0,
@@ -119,6 +120,7 @@ impl<F: Flash> PageManager<F> {
         let w = PageWriter {
             page_id,
             needs_erase: false,
+            align_buf: [0; WRITE_SIZE],
             total_pos: r.prev_chunks_len,
             chunk_offset: r.chunk_offset,
             chunk_pos: 0,
@@ -151,7 +153,7 @@ impl PageReader {
     }
 
     fn next_chunk(&mut self, flash: &mut impl Flash) -> Result<bool, Error> {
-        self.chunk_offset += ChunkHeader::SIZE + self.chunk_len;
+        self.chunk_offset += ChunkHeader::SIZE + align_up(self.chunk_len);
         self.open_chunk(flash)
     }
 
@@ -247,6 +249,8 @@ pub struct PageWriter {
     page_id: PageID,
     needs_erase: bool,
 
+    align_buf: [u8; WRITE_SIZE],
+
     /// Total data bytes in page (all chunks)
     total_pos: usize,
 
@@ -266,19 +270,53 @@ impl PageWriter {
     }
 
     pub fn write(&mut self, flash: &mut impl Flash, data: &[u8]) -> usize {
-        let offset = self.chunk_offset + ChunkHeader::SIZE + self.chunk_pos;
-        let max_write = PAGE_SIZE.saturating_sub(offset);
-        let n = data.len().min(max_write);
-        if n == 0 {
+        let max_write = PAGE_SIZE.saturating_sub(self.chunk_offset + ChunkHeader::SIZE + self.chunk_pos);
+        let total_n = data.len().min(max_write);
+        if total_n == 0 {
             return 0;
         }
+        let mut data = &data[..total_n];
 
         self.erase_if_needed(flash);
 
-        flash.write(self.page_id as _, offset, &data[..n]);
+        let align_offs = self.chunk_pos % WRITE_SIZE;
+        if align_offs != 0 {
+            let left = WRITE_SIZE - align_offs;
+            let n = left.min(data.len());
+
+            self.align_buf[align_offs..][..n].copy_from_slice(&data[..n]);
+            data = &data[n..];
+            self.total_pos += n;
+            self.chunk_pos += n;
+
+            if n == left {
+                flash.write(
+                    self.page_id as _,
+                    self.chunk_offset + ChunkHeader::SIZE + self.chunk_pos - WRITE_SIZE,
+                    &self.align_buf,
+                );
+            }
+        }
+
+        let n = data.len() - (data.len() % WRITE_SIZE);
+        if n != 0 {
+            flash.write(
+                self.page_id as _,
+                self.chunk_offset + ChunkHeader::SIZE + self.chunk_pos,
+                &data[..n],
+            );
+            data = &data[n..];
+            self.total_pos += n;
+            self.chunk_pos += n;
+        }
+
+        let n = data.len();
+        assert!(n < WRITE_SIZE);
+        self.align_buf[..n].copy_from_slice(data);
         self.total_pos += n;
         self.chunk_pos += n;
-        n
+
+        total_n
     }
 
     fn erase_if_needed(&mut self, flash: &mut impl Flash) {
@@ -309,14 +347,32 @@ impl PageWriter {
 
         self.erase_if_needed(flash);
 
+        // flush align buf.
+        let align_offs = self.chunk_pos % WRITE_SIZE;
+        if align_offs != 0 {
+            flash.write(
+                self.page_id as _,
+                self.chunk_offset + ChunkHeader::SIZE + self.chunk_pos - align_offs,
+                &self.align_buf,
+            );
+        }
+
         let h = ChunkHeader {
             len: self.chunk_pos as u32,
         };
         flash.write(self.page_id as _, self.chunk_offset, &h.to_bytes());
 
         // Prepare for next chunk.
-        self.chunk_offset += ChunkHeader::SIZE + self.chunk_pos;
+        self.chunk_offset += ChunkHeader::SIZE + align_up(self.chunk_pos);
         self.chunk_pos = 0;
+    }
+}
+
+fn align_up(n: usize) -> usize {
+    if n % WRITE_SIZE != 0 {
+        n + WRITE_SIZE - n % WRITE_SIZE
+    } else {
+        n
     }
 }
 
@@ -648,8 +704,8 @@ mod tests {
 
         // Append but don't commit
         let (_, mut w) = b.write_append(f, 0).unwrap();
-        let n = w.write(f, &[10, 11, 12]);
-        assert_eq!(n, 3);
+        let n = w.write(f, &[10, 11, 12, 13, 14, 15]);
+        assert_eq!(n, 6);
         // no commit!
 
         // Even though we didn't commit the appended stuff, it did get written to flash.
