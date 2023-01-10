@@ -15,20 +15,25 @@ None yet. This is a work in progress. Don't use it. When it's done, it will have
 
 ## TODO
 
+Soon:
+
 - Handle storage full condition. Currently panics. It should trigger compactions, then return error if still full.
 - Add (optional) CRCs to check data integrity. Both headers and data.
-- Optimize tiny write transactions: append to the last file if possible, instead of starting a new one.
-- Allow writes within a transaction to be unsorted.
-- Allow reads within a write transaction. They should see the the not yet committed writes in the current transaction.
 - Allow N read transactions + 1 write transaction concurrently.
-- Support "progressive compaction": instead of compacting 2 whole files into one, do it page by page.
 - Support write align. Currently writes are not aligned, but most flash out there can only write in 4-byte or 8-byte blocks.
-- Add optional encryption + authentication support (which disables CRCs)
+- Support "progressive compaction": instead of compacting 2 whole files into one, do it page by page.
 - Async
-- Integrate with `embedded-storage`.
 - Free uncommitted pages on transaction drop.
 - Refactor page header: make meta and file pages have different magic so they can have different headers, instead of meta "abusing" the file header with prev_page_id = PageID::MAX-1 etc.
 - Remove tombstone records when compacting the topmost level.
+
+Later: 
+
+- Optimize tiny write transactions: append to the last file if possible, instead of starting a new one.
+- Allow writes within a transaction to be unsorted.
+- Allow reads within a write transaction. They should see the the not yet committed writes in the current transaction.
+- Add optional encryption + authentication support (which disables CRCs)
+- Integrate with `embedded-storage`.
 
 ## Why the name?
 
