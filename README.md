@@ -20,7 +20,7 @@ Soon:
 - Handle storage full condition. Currently panics. It should trigger compactions, then return error if still full.
 - Add (optional) CRCs to check data integrity. Both headers and data.
 - Allow N read transactions + 1 write transaction concurrently.
-- Support write align. Currently writes are not aligned, but most flash out there can only write in 4-byte or 8-byte blocks.
+- Support access align. Currently reads/writes are not aligned, but most flash out there can only be accessed in 4-byte or 8-byte blocks.
 - Support "progressive compaction": instead of compacting 2 whole files into one, do it page by page.
 - Async
 - Free uncommitted pages on transaction drop.
@@ -29,6 +29,7 @@ Soon:
 
 Later: 
 
+- Add a max chunk size, to reduce the RAM requirement in PageReader.
 - Optimize tiny write transactions: append to the last file if possible, instead of starting a new one.
 - Allow writes within a transaction to be unsorted.
 - Allow reads within a write transaction. They should see the the not yet committed writes in the current transaction.

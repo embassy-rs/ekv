@@ -77,6 +77,7 @@ impl<F: Flash> PageManager<F> {
             chunk_offset: PageHeader::SIZE,
             chunk_len: 0,
             chunk_pos: 0,
+            buf: [0u8; PAGE_MAX_PAYLOAD_SIZE],
         };
         r.open_chunk(flash)?;
         Ok((header.file_header, r))
@@ -145,6 +146,9 @@ pub struct PageReader {
     chunk_pos: usize,
     /// Data bytes in the chunk we're currently writing.
     chunk_len: usize,
+
+    /// Data in the current chunk.
+    buf: [u8; PAGE_MAX_PAYLOAD_SIZE],
 }
 
 impl PageReader {
@@ -184,6 +188,13 @@ impl PageReader {
         self.chunk_pos = 0;
         self.chunk_len = header.len as usize;
 
+        let n = align_up(self.chunk_len);
+        flash.read(
+            self.page_id as _,
+            self.chunk_offset + ChunkHeader::SIZE,
+            &mut self.buf[..n],
+        );
+
         Ok(true)
     }
 
@@ -203,8 +214,7 @@ impl PageReader {
         }
 
         let n = data.len().min(self.chunk_len - self.chunk_pos);
-        let offset = self.chunk_offset + ChunkHeader::SIZE + self.chunk_pos;
-        flash.read(self.page_id as _, offset, &mut data[..n]);
+        data[..n].copy_from_slice(&self.buf[self.chunk_pos..][..n]);
         self.chunk_pos += n;
         trace!("read: done, n={}", n);
         Ok(n)
