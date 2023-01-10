@@ -1,3 +1,4 @@
+#![cfg_attr(not(feature = "std"), no_std)]
 #![deny(unused_must_use)]
 #![feature(result_option_inspect)]
 #![feature(try_blocks)]
@@ -7,7 +8,7 @@ mod fmt;
 mod macros;
 
 mod alloc;
-mod config;
+pub mod config;
 
 // Layer 0: flash access
 pub mod flash;

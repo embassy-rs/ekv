@@ -8,7 +8,20 @@ pub trait Flash {
     fn write(&mut self, page_id: usize, offset: usize, data: &[u8]);
 }
 
+impl<T: Flash> Flash for &mut T {
+    fn erase(&mut self, page_id: usize) {
+        T::erase(self, page_id)
+    }
+    fn read(&mut self, page_id: usize, offset: usize, data: &mut [u8]) {
+        T::read(self, page_id, offset, data)
+    }
+    fn write(&mut self, page_id: usize, offset: usize, data: &[u8]) {
+        T::write(self, page_id, offset, data)
+    }
+}
+
 /// Fake in-memory flash
+#[cfg(feature = "std")]
 pub struct MemFlash {
     pub data: Vec<u8>,
     pub read_count: usize,
@@ -19,6 +32,7 @@ pub struct MemFlash {
     pub erase_bytes: usize,
 }
 
+#[cfg(feature = "std")]
 impl MemFlash {
     pub fn new() -> Self {
         Self {
@@ -42,6 +56,7 @@ impl MemFlash {
     }
 }
 
+#[cfg(feature = "std")]
 impl Flash for MemFlash {
     fn erase(&mut self, page_id: usize) {
         assert!(page_id < PAGE_COUNT);
@@ -75,17 +90,5 @@ impl Flash for MemFlash {
         mem.copy_from_slice(data);
         self.write_count += 1;
         self.write_bytes += data.len();
-    }
-}
-
-impl<T: Flash> Flash for &mut T {
-    fn erase(&mut self, page_id: usize) {
-        T::erase(self, page_id)
-    }
-    fn read(&mut self, page_id: usize, offset: usize, data: &mut [u8]) {
-        T::read(self, page_id, offset, data)
-    }
-    fn write(&mut self, page_id: usize, offset: usize, data: &[u8]) {
-        T::write(self, page_id, offset, data)
     }
 }

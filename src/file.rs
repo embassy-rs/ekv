@@ -378,6 +378,7 @@ impl<F: Flash> FileManager<F> {
         self.pages.write(&mut self.flash, page_id)
     }
 
+    #[cfg(feature = "std")]
     pub(crate) fn dump(&mut self) {
         for file_id in 0..FILE_COUNT {
             debug!("====== FILE {} ======", file_id);
@@ -385,6 +386,7 @@ impl<F: Flash> FileManager<F> {
         }
     }
 
+    #[cfg(feature = "std")]
     pub(crate) fn dump_file(&mut self, file_id: FileID) {
         let f = self.files[file_id as usize];
         debug!(

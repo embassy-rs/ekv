@@ -1,5 +1,5 @@
-use std::cmp::Ordering;
-use std::mem::MaybeUninit;
+use core::cmp::Ordering;
+use core::mem::MaybeUninit;
 
 use heapless::Vec;
 
@@ -185,6 +185,7 @@ impl<F: Flash> Database<F> {
         Ok(())
     }
 
+    #[cfg(feature = "std")]
     pub(crate) fn dump(&mut self) {
         for file_id in 0..FILE_COUNT as u16 {
             debug!("====== FILE {} ======", file_id);
