@@ -1,21 +1,22 @@
 use crate::config::*;
+use crate::types::PageID;
 
 /// NOR flash memory trait
 /// TODO use embedded-storage
 pub trait Flash {
-    fn erase(&mut self, page_id: usize);
-    fn read(&mut self, page_id: usize, offset: usize, data: &mut [u8]);
-    fn write(&mut self, page_id: usize, offset: usize, data: &[u8]);
+    fn erase(&mut self, page_id: PageID);
+    fn read(&mut self, page_id: PageID, offset: usize, data: &mut [u8]);
+    fn write(&mut self, page_id: PageID, offset: usize, data: &[u8]);
 }
 
 impl<T: Flash> Flash for &mut T {
-    fn erase(&mut self, page_id: usize) {
+    fn erase(&mut self, page_id: PageID) {
         T::erase(self, page_id)
     }
-    fn read(&mut self, page_id: usize, offset: usize, data: &mut [u8]) {
+    fn read(&mut self, page_id: PageID, offset: usize, data: &mut [u8]) {
         T::read(self, page_id, offset, data)
     }
-    fn write(&mut self, page_id: usize, offset: usize, data: &[u8]) {
+    fn write(&mut self, page_id: PageID, offset: usize, data: &[u8]) {
         T::write(self, page_id, offset, data)
     }
 }
@@ -58,14 +59,18 @@ impl MemFlash {
 
 #[cfg(feature = "std")]
 impl Flash for MemFlash {
-    fn erase(&mut self, page_id: usize) {
+    fn erase(&mut self, page_id: PageID) {
+        let page_id = page_id.index();
+
         assert!(page_id < PAGE_COUNT);
         self.data[page_id * PAGE_SIZE..][..PAGE_SIZE].fill(ERASE_VALUE);
         self.erase_count += 1;
         self.erase_bytes += PAGE_SIZE;
     }
 
-    fn read(&mut self, page_id: usize, offset: usize, data: &mut [u8]) {
+    fn read(&mut self, page_id: PageID, offset: usize, data: &mut [u8]) {
+        let page_id = page_id.index();
+
         assert!(page_id < PAGE_COUNT);
         assert!(offset <= PAGE_SIZE);
         assert!(offset + data.len() <= PAGE_SIZE);
@@ -78,7 +83,9 @@ impl Flash for MemFlash {
         self.read_bytes += data.len();
     }
 
-    fn write(&mut self, page_id: usize, offset: usize, data: &[u8]) {
+    fn write(&mut self, page_id: PageID, offset: usize, data: &[u8]) {
+        let page_id = page_id.index();
+
         assert!(page_id < PAGE_COUNT);
         assert!(offset <= PAGE_SIZE);
         assert!(offset + data.len() <= PAGE_SIZE);

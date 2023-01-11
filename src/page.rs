@@ -3,6 +3,7 @@ use core::marker::PhantomData;
 use crate::config::*;
 use crate::file::Header;
 use crate::flash::Flash;
+use crate::types::PageID;
 use crate::Error;
 
 const PAGE_HEADER_MAGIC: u32 = 0xc4e21c75;
@@ -393,6 +394,11 @@ mod tests {
     use super::*;
     use crate::flash::MemFlash;
 
+    const PAGE: PageID = match PageID::from_raw(0) {
+        Some(x) => x,
+        None => panic!("none"),
+    };
+
     #[test]
     fn test_header() {
         let f = &mut MemFlash::new();
@@ -401,8 +407,8 @@ mod tests {
             magic: PAGE_HEADER_MAGIC,
             file_header: Header::DUMMY,
         };
-        PageManager::write_page_header(f, 0, h);
-        let h2 = PageManager::read_page_header(f, 0).unwrap();
+        PageManager::write_page_header(f, PAGE, h);
+        let h2 = PageManager::read_page_header(f, PAGE).unwrap();
         assert_eq!(h, h2)
     }
 
@@ -410,7 +416,7 @@ mod tests {
     fn test_header_read_unwritten() {
         let f = &mut MemFlash::new();
 
-        let res = PageManager::read_page_header(f, 0);
+        let res = PageManager::read_page_header(f, PAGE);
         assert!(matches!(res, Err(Error::Corrupted)))
     }
 
@@ -420,7 +426,7 @@ mod tests {
         let mut b = PageManager::new();
 
         // Read
-        let res = b.read(f, 0);
+        let res = b.read(f, PAGE);
         assert!(matches!(res, Err(Error::Corrupted)));
     }
 
@@ -432,12 +438,12 @@ mod tests {
         let data = dummy_data(13);
 
         // Write
-        let mut w = b.write(f, 0);
+        let mut w = b.write(f, PAGE);
         w.write(f, &data);
         drop(w); // don't commit
 
         // Read
-        let res = b.read(f, 0);
+        let res = b.read(f, PAGE);
         assert!(matches!(res, Err(Error::Corrupted)));
     }
 
@@ -449,14 +455,14 @@ mod tests {
         let data = dummy_data(13);
 
         // Write
-        let mut w = b.write(f, 0);
+        let mut w = b.write(f, PAGE);
         let n = w.write(f, &data);
         assert_eq!(n, 13);
         w.write_header(f, Header::DUMMY);
         w.commit(f);
 
         // Read
-        let (h, mut r) = b.read(f, 0).unwrap();
+        let (h, mut r) = b.read(f, PAGE).unwrap();
         assert_eq!(h, Header::DUMMY);
         let mut buf = vec![0; data.len()];
         let n = r.read(f, &mut buf).unwrap();
@@ -467,7 +473,7 @@ mod tests {
         let mut b = PageManager::new();
 
         // Read
-        let (h, mut r) = b.read(f, 0).unwrap();
+        let (h, mut r) = b.read(f, PAGE).unwrap();
         assert_eq!(h, Header::DUMMY);
         let mut buf = vec![0; data.len()];
         let n = r.read(f, &mut buf).unwrap();
@@ -483,13 +489,13 @@ mod tests {
         let data = dummy_data(13);
 
         // Write
-        let mut w = b.write(f, 0);
+        let mut w = b.write(f, PAGE);
         w.write(f, &data);
         w.write_header(f, Header::DUMMY);
         w.commit(f);
 
         // Read
-        let (h, mut r) = b.read(f, 0).unwrap();
+        let (h, mut r) = b.read(f, PAGE).unwrap();
         assert_eq!(h, Header::DUMMY);
         let mut buf = vec![0; 1024];
         let n = r.read(f, &mut buf).unwrap();
@@ -505,14 +511,14 @@ mod tests {
         let data = dummy_data(65536);
 
         // Write
-        let mut w = b.write(f, 0);
+        let mut w = b.write(f, PAGE);
         let n = w.write(f, &data);
         assert_eq!(n, PAGE_MAX_PAYLOAD_SIZE);
         w.write_header(f, Header::DUMMY);
         w.commit(f);
 
         // Read
-        let (h, mut r) = b.read(f, 0).unwrap();
+        let (h, mut r) = b.read(f, PAGE).unwrap();
         assert_eq!(h, Header::DUMMY);
         let mut buf = vec![0; PAGE_MAX_PAYLOAD_SIZE];
         let n = r.read(f, &mut buf).unwrap();
@@ -526,7 +532,7 @@ mod tests {
         let mut b = PageManager::new();
 
         // Write
-        let mut w = b.write(f, 0);
+        let mut w = b.write(f, PAGE);
         let n = w.write(f, &[1, 2, 3]);
         assert_eq!(n, 3);
         let n = w.write(f, &[4, 5, 6, 7, 8, 9]);
@@ -535,7 +541,7 @@ mod tests {
         w.commit(f);
 
         // Read
-        let (h, mut r) = b.read(f, 0).unwrap();
+        let (h, mut r) = b.read(f, PAGE).unwrap();
         assert_eq!(h, Header::DUMMY);
         let mut buf = vec![0; PAGE_MAX_PAYLOAD_SIZE];
         let n = r.read(f, &mut buf).unwrap();
@@ -549,14 +555,14 @@ mod tests {
         let mut b = PageManager::new();
 
         // Write
-        let mut w = b.write(f, 0);
+        let mut w = b.write(f, PAGE);
         let n = w.write(f, &[1, 2, 3, 4, 5, 6, 7, 8, 9]);
         assert_eq!(n, 9);
         w.write_header(f, Header::DUMMY);
         w.commit(f);
 
         // Read
-        let (h, mut r) = b.read(f, 0).unwrap();
+        let (h, mut r) = b.read(f, PAGE).unwrap();
         assert_eq!(h, Header::DUMMY);
         let mut buf = vec![0; PAGE_MAX_PAYLOAD_SIZE];
 
@@ -578,7 +584,7 @@ mod tests {
         let mut b = PageManager::new();
 
         // Write
-        let mut w = b.write(f, 0);
+        let mut w = b.write(f, PAGE);
         let n = w.write(f, &[1, 2, 3, 4, 5, 6, 7, 8, 9]);
         assert_eq!(n, 9);
         w.write_header(f, Header::DUMMY);
@@ -588,7 +594,7 @@ mod tests {
         w.commit(f);
 
         // Read
-        let (h, mut r) = b.read(f, 0).unwrap();
+        let (h, mut r) = b.read(f, PAGE).unwrap();
         assert_eq!(h, Header::DUMMY);
         let mut buf = vec![0; PAGE_MAX_PAYLOAD_SIZE];
 
@@ -614,7 +620,7 @@ mod tests {
         let mut b = PageManager::new();
 
         // Write
-        let mut w = b.write(f, 0);
+        let mut w = b.write(f, PAGE);
         let n = w.write(f, &[1, 2, 3, 4, 5, 6, 7, 8, 9]);
         assert_eq!(n, 9);
         w.write_header(f, Header::DUMMY);
@@ -624,7 +630,7 @@ mod tests {
         // no commit!
 
         // Read
-        let (h, mut r) = b.read(f, 0).unwrap();
+        let (h, mut r) = b.read(f, PAGE).unwrap();
         assert_eq!(h, Header::DUMMY);
         let mut buf = vec![0; PAGE_MAX_PAYLOAD_SIZE];
 
@@ -642,19 +648,19 @@ mod tests {
         let mut b = PageManager::new();
 
         // Write
-        let mut w = b.write(f, 0);
+        let mut w = b.write(f, PAGE);
         let n = w.write(f, &[1, 2, 3, 4, 5, 6, 7, 8, 9]);
         assert_eq!(n, 9);
         w.write_header(f, Header::DUMMY);
         w.commit(f);
 
-        let (_, mut w) = b.write_append(f, 0).unwrap();
+        let (_, mut w) = b.write_append(f, PAGE).unwrap();
         let n = w.write(f, &[10, 11, 12]);
         assert_eq!(n, 3);
         w.commit(f);
 
         // Read
-        let (h, mut r) = b.read(f, 0).unwrap();
+        let (h, mut r) = b.read(f, PAGE).unwrap();
         assert_eq!(h, Header::DUMMY);
         let mut buf = vec![0; PAGE_MAX_PAYLOAD_SIZE];
 
@@ -676,19 +682,19 @@ mod tests {
         let mut b = PageManager::new();
 
         // Write
-        let mut w = b.write(f, 0);
+        let mut w = b.write(f, PAGE);
         let n = w.write(f, &[1, 2, 3, 4, 5, 6, 7, 8, 9]);
         assert_eq!(n, 9);
         w.write_header(f, Header::DUMMY);
         w.commit(f);
 
-        let (_, mut w) = b.write_append(f, 0).unwrap();
+        let (_, mut w) = b.write_append(f, PAGE).unwrap();
         let n = w.write(f, &[10, 11, 12]);
         assert_eq!(n, 3);
         // no commit!
 
         // Read
-        let (h, mut r) = b.read(f, 0).unwrap();
+        let (h, mut r) = b.read(f, PAGE).unwrap();
         assert_eq!(h, Header::DUMMY);
         let mut buf = vec![0; PAGE_MAX_PAYLOAD_SIZE];
 
@@ -706,14 +712,14 @@ mod tests {
         let mut b = PageManager::new();
 
         // Write
-        let mut w = b.write(f, 0);
+        let mut w = b.write(f, PAGE);
         let n = w.write(f, &[1, 2, 3, 4, 5, 6, 7, 8, 9]);
         assert_eq!(n, 9);
         w.write_header(f, Header::DUMMY);
         w.commit(f);
 
         // Append but don't commit
-        let (_, mut w) = b.write_append(f, 0).unwrap();
+        let (_, mut w) = b.write_append(f, PAGE).unwrap();
         let n = w.write(f, &[10, 11, 12, 13, 14, 15]);
         assert_eq!(n, 6);
         // no commit!
@@ -721,12 +727,12 @@ mod tests {
         // Even though we didn't commit the appended stuff, it did get written to flash.
         // If there's "left over garbage" we can non longer append to this page. It must
         // behave as if it was full.
-        let (_, mut w) = b.write_append(f, 0).unwrap();
+        let (_, mut w) = b.write_append(f, PAGE).unwrap();
         let n = w.write(f, &[13, 14, 15]);
         assert_eq!(n, 0);
 
         // Read
-        let (h, mut r) = b.read(f, 0).unwrap();
+        let (h, mut r) = b.read(f, PAGE).unwrap();
         assert_eq!(h, Header::DUMMY);
         let mut buf = vec![0; PAGE_MAX_PAYLOAD_SIZE];
 

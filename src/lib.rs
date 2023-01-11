@@ -9,18 +9,11 @@ mod macros;
 
 mod alloc;
 pub mod config;
-
-// Layer 0: flash access
-pub mod flash;
-
-// Layer 1: page
-mod page;
-
-// Layer 2: file
 mod file;
-
-// Layer 3: record
+pub mod flash;
+mod page;
 mod record;
+mod types;
 pub use record::Database;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

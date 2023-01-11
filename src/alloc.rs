@@ -1,4 +1,5 @@
 use crate::config::*;
+use crate::types::{PageID, RawPageID};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum PageState {
@@ -9,7 +10,7 @@ pub enum PageState {
 /// Page allocator
 pub struct Allocator {
     pages: [PageState; PAGE_COUNT], // TODO use a bitfield
-    next_page_id: PageID,
+    next_page_id: RawPageID,
 }
 
 impl Allocator {
@@ -36,7 +37,7 @@ impl Allocator {
             let v = &mut self.pages[p as usize];
             if *v == PageState::Free {
                 *v = PageState::Used;
-                return p;
+                return PageID::from_raw(p).unwrap();
             }
 
             if self.next_page_id == start {
@@ -46,12 +47,12 @@ impl Allocator {
     }
 
     pub fn mark_used(&mut self, page_id: PageID) {
-        assert_eq!(self.pages[page_id as usize], PageState::Free);
-        self.pages[page_id as usize] = PageState::Used;
+        assert_eq!(self.pages[page_id.index()], PageState::Free);
+        self.pages[page_id.index()] = PageState::Used;
     }
 
     pub fn free(&mut self, page_id: PageID) {
-        let v = &mut self.pages[page_id as usize];
+        let v = &mut self.pages[page_id.index()];
         *v = match *v {
             PageState::Free => panic!("double free"),
             PageState::Used => PageState::Free,
@@ -59,6 +60,6 @@ impl Allocator {
     }
 
     pub fn is_used(&self, page_id: PageID) -> bool {
-        self.pages[page_id as usize] == PageState::Used
+        self.pages[page_id.index()] == PageState::Used
     }
 }

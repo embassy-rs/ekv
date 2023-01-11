@@ -4,6 +4,7 @@ use crate::alloc::Allocator;
 use crate::config::*;
 use crate::flash::Flash;
 use crate::page::{PageManager, PageReader, PageWriter, ReadError};
+use crate::types::{OptionPageID, PageID, RawPageID};
 use crate::Error;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -19,7 +20,7 @@ pub struct Header {
 
     /// skiplist[0] = previous page, always.
     /// skiplist[i] = latest page that contains a byte with seq multiple of 2**(SKIPLIST_SHIFT+i)
-    skiplist: [PageID; SKIPLIST_LEN],
+    skiplist: [OptionPageID; SKIPLIST_LEN],
 
     /// Offset of the first record boundary within this page.
     /// u16::MAX if there's no boundary within the page. This can happen if a very big record
@@ -31,20 +32,20 @@ impl Header {
     #[cfg(test)]
     pub const DUMMY: Self = Self {
         seq: Seq(3),
-        skiplist: [4; SKIPLIST_LEN],
+        skiplist: [OptionPageID::from_raw(4); SKIPLIST_LEN],
         record_boundary: 5,
     };
 
     fn meta(seq: Seq) -> Self {
         Self {
             seq,
-            skiplist: [PageID::MAX - 1; SKIPLIST_LEN],
+            skiplist: [OptionPageID::from_raw(RawPageID::MAX - 1); SKIPLIST_LEN],
             record_boundary: 0,
         }
     }
 
     fn is_meta(&self) -> bool {
-        self.skiplist[0] == PageID::MAX - 1
+        self.skiplist[0] == OptionPageID::from_raw(RawPageID::MAX - 1)
     }
 }
 
@@ -52,7 +53,7 @@ impl Header {
 #[repr(C)]
 pub struct FileMeta {
     file_id: FileID,
-    last_page_id: PageID,
+    last_page_id: OptionPageID,
     first_seq: Seq,
 }
 impl_bytes!(FileMeta);
@@ -83,7 +84,7 @@ impl<F: Flash> FileManager<F> {
         };
         Self {
             flash,
-            meta_page_id: 0,
+            meta_page_id: PageID::from_raw(0).unwrap(),
             meta_seq: Seq::ZERO,
             pages: PageManager::new(),
             files: [DUMMY_FILE; FILE_COUNT],
@@ -110,7 +111,8 @@ impl<F: Flash> FileManager<F> {
     pub fn format(&mut self) {
         // Erase all meta pages.
         for page_id in 0..PAGE_COUNT {
-            if let Ok(h) = self.read_header(page_id as _) {
+            let page_id = PageID::from_raw(page_id as _).unwrap();
+            if let Ok(h) = self.read_header(page_id) {
                 if h.is_meta() {
                     self.flash.erase(page_id);
                 }
@@ -118,7 +120,8 @@ impl<F: Flash> FileManager<F> {
         }
 
         // Write initial meta page.
-        let mut w = self.write_page(0);
+        let page_id = PageID::from_raw(0).unwrap();
+        let mut w = self.write_page(page_id);
         w.write_header(&mut self.flash, Header::meta(Seq(1)));
     }
 
@@ -128,7 +131,8 @@ impl<F: Flash> FileManager<F> {
         let mut meta_page_id = None;
         let mut meta_seq = Seq::ZERO;
         for page_id in 0..PAGE_COUNT {
-            if let Ok(h) = self.read_header(page_id as _) {
+            let page_id = PageID::from_raw(page_id as _).unwrap();
+            if let Ok(h) = self.read_header(page_id) {
                 if h.is_meta() && h.seq > meta_seq {
                     meta_page_id = Some(page_id as PageID);
                     meta_seq = h.seq;
@@ -146,15 +150,15 @@ impl<F: Flash> FileManager<F> {
 
         #[derive(Clone, Copy)]
         struct FileInfo {
-            last_page_id: PageID,
+            last_page_id: OptionPageID,
             first_seq: Seq,
         }
 
         let (_, mut r) = self.read_page(meta_page_id).inspect_err(|e| {
-            debug!("failed read meta_page_id={}: {:?}", meta_page_id, e);
+            debug!("failed read meta_page_id={:?}: {:?}", meta_page_id, e);
         })?;
         let mut files = [FileInfo {
-            last_page_id: PageID::MAX,
+            last_page_id: OptionPageID::none(),
             first_seq: Seq::ZERO,
         }; FILE_COUNT];
         loop {
@@ -174,14 +178,16 @@ impl<F: Flash> FileManager<F> {
                 return Err(Error::Corrupted);
             }
 
-            if meta.last_page_id >= PAGE_COUNT as _ && meta.last_page_id != PageID::MAX {
-                debug!("meta last_page_id out of range: {}", meta.file_id);
-                return Err(Error::Corrupted);
-            }
-
-            if meta.last_page_id == PageID::MAX && meta.first_seq.0 != 0 {
-                debug!("meta last_page_id invalid, but first seq nonzero: {}", meta.file_id);
-                return Err(Error::Corrupted);
+            if let Some(page_id) = meta.last_page_id.into_option() {
+                if page_id.index() >= PAGE_COUNT {
+                    debug!("meta last_page_id out of range: {}", meta.file_id);
+                    return Err(Error::Corrupted);
+                }
+            } else {
+                if meta.first_seq.0 != 0 {
+                    debug!("meta last_page_id invalid, but first seq nonzero: {}", meta.file_id);
+                    return Err(Error::Corrupted);
+                }
             }
 
             files[meta.file_id as usize] = FileInfo {
@@ -192,18 +198,19 @@ impl<F: Flash> FileManager<F> {
 
         for file_id in 0..FILE_COUNT as FileID {
             let fi = files[file_id as usize];
-            if fi.last_page_id == PageID::MAX {
-                continue;
-            }
 
-            let (h, mut r) = self.read_page(fi.last_page_id).inspect_err(|e| {
-                debug!("read last_page_id={} file_id={}: {:?}", file_id, fi.last_page_id, e);
+            let Some(last_page_id) = fi.last_page_id.into_option() else {
+                continue;
+            };
+
+            let (h, mut r) = self.read_page(last_page_id).inspect_err(|e| {
+                debug!("read last_page_id={:?} file_id={}: {:?}", last_page_id, file_id, e);
             })?;
             let page_len = r.skip(&mut self.flash, PAGE_SIZE)?;
             let last_seq = h.seq.add(page_len)?;
 
             let mut p = Some(PagePointer {
-                page_id: fi.last_page_id,
+                page_id: last_page_id,
                 header: h,
             });
 
@@ -224,7 +231,7 @@ impl<F: Flash> FileManager<F> {
 
             while let Some(pp) = p {
                 if self.alloc.is_used(pp.page_id) {
-                    info!("page used by multiple files at the same time. page_id={}", pp.page_id);
+                    info!("page used by multiple files at the same time. page_id={:?}", pp.page_id);
                     return Err(Error::Corrupted);
                 }
                 self.alloc.mark_used(pp.page_id);
@@ -250,7 +257,7 @@ impl<F: Flash> FileManager<F> {
         let meta = FileMeta {
             file_id,
             first_seq: f.first_seq,
-            last_page_id: f.last_page.as_ref().map(|pp| pp.page_id).unwrap_or(PageID::MAX),
+            last_page_id: f.last_page.as_ref().map(|pp| pp.page_id).into(),
         };
         let n = w.write(&mut self.flash, &meta.to_bytes());
         if n != FileMeta::SIZE {
@@ -364,17 +371,14 @@ impl<F: Flash> FileManager<F> {
     }
 
     fn read_page(&mut self, page_id: PageID) -> Result<(Header, PageReader), Error> {
-        assert!(page_id != PageID::MAX);
         self.pages.read(&mut self.flash, page_id)
     }
 
     fn read_header(&mut self, page_id: PageID) -> Result<Header, Error> {
-        assert!(page_id != PageID::MAX);
         self.pages.read_header(&mut self.flash, page_id)
     }
 
     fn write_page(&mut self, page_id: PageID) -> PageWriter {
-        assert!(page_id != PageID::MAX);
         self.pages.write(&mut self.flash, page_id)
     }
 
@@ -452,12 +456,12 @@ impl PagePointer {
             return Ok(None);
         }
 
-        let p2 = self.header.skiplist[0];
-        if p2 == PageID::MAX {
+        let Some(p2) = self.header.skiplist[0].into_option() else {
             return Ok(None);
-        }
-        if p2 >= PAGE_COUNT as _ {
-            debug!("prev page out of range {}", p2);
+        };
+
+        if p2.index() >= PAGE_COUNT {
+            debug!("prev page out of range {:?}", p2);
             return Err(Error::Corrupted);
         }
 
@@ -481,13 +485,12 @@ impl PagePointer {
     fn prev_seq(mut self, m: &mut FileManager<impl Flash>, seq: Seq) -> Result<PagePointer, Error> {
         while self.header.seq > seq {
             let i = skiplist_index(seq, self.header.seq);
-            let p2 = self.header.skiplist[i];
-            if p2 == PageID::MAX {
+            let Some(p2) = self.header.skiplist[i].into_option() else {
                 debug!("no prev page??");
                 return Err(Error::Corrupted);
-            }
-            if p2 >= PAGE_COUNT as _ {
-                debug!("prev page out of range {}", p2);
+            };
+            if p2.index() >= PAGE_COUNT {
+                debug!("prev page out of range {:?}", p2);
                 return Err(Error::Corrupted);
             }
 
@@ -550,14 +553,14 @@ impl FileReader {
         self.state = match m.get_file_page(self.file_id, seq)? {
             Some(pp) => {
                 let (h, mut r) = m.read_page(pp.page_id).inspect_err(|e| {
-                    debug!("failed read next page={}: {:?}", pp.page_id, e);
+                    debug!("failed read next page={:?}: {:?}", pp.page_id, e);
                 })?;
                 let n = (seq.sub(h.seq)) as usize;
                 let got_n = r.skip(&mut m.flash, n)?;
                 let eof = r.is_at_eof(&mut m.flash)?;
                 if n != got_n || eof {
                     debug!(
-                        "found seq hole in file. page={} h.seq={:?} seq={:?} n={} got_n={} eof={}",
+                        "found seq hole in file. page={:?} h.seq={:?} seq={:?} n={} got_n={} eof={}",
                         pp.page_id, h.seq, seq, n, got_n, eof
                     );
                     return Err(Error::Corrupted);
@@ -671,15 +674,15 @@ pub struct FileSearcher {
     r: FileReader,
 
     left: Seq,
-    left_page: PageID,
+    left_page: OptionPageID,
 
     right: Seq,
-    right_skiplist: [PageID; SKIPLIST_LEN],
+    right_skiplist: [OptionPageID; SKIPLIST_LEN],
 
     curr_low: Seq,
     curr_high: Seq,
-    curr_page: PageID,
-    curr_skiplist: [PageID; SKIPLIST_LEN],
+    curr_page: OptionPageID,
+    curr_skiplist: [OptionPageID; SKIPLIST_LEN],
 }
 
 impl FileSearcher {
@@ -687,13 +690,13 @@ impl FileSearcher {
         Self {
             r,
             left: Seq::MAX,
-            left_page: PageID::MAX,
+            left_page: OptionPageID::none(),
             right: Seq::MAX,
-            right_skiplist: [PageID::MAX; SKIPLIST_LEN],
+            right_skiplist: [OptionPageID::none(); SKIPLIST_LEN],
             curr_low: Seq::MAX,
             curr_high: Seq::MAX,
-            curr_page: PageID::MAX,
-            curr_skiplist: [PageID::MAX; SKIPLIST_LEN],
+            curr_page: OptionPageID::none(),
+            curr_skiplist: [OptionPageID::none(); SKIPLIST_LEN],
         }
     }
 
@@ -711,7 +714,7 @@ impl FileSearcher {
                 // Create skiplist.
                 self.right_skiplist = pp.header.skiplist;
                 let top = skiplist_index(pp.header.seq, f.last_seq) + 1;
-                self.right_skiplist[..top].fill(pp.page_id);
+                self.right_skiplist[..top].fill(pp.page_id.into());
 
                 trace!(
                     "search start file={:?}: left {:?} right {:?} right_skiplist {:?}",
@@ -742,24 +745,27 @@ impl FileSearcher {
         };
 
         loop {
-            if self.right_skiplist[i] != PageID::MAX && self.right > self.left {
-                let seq = skiplist_seq(self.right, i);
-                if seq >= self.left {
-                    self.curr_high = seq;
-                    match self.seek_to_page(m, self.right_skiplist[i], Some(self.left)) {
-                        Ok(()) => return Ok(true),
-                        Err(SearchSeekError::Corrupted) => return Err(Error::Corrupted),
-                        Err(SearchSeekError::TooMuchLeft) => {
-                            let new_left = seq.add(1).unwrap();
-                            assert!(new_left >= self.left);
-                            self.left = new_left;
+            if self.right > self.left {
+                if let Some(page_id) = self.right_skiplist[i].into_option() {
+                    let seq = skiplist_seq(self.right, i);
+                    if seq >= self.left {
+                        self.curr_high = seq;
+                        match self.seek_to_page(m, page_id, Some(self.left)) {
+                            Ok(()) => return Ok(true),
+                            Err(SearchSeekError::Corrupted) => return Err(Error::Corrupted),
+                            Err(SearchSeekError::TooMuchLeft) => {
+                                let new_left = seq.add(1).unwrap();
+                                assert!(new_left >= self.left);
+                                self.left = new_left;
+                            }
                         }
                     }
                 }
             }
 
             if i == 0 {
-                return match self.seek_to_page(m, self.left_page, None) {
+                let page_id = self.left_page.into_option().unwrap();
+                return match self.seek_to_page(m, page_id, None) {
                     Ok(()) => Ok(false),
                     Err(SearchSeekError::Corrupted) => Err(Error::Corrupted),
                     Err(SearchSeekError::TooMuchLeft) => unreachable!(),
@@ -780,16 +786,16 @@ impl FileSearcher {
         trace!("search: seek_to_page page_id={:?} left_limit={:?}", page_id, left_limit);
 
         let (h, mut r) = loop {
-            if page_id as usize >= PAGE_COUNT {
+            if page_id.index() >= PAGE_COUNT {
                 return Err(SearchSeekError::Corrupted);
             }
             let (h, r) = m.read_page(page_id).inspect_err(|e| {
-                debug!("failed read next page={}: {:?}", page_id, e);
+                debug!("failed read next page={:?}: {:?}", page_id, e);
             })?;
 
-            if h.skiplist[0] == PageID::MAX {
+            if h.skiplist[0].is_none() {
                 trace!("search: arrived to first file page, setting left_page to {:?}", page_id);
-                self.left_page = page_id;
+                self.left_page = page_id.into();
             }
 
             if let Some(left_limit) = left_limit {
@@ -804,9 +810,10 @@ impl FileSearcher {
             }
 
             // No record boundary within this page. Try the previous one.
-            page_id = h.skiplist[0];
-            trace!("search: no record boundary, trying again with page {:?}", page_id);
-            if page_id == PageID::MAX {
+            if let Some(prev) = h.skiplist[0].into_option() {
+                page_id = prev;
+                trace!("search: no record boundary, trying again with page {:?}", page_id);
+            } else {
                 debug!("first page in file has no record boundary!");
                 return Err(SearchSeekError::Corrupted);
             }
@@ -826,7 +833,7 @@ impl FileSearcher {
         });
         self.curr_low = h.seq;
         self.curr_skiplist = h.skiplist;
-        self.curr_page = page_id;
+        self.curr_page = page_id.into();
         trace!(
             "search: curr seq={:?}..{:?} page {:?} skiplist={:?}",
             self.curr_low,
@@ -886,12 +893,12 @@ impl FileWriter {
     fn flush_header(&mut self, m: &mut FileManager<impl Flash>, mut w: PageWriter) -> Result<(), Error> {
         let page_size = w.len();
         let page_id = w.page_id();
-        let mut skiplist = [PageID::MAX; SKIPLIST_LEN];
+        let mut skiplist = [OptionPageID::none(); SKIPLIST_LEN];
         if let Some(last_page) = &self.last_page {
             skiplist = last_page.header.skiplist;
 
             let top = skiplist_index(last_page.header.seq, self.seq) + 1;
-            skiplist[..top].fill(last_page.page_id);
+            skiplist[..top].fill(last_page.page_id.into());
         }
 
         let next_seq = self.seq.add(page_size)?;
@@ -1077,6 +1084,10 @@ mod tests {
     use super::*;
     use crate::flash::MemFlash;
 
+    fn page(p: RawPageID) -> PageID {
+        PageID::from_raw(p).unwrap()
+    }
+
     #[test]
     fn test_read_write() {
         let mut f = MemFlash::new();
@@ -1258,16 +1269,16 @@ mod tests {
         w.write(&mut m, &[1, 2, 3, 4, 5]).unwrap();
         m.commit(&mut w).unwrap();
 
-        assert_eq!(m.alloc.is_used(1), true);
+        assert_eq!(m.alloc.is_used(page(1)), true);
 
         m.commit_and_truncate(None, &[(0, 5)]).unwrap();
 
-        assert_eq!(m.alloc.is_used(1), false);
+        assert_eq!(m.alloc.is_used(page(1)), false);
 
         // Remount
         m.mount().unwrap();
 
-        assert_eq!(m.alloc.is_used(1), false);
+        assert_eq!(m.alloc.is_used(page(1)), false);
 
         let mut r = m.read(0);
         let mut buf = [0; 1];
@@ -1282,22 +1293,22 @@ mod tests {
         m.format();
         m.mount().unwrap();
 
-        assert_eq!(m.alloc.is_used(1), false);
+        assert_eq!(m.alloc.is_used(page(1)), false);
 
         let mut w = m.write(0);
         w.write(&mut m, &[1, 2, 3, 4, 5]).unwrap();
         m.commit(&mut w).unwrap();
 
-        assert_eq!(m.alloc.is_used(1), true);
+        assert_eq!(m.alloc.is_used(page(1)), true);
 
         m.commit_and_truncate(None, &[(0, 5)]).unwrap();
 
-        assert_eq!(m.alloc.is_used(1), false);
+        assert_eq!(m.alloc.is_used(page(1)), false);
 
         // Remount
         m.mount().unwrap();
 
-        assert_eq!(m.alloc.is_used(1), false);
+        assert_eq!(m.alloc.is_used(page(1)), false);
 
         let mut r = m.read(0);
         let mut buf = [0; 1];
@@ -1312,7 +1323,7 @@ mod tests {
         m.format();
         m.mount().unwrap();
 
-        assert_eq!(m.alloc.is_used(1), false);
+        assert_eq!(m.alloc.is_used(page(1)), false);
 
         let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE);
 
@@ -1321,22 +1332,22 @@ mod tests {
         w.write(&mut m, &data).unwrap();
         m.commit(&mut w).unwrap();
 
-        assert_eq!(m.alloc.is_used(1), true);
-        assert_eq!(m.alloc.is_used(2), true);
+        assert_eq!(m.alloc.is_used(page(1)), true);
+        assert_eq!(m.alloc.is_used(page(2)), true);
 
         m.commit_and_truncate(None, &[(0, PAGE_MAX_PAYLOAD_SIZE)]).unwrap();
-        assert_eq!(m.alloc.is_used(1), false);
-        assert_eq!(m.alloc.is_used(2), true);
+        assert_eq!(m.alloc.is_used(page(1)), false);
+        assert_eq!(m.alloc.is_used(page(2)), true);
 
         m.commit_and_truncate(None, &[(0, PAGE_MAX_PAYLOAD_SIZE)]).unwrap();
-        assert_eq!(m.alloc.is_used(1), false);
-        assert_eq!(m.alloc.is_used(2), false);
+        assert_eq!(m.alloc.is_used(page(1)), false);
+        assert_eq!(m.alloc.is_used(page(2)), false);
 
         // Remount
         m.mount().unwrap();
 
-        assert_eq!(m.alloc.is_used(1), false);
-        assert_eq!(m.alloc.is_used(2), false);
+        assert_eq!(m.alloc.is_used(page(1)), false);
+        assert_eq!(m.alloc.is_used(page(2)), false);
 
         let mut r = m.read(0);
         let mut buf = [0; 1];
@@ -1416,36 +1427,36 @@ mod tests {
         m.format();
         m.mount().unwrap();
 
-        assert_eq!(m.alloc.is_used(1), false);
-        assert_eq!(m.alloc.is_used(2), false);
+        assert_eq!(m.alloc.is_used(page(1)), false);
+        assert_eq!(m.alloc.is_used(page(2)), false);
 
         let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE);
         let mut w = m.write(0);
 
         w.write(&mut m, &data).unwrap();
-        assert_eq!(m.alloc.is_used(0), true); // old meta
-        assert_eq!(m.alloc.is_used(1), true);
-        assert_eq!(m.alloc.is_used(2), false);
-        assert_eq!(m.alloc.is_used(3), false);
+        assert_eq!(m.alloc.is_used(page(0)), true); // old meta
+        assert_eq!(m.alloc.is_used(page(1)), true);
+        assert_eq!(m.alloc.is_used(page(2)), false);
+        assert_eq!(m.alloc.is_used(page(3)), false);
 
         w.write(&mut m, &data).unwrap();
-        assert_eq!(m.alloc.is_used(0), true); // old meta
-        assert_eq!(m.alloc.is_used(1), true);
-        assert_eq!(m.alloc.is_used(2), true);
-        assert_eq!(m.alloc.is_used(3), false);
+        assert_eq!(m.alloc.is_used(page(0)), true); // old meta
+        assert_eq!(m.alloc.is_used(page(1)), true);
+        assert_eq!(m.alloc.is_used(page(2)), true);
+        assert_eq!(m.alloc.is_used(page(3)), false);
 
         m.commit(&mut w).unwrap();
-        assert_eq!(m.alloc.is_used(0), true); // old meta, appended in-place.
-        assert_eq!(m.alloc.is_used(1), true);
-        assert_eq!(m.alloc.is_used(2), true);
-        assert_eq!(m.alloc.is_used(3), false);
+        assert_eq!(m.alloc.is_used(page(0)), true); // old meta, appended in-place.
+        assert_eq!(m.alloc.is_used(page(1)), true);
+        assert_eq!(m.alloc.is_used(page(2)), true);
+        assert_eq!(m.alloc.is_used(page(3)), false);
 
         // Remount
         m.mount().unwrap();
-        assert_eq!(m.alloc.is_used(0), true); // old meta, appended in-place.
-        assert_eq!(m.alloc.is_used(1), true);
-        assert_eq!(m.alloc.is_used(2), true);
-        assert_eq!(m.alloc.is_used(3), false);
+        assert_eq!(m.alloc.is_used(page(0)), true); // old meta, appended in-place.
+        assert_eq!(m.alloc.is_used(page(1)), true);
+        assert_eq!(m.alloc.is_used(page(2)), true);
+        assert_eq!(m.alloc.is_used(page(3)), false);
     }
 
     #[test]
@@ -1455,28 +1466,28 @@ mod tests {
         m.format();
         m.mount().unwrap();
 
-        assert_eq!(m.alloc.is_used(0), true);
-        assert_eq!(m.alloc.is_used(1), false);
-        assert_eq!(m.alloc.is_used(2), false);
+        assert_eq!(m.alloc.is_used(page(0)), true);
+        assert_eq!(m.alloc.is_used(page(1)), false);
+        assert_eq!(m.alloc.is_used(page(2)), false);
 
         let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE);
         let mut w = m.write(0);
 
         w.write(&mut m, &data).unwrap();
-        assert_eq!(m.alloc.is_used(0), true);
-        assert_eq!(m.alloc.is_used(1), true);
-        assert_eq!(m.alloc.is_used(2), false);
+        assert_eq!(m.alloc.is_used(page(0)), true);
+        assert_eq!(m.alloc.is_used(page(1)), true);
+        assert_eq!(m.alloc.is_used(page(2)), false);
 
         w.discard(&mut m);
-        assert_eq!(m.alloc.is_used(0), true);
-        assert_eq!(m.alloc.is_used(1), false);
-        assert_eq!(m.alloc.is_used(2), false);
+        assert_eq!(m.alloc.is_used(page(0)), true);
+        assert_eq!(m.alloc.is_used(page(1)), false);
+        assert_eq!(m.alloc.is_used(page(2)), false);
 
         // Remount
         m.mount().unwrap();
-        assert_eq!(m.alloc.is_used(0), true);
-        assert_eq!(m.alloc.is_used(1), false);
-        assert_eq!(m.alloc.is_used(2), false);
+        assert_eq!(m.alloc.is_used(page(0)), true);
+        assert_eq!(m.alloc.is_used(page(1)), false);
+        assert_eq!(m.alloc.is_used(page(2)), false);
     }
 
     #[test]
@@ -1486,35 +1497,35 @@ mod tests {
         m.format();
         m.mount().unwrap();
 
-        assert_eq!(m.alloc.is_used(0), true);
-        assert_eq!(m.alloc.is_used(1), false);
+        assert_eq!(m.alloc.is_used(page(0)), true);
+        assert_eq!(m.alloc.is_used(page(1)), false);
 
         let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE);
         let mut w = m.write(0);
 
         w.write(&mut m, &data).unwrap();
-        assert_eq!(m.alloc.is_used(0), true);
-        assert_eq!(m.alloc.is_used(1), true);
-        assert_eq!(m.alloc.is_used(2), false);
+        assert_eq!(m.alloc.is_used(page(0)), true);
+        assert_eq!(m.alloc.is_used(page(1)), true);
+        assert_eq!(m.alloc.is_used(page(2)), false);
 
         w.write(&mut m, &data).unwrap();
-        assert_eq!(m.alloc.is_used(0), true);
-        assert_eq!(m.alloc.is_used(1), true);
-        assert_eq!(m.alloc.is_used(2), true);
-        assert_eq!(m.alloc.is_used(3), false);
+        assert_eq!(m.alloc.is_used(page(0)), true);
+        assert_eq!(m.alloc.is_used(page(1)), true);
+        assert_eq!(m.alloc.is_used(page(2)), true);
+        assert_eq!(m.alloc.is_used(page(3)), false);
 
         w.discard(&mut m);
-        assert_eq!(m.alloc.is_used(0), true);
-        assert_eq!(m.alloc.is_used(1), false);
-        assert_eq!(m.alloc.is_used(2), false);
-        assert_eq!(m.alloc.is_used(3), false);
+        assert_eq!(m.alloc.is_used(page(0)), true);
+        assert_eq!(m.alloc.is_used(page(1)), false);
+        assert_eq!(m.alloc.is_used(page(2)), false);
+        assert_eq!(m.alloc.is_used(page(3)), false);
 
         // Remount
         m.mount().unwrap();
-        assert_eq!(m.alloc.is_used(0), true);
-        assert_eq!(m.alloc.is_used(1), false);
-        assert_eq!(m.alloc.is_used(2), false);
-        assert_eq!(m.alloc.is_used(3), false);
+        assert_eq!(m.alloc.is_used(page(0)), true);
+        assert_eq!(m.alloc.is_used(page(1)), false);
+        assert_eq!(m.alloc.is_used(page(2)), false);
+        assert_eq!(m.alloc.is_used(page(3)), false);
     }
 
     #[test]
@@ -1524,34 +1535,34 @@ mod tests {
         m.format();
         m.mount().unwrap();
 
-        assert_eq!(m.alloc.is_used(0), true);
-        assert_eq!(m.alloc.is_used(1), false);
-        assert_eq!(m.alloc.is_used(2), false);
-        assert_eq!(m.alloc.is_used(3), false);
+        assert_eq!(m.alloc.is_used(page(0)), true);
+        assert_eq!(m.alloc.is_used(page(1)), false);
+        assert_eq!(m.alloc.is_used(page(2)), false);
+        assert_eq!(m.alloc.is_used(page(3)), false);
 
         let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE * 3);
         let mut w = m.write(0);
         w.write(&mut m, &data).unwrap();
-        assert_eq!(m.alloc.is_used(0), true);
-        assert_eq!(m.alloc.is_used(1), true);
-        assert_eq!(m.alloc.is_used(2), true);
-        assert_eq!(m.alloc.is_used(3), true);
-        assert_eq!(m.alloc.is_used(4), false);
+        assert_eq!(m.alloc.is_used(page(0)), true);
+        assert_eq!(m.alloc.is_used(page(1)), true);
+        assert_eq!(m.alloc.is_used(page(2)), true);
+        assert_eq!(m.alloc.is_used(page(3)), true);
+        assert_eq!(m.alloc.is_used(page(4)), false);
 
         w.discard(&mut m);
-        assert_eq!(m.alloc.is_used(0), true);
-        assert_eq!(m.alloc.is_used(1), false);
-        assert_eq!(m.alloc.is_used(2), false);
-        assert_eq!(m.alloc.is_used(3), false);
-        assert_eq!(m.alloc.is_used(4), false);
+        assert_eq!(m.alloc.is_used(page(0)), true);
+        assert_eq!(m.alloc.is_used(page(1)), false);
+        assert_eq!(m.alloc.is_used(page(2)), false);
+        assert_eq!(m.alloc.is_used(page(3)), false);
+        assert_eq!(m.alloc.is_used(page(4)), false);
 
         // Remount
         m.mount().unwrap();
-        assert_eq!(m.alloc.is_used(0), true);
-        assert_eq!(m.alloc.is_used(1), false);
-        assert_eq!(m.alloc.is_used(2), false);
-        assert_eq!(m.alloc.is_used(3), false);
-        assert_eq!(m.alloc.is_used(4), false);
+        assert_eq!(m.alloc.is_used(page(0)), true);
+        assert_eq!(m.alloc.is_used(page(1)), false);
+        assert_eq!(m.alloc.is_used(page(2)), false);
+        assert_eq!(m.alloc.is_used(page(3)), false);
+        assert_eq!(m.alloc.is_used(page(4)), false);
     }
 
     #[test]
@@ -1561,37 +1572,37 @@ mod tests {
         m.format();
         m.mount().unwrap();
 
-        assert_eq!(m.alloc.is_used(0), true);
-        assert_eq!(m.alloc.is_used(1), false);
+        assert_eq!(m.alloc.is_used(page(0)), true);
+        assert_eq!(m.alloc.is_used(page(1)), false);
 
         let data = dummy_data(24);
         let mut w = m.write(0);
         w.write(&mut m, &data).unwrap();
         m.commit(&mut w).unwrap();
-        assert_eq!(m.alloc.is_used(0), true); // old meta, appended in-place.
-        assert_eq!(m.alloc.is_used(1), true);
-        assert_eq!(m.alloc.is_used(2), false);
-        assert_eq!(m.alloc.is_used(3), false);
+        assert_eq!(m.alloc.is_used(page(0)), true); // old meta, appended in-place.
+        assert_eq!(m.alloc.is_used(page(1)), true);
+        assert_eq!(m.alloc.is_used(page(2)), false);
+        assert_eq!(m.alloc.is_used(page(3)), false);
 
         let mut w = m.write(0);
         w.write(&mut m, &data).unwrap();
-        assert_eq!(m.alloc.is_used(0), true);
-        assert_eq!(m.alloc.is_used(1), true);
-        assert_eq!(m.alloc.is_used(2), true);
-        assert_eq!(m.alloc.is_used(3), false);
+        assert_eq!(m.alloc.is_used(page(0)), true);
+        assert_eq!(m.alloc.is_used(page(1)), true);
+        assert_eq!(m.alloc.is_used(page(2)), true);
+        assert_eq!(m.alloc.is_used(page(3)), false);
 
         w.discard(&mut m);
-        assert_eq!(m.alloc.is_used(0), true);
-        assert_eq!(m.alloc.is_used(1), true);
-        assert_eq!(m.alloc.is_used(2), false);
-        assert_eq!(m.alloc.is_used(3), false);
+        assert_eq!(m.alloc.is_used(page(0)), true);
+        assert_eq!(m.alloc.is_used(page(1)), true);
+        assert_eq!(m.alloc.is_used(page(2)), false);
+        assert_eq!(m.alloc.is_used(page(3)), false);
 
         // Remount
         m.mount().unwrap();
-        assert_eq!(m.alloc.is_used(0), true);
-        assert_eq!(m.alloc.is_used(1), true);
-        assert_eq!(m.alloc.is_used(2), false);
-        assert_eq!(m.alloc.is_used(3), false);
+        assert_eq!(m.alloc.is_used(page(0)), true);
+        assert_eq!(m.alloc.is_used(page(1)), true);
+        assert_eq!(m.alloc.is_used(page(2)), false);
+        assert_eq!(m.alloc.is_used(page(3)), false);
     }
 
     #[test]
@@ -1648,7 +1659,7 @@ mod tests {
         w.record_end();
         m.commit(&mut w).unwrap();
 
-        let h = m.read_header(1).unwrap();
+        let h = m.read_header(page(1)).unwrap();
         assert_eq!(h.seq, Seq(0));
         assert_eq!(h.record_boundary, 0);
     }
@@ -1667,11 +1678,11 @@ mod tests {
         w.record_end();
         m.commit(&mut w).unwrap();
 
-        let h = m.read_header(1).unwrap();
+        let h = m.read_header(page(1)).unwrap();
         assert_eq!(h.seq, Seq(0));
         assert_eq!(h.record_boundary, 0);
 
-        let h = m.read_header(2).unwrap();
+        let h = m.read_header(page(2)).unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32));
         assert_eq!(h.record_boundary, u16::MAX);
     }
@@ -1692,11 +1703,11 @@ mod tests {
         w.record_end();
         m.commit(&mut w).unwrap();
 
-        let h = m.read_header(1).unwrap();
+        let h = m.read_header(page(1)).unwrap();
         assert_eq!(h.seq, Seq(0));
         assert_eq!(h.record_boundary, 0);
 
-        let h = m.read_header(2).unwrap();
+        let h = m.read_header(page(2)).unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32));
         assert_eq!(h.record_boundary, 2);
     }
@@ -1715,15 +1726,15 @@ mod tests {
         w.record_end();
         m.commit(&mut w).unwrap();
 
-        let h = m.read_header(1).unwrap();
+        let h = m.read_header(page(1)).unwrap();
         assert_eq!(h.seq, Seq(0));
         assert_eq!(h.record_boundary, 0);
 
-        let h = m.read_header(2).unwrap();
+        let h = m.read_header(page(2)).unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32));
         assert_eq!(h.record_boundary, u16::MAX);
 
-        let h = m.read_header(3).unwrap();
+        let h = m.read_header(page(3)).unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32 * 2));
         assert_eq!(h.record_boundary, u16::MAX);
     }
@@ -1744,23 +1755,23 @@ mod tests {
         w.record_end();
         m.commit(&mut w).unwrap();
 
-        let h = m.read_header(1).unwrap();
+        let h = m.read_header(page(1)).unwrap();
         assert_eq!(h.seq, Seq(0));
         assert_eq!(h.record_boundary, 0);
 
-        let h = m.read_header(2).unwrap();
+        let h = m.read_header(page(2)).unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32));
         assert_eq!(h.record_boundary, u16::MAX);
 
-        let h = m.read_header(3).unwrap();
+        let h = m.read_header(page(3)).unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32 * 2));
         assert_eq!(h.record_boundary, 2);
 
-        let h = m.read_header(4).unwrap();
+        let h = m.read_header(page(4)).unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32 * 3));
         assert_eq!(h.record_boundary, u16::MAX);
 
-        let h = m.read_header(5).unwrap();
+        let h = m.read_header(page(5)).unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32 * 4));
         assert_eq!(h.record_boundary, u16::MAX);
     }
@@ -1788,23 +1799,23 @@ mod tests {
 
         m.commit(&mut w).unwrap();
 
-        let h = m.read_header(1).unwrap();
+        let h = m.read_header(page(1)).unwrap();
         assert_eq!(h.seq, Seq(0));
         assert_eq!(h.record_boundary, 0);
 
-        let h = m.read_header(2).unwrap();
+        let h = m.read_header(page(2)).unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32));
         assert_eq!(h.record_boundary, u16::MAX);
 
-        let h = m.read_header(3).unwrap();
+        let h = m.read_header(page(3)).unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32 * 2));
         assert_eq!(h.record_boundary, 2);
 
-        let h = m.read_header(4).unwrap();
+        let h = m.read_header(page(4)).unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32 * 3));
         assert_eq!(h.record_boundary, u16::MAX);
 
-        let h = m.read_header(5).unwrap();
+        let h = m.read_header(page(5)).unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32 * 4));
         assert_eq!(h.record_boundary, 3);
     }
