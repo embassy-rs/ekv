@@ -17,8 +17,6 @@ None yet. This is a work in progress. Don't use it. When it's done, it will have
 
 Soon:
 
-- Refactor page header: make meta and file pages have different magic so they can have different headers, instead of meta "abusing" the file header with prev_page_id = PageID::MAX-1 etc.
-
 - Support "progressive compaction": instead of compacting 2 whole files into one, do it page by page.
 - Handle storage full condition. Currently panics. It should trigger compactions, then return error if still full.
 - Add (optional) CRCs to check data integrity. Both headers and data.

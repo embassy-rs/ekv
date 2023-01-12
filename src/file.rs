@@ -1,11 +1,14 @@
+use core::mem::size_of;
 use core::{fmt, mem};
 
 use crate::alloc::Allocator;
 use crate::config::*;
 use crate::flash::Flash;
-use crate::page::{PageManager, PageReader, PageWriter, ReadError};
-use crate::types::{OptionPageID, PageID, RawPageID};
-use crate::Error;
+use crate::page::{ChunkHeader, Header, PageHeader, PageManager, PageReader, PageWriter, ReadError};
+use crate::types::{OptionPageID, PageID};
+use crate::{page, Error};
+
+pub const PAGE_MAX_PAYLOAD_SIZE: usize = PAGE_SIZE - PageHeader::SIZE - size_of::<DataHeader>() - ChunkHeader::SIZE;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SeekDirection {
@@ -15,7 +18,17 @@ pub enum SeekDirection {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(C)]
-pub struct Header {
+pub struct MetaHeader {
+    seq: Seq,
+}
+
+unsafe impl page::Header for MetaHeader {
+    const MAGIC: u32 = 0x470b635c;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(C)]
+pub struct DataHeader {
     seq: Seq,
 
     /// skiplist[0] = previous page, always.
@@ -28,25 +41,8 @@ pub struct Header {
     record_boundary: u16,
 }
 
-impl Header {
-    #[cfg(test)]
-    pub const DUMMY: Self = Self {
-        seq: Seq(3),
-        skiplist: [OptionPageID::from_raw(4); SKIPLIST_LEN],
-        record_boundary: 5,
-    };
-
-    fn meta(seq: Seq) -> Self {
-        Self {
-            seq,
-            skiplist: [OptionPageID::from_raw(RawPageID::MAX - 1); SKIPLIST_LEN],
-            record_boundary: 0,
-        }
-    }
-
-    fn is_meta(&self) -> bool {
-        self.skiplist[0] == OptionPageID::from_raw(RawPageID::MAX - 1)
-    }
+unsafe impl page::Header for DataHeader {
+    const MAGIC: u32 = 0xa934c056;
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -112,17 +108,15 @@ impl<F: Flash> FileManager<F> {
         // Erase all meta pages.
         for page_id in 0..PAGE_COUNT {
             let page_id = PageID::from_raw(page_id as _).unwrap();
-            if let Ok(h) = self.read_header(page_id) {
-                if h.is_meta() {
-                    self.flash.erase(page_id);
-                }
+            if let Ok(h) = self.read_header::<MetaHeader>(page_id) {
+                self.flash.erase(page_id);
             }
         }
 
         // Write initial meta page.
         let page_id = PageID::from_raw(0).unwrap();
         let mut w = self.write_page(page_id);
-        w.write_header(&mut self.flash, Header::meta(Seq(1)));
+        w.write_header(&mut self.flash, MetaHeader { seq: Seq(1) });
     }
 
     pub fn mount(&mut self) -> Result<(), Error> {
@@ -132,9 +126,9 @@ impl<F: Flash> FileManager<F> {
         let mut meta_seq = Seq::ZERO;
         for page_id in 0..PAGE_COUNT {
             let page_id = PageID::from_raw(page_id as _).unwrap();
-            if let Ok(h) = self.read_header(page_id) {
-                if h.is_meta() && h.seq > meta_seq {
-                    meta_page_id = Some(page_id as PageID);
+            if let Ok(h) = self.read_header::<MetaHeader>(page_id) {
+                if h.seq > meta_seq {
+                    meta_page_id = Some(page_id);
                     meta_seq = h.seq;
                 }
             }
@@ -154,7 +148,7 @@ impl<F: Flash> FileManager<F> {
             first_seq: Seq,
         }
 
-        let (_, mut r) = self.read_page(meta_page_id).inspect_err(|e| {
+        let (_, mut r) = self.read_page::<MetaHeader>(meta_page_id).inspect_err(|e| {
             debug!("failed read meta_page_id={:?}: {:?}", meta_page_id, e);
         })?;
         let mut files = [FileInfo {
@@ -203,7 +197,7 @@ impl<F: Flash> FileManager<F> {
                 continue;
             };
 
-            let (h, mut r) = self.read_page(last_page_id).inspect_err(|e| {
+            let (h, mut r) = self.read_page::<DataHeader>(last_page_id).inspect_err(|e| {
                 debug!("read last_page_id={:?} file_id={}: {:?}", last_page_id, file_id, e);
             })?;
             let page_len = r.skip(&mut self.flash, PAGE_SIZE)?;
@@ -252,7 +246,7 @@ impl<F: Flash> FileManager<F> {
         self.commit_and_truncate(Some(w), &[])
     }
 
-    fn write_file_meta(&mut self, w: &mut PageWriter, file_id: FileID) -> Result<(), WriteError> {
+    fn write_file_meta(&mut self, w: &mut PageWriter<MetaHeader>, file_id: FileID) -> Result<(), WriteError> {
         let f = &self.files[file_id as usize];
         let meta = FileMeta {
             file_id,
@@ -328,7 +322,7 @@ impl<F: Flash> FileManager<F> {
                 }
 
                 self.meta_seq = self.meta_seq.add(1)?; // TODO handle wraparound
-                w.write_header(&mut self.flash, Header::meta(self.meta_seq));
+                w.write_header(&mut self.flash, MetaHeader { seq: self.meta_seq });
                 w.commit(&mut self.flash);
 
                 // free the old one.
@@ -370,15 +364,15 @@ impl<F: Flash> FileManager<F> {
         Ok(())
     }
 
-    fn read_page(&mut self, page_id: PageID) -> Result<(Header, PageReader), Error> {
+    fn read_page<H: Header>(&mut self, page_id: PageID) -> Result<(H, PageReader), Error> {
         self.pages.read(&mut self.flash, page_id)
     }
 
-    fn read_header(&mut self, page_id: PageID) -> Result<Header, Error> {
+    fn read_header<H: Header>(&mut self, page_id: PageID) -> Result<H, Error> {
         self.pages.read_header(&mut self.flash, page_id)
     }
 
-    fn write_page(&mut self, page_id: PageID) -> PageWriter {
+    fn write_page<H: Header>(&mut self, page_id: PageID) -> PageWriter<H> {
         self.pages.write(&mut self.flash, page_id)
     }
 
@@ -410,7 +404,7 @@ impl<F: Flash> FileManager<F> {
 
         let mut buf = [0; 1024];
         for p in pages.iter().rev() {
-            let (h, mut r) = self.read_page(p.page_id).unwrap();
+            let (h, mut r) = self.read_page::<DataHeader>(p.page_id).unwrap();
             let n = r.read(&mut self.flash, &mut buf).unwrap();
             let data = &buf[..n];
 
@@ -447,7 +441,7 @@ impl<F: Flash> FileManager<F> {
 #[derive(Clone, Copy, Debug)]
 struct PagePointer {
     page_id: PageID,
-    header: Header,
+    header: DataHeader,
 }
 
 impl PagePointer {
@@ -465,7 +459,7 @@ impl PagePointer {
             return Err(Error::Corrupted);
         }
 
-        let h2 = m.read_header(p2)?;
+        let h2 = m.read_header::<DataHeader>(p2)?;
 
         // Check seq always decreases. This avoids infinite loops
         // TODO we can make this check stricter: h2.seq == self.header.seq - page_len
@@ -494,7 +488,7 @@ impl PagePointer {
                 return Err(Error::Corrupted);
             }
 
-            let h2 = m.read_header(p2)?;
+            let h2 = m.read_header::<DataHeader>(p2)?;
 
             // Check seq always decreases. This avoids infinite loops
             if h2.seq >= self.header.seq {
@@ -552,7 +546,7 @@ impl FileReader {
     fn seek_seq(&mut self, m: &mut FileManager<impl Flash>, seq: Seq) -> Result<(), Error> {
         self.state = match m.get_file_page(self.file_id, seq)? {
             Some(pp) => {
-                let (h, mut r) = m.read_page(pp.page_id).inspect_err(|e| {
+                let (h, mut r) = m.read_page::<DataHeader>(pp.page_id).inspect_err(|e| {
                     debug!("failed read next page={:?}: {:?}", pp.page_id, e);
                 })?;
                 let n = (seq.sub(h.seq)) as usize;
@@ -789,7 +783,7 @@ impl FileSearcher {
             if page_id.index() >= PAGE_COUNT {
                 return Err(SearchSeekError::Corrupted);
             }
-            let (h, r) = m.read_page(page_id).inspect_err(|e| {
+            let (h, r) = m.read_page::<DataHeader>(page_id).inspect_err(|e| {
                 debug!("failed read next page={:?}: {:?}", page_id, e);
             })?;
 
@@ -874,7 +868,7 @@ pub struct FileWriter {
     last_page: Option<PagePointer>,
     seq: Seq,
     record_boundary: Option<usize>,
-    writer: Option<PageWriter>,
+    writer: Option<PageWriter<DataHeader>>,
 }
 
 impl FileWriter {
@@ -890,7 +884,7 @@ impl FileWriter {
         }
     }
 
-    fn flush_header(&mut self, m: &mut FileManager<impl Flash>, mut w: PageWriter) -> Result<(), Error> {
+    fn flush_header(&mut self, m: &mut FileManager<impl Flash>, mut w: PageWriter<DataHeader>) -> Result<(), Error> {
         let page_size = w.len();
         let page_id = w.page_id();
         let mut skiplist = [OptionPageID::none(); SKIPLIST_LEN];
@@ -911,7 +905,7 @@ impl FileWriter {
             }
             None => u16::MAX,
         };
-        let header = Header {
+        let header = DataHeader {
             seq: self.seq,
             skiplist,
             record_boundary,
@@ -993,7 +987,7 @@ impl FileWriter {
 #[repr(transparent)]
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct Seq(u32);
+pub struct Seq(pub u32);
 
 impl fmt::Display for Seq {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1083,6 +1077,7 @@ mod tests {
 
     use super::*;
     use crate::flash::MemFlash;
+    use crate::types::RawPageID;
 
     fn page(p: RawPageID) -> PageID {
         PageID::from_raw(p).unwrap()
@@ -1659,7 +1654,7 @@ mod tests {
         w.record_end();
         m.commit(&mut w).unwrap();
 
-        let h = m.read_header(page(1)).unwrap();
+        let h = m.read_header::<DataHeader>(page(1)).unwrap();
         assert_eq!(h.seq, Seq(0));
         assert_eq!(h.record_boundary, 0);
     }
@@ -1678,11 +1673,11 @@ mod tests {
         w.record_end();
         m.commit(&mut w).unwrap();
 
-        let h = m.read_header(page(1)).unwrap();
+        let h = m.read_header::<DataHeader>(page(1)).unwrap();
         assert_eq!(h.seq, Seq(0));
         assert_eq!(h.record_boundary, 0);
 
-        let h = m.read_header(page(2)).unwrap();
+        let h = m.read_header::<DataHeader>(page(2)).unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32));
         assert_eq!(h.record_boundary, u16::MAX);
     }
@@ -1703,11 +1698,11 @@ mod tests {
         w.record_end();
         m.commit(&mut w).unwrap();
 
-        let h = m.read_header(page(1)).unwrap();
+        let h = m.read_header::<DataHeader>(page(1)).unwrap();
         assert_eq!(h.seq, Seq(0));
         assert_eq!(h.record_boundary, 0);
 
-        let h = m.read_header(page(2)).unwrap();
+        let h = m.read_header::<DataHeader>(page(2)).unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32));
         assert_eq!(h.record_boundary, 2);
     }
@@ -1726,15 +1721,15 @@ mod tests {
         w.record_end();
         m.commit(&mut w).unwrap();
 
-        let h = m.read_header(page(1)).unwrap();
+        let h = m.read_header::<DataHeader>(page(1)).unwrap();
         assert_eq!(h.seq, Seq(0));
         assert_eq!(h.record_boundary, 0);
 
-        let h = m.read_header(page(2)).unwrap();
+        let h = m.read_header::<DataHeader>(page(2)).unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32));
         assert_eq!(h.record_boundary, u16::MAX);
 
-        let h = m.read_header(page(3)).unwrap();
+        let h = m.read_header::<DataHeader>(page(3)).unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32 * 2));
         assert_eq!(h.record_boundary, u16::MAX);
     }
@@ -1755,23 +1750,23 @@ mod tests {
         w.record_end();
         m.commit(&mut w).unwrap();
 
-        let h = m.read_header(page(1)).unwrap();
+        let h = m.read_header::<DataHeader>(page(1)).unwrap();
         assert_eq!(h.seq, Seq(0));
         assert_eq!(h.record_boundary, 0);
 
-        let h = m.read_header(page(2)).unwrap();
+        let h = m.read_header::<DataHeader>(page(2)).unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32));
         assert_eq!(h.record_boundary, u16::MAX);
 
-        let h = m.read_header(page(3)).unwrap();
+        let h = m.read_header::<DataHeader>(page(3)).unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32 * 2));
         assert_eq!(h.record_boundary, 2);
 
-        let h = m.read_header(page(4)).unwrap();
+        let h = m.read_header::<DataHeader>(page(4)).unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32 * 3));
         assert_eq!(h.record_boundary, u16::MAX);
 
-        let h = m.read_header(page(5)).unwrap();
+        let h = m.read_header::<DataHeader>(page(5)).unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32 * 4));
         assert_eq!(h.record_boundary, u16::MAX);
     }
@@ -1799,23 +1794,23 @@ mod tests {
 
         m.commit(&mut w).unwrap();
 
-        let h = m.read_header(page(1)).unwrap();
+        let h = m.read_header::<DataHeader>(page(1)).unwrap();
         assert_eq!(h.seq, Seq(0));
         assert_eq!(h.record_boundary, 0);
 
-        let h = m.read_header(page(2)).unwrap();
+        let h = m.read_header::<DataHeader>(page(2)).unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32));
         assert_eq!(h.record_boundary, u16::MAX);
 
-        let h = m.read_header(page(3)).unwrap();
+        let h = m.read_header::<DataHeader>(page(3)).unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32 * 2));
         assert_eq!(h.record_boundary, 2);
 
-        let h = m.read_header(page(4)).unwrap();
+        let h = m.read_header::<DataHeader>(page(4)).unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32 * 3));
         assert_eq!(h.record_boundary, u16::MAX);
 
-        let h = m.read_header(page(5)).unwrap();
+        let h = m.read_header::<DataHeader>(page(5)).unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32 * 4));
         assert_eq!(h.record_boundary, 3);
     }

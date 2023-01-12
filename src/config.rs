@@ -1,4 +1,6 @@
-use crate::page::{ChunkHeader, PageHeader};
+use core::mem::size_of;
+
+use crate::file::{DataHeader, MetaHeader};
 
 // ======== Flash parameters -- TODO unhardcode
 pub const WRITE_SIZE: usize = 4;
@@ -6,7 +8,15 @@ pub const PAGE_SIZE: usize = 256;
 pub const PAGE_COUNT: usize = 128;
 pub const ERASE_VALUE: u8 = 0xFF;
 
-pub const PAGE_MAX_PAYLOAD_SIZE: usize = PAGE_SIZE - PageHeader::SIZE - ChunkHeader::SIZE;
+pub const MAX_HEADER_SIZE: usize = {
+    let a = size_of::<MetaHeader>();
+    let b = size_of::<DataHeader>();
+    if a > b {
+        a
+    } else {
+        b
+    }
+};
 
 // ======== Filesystem parameters
 /// Number of entries in the page header skiplist.
