@@ -21,3 +21,28 @@ macro_rules! impl_bytes {
         }
     };
 }
+
+#[cfg(not(feature = "panic-on-corrupted"))]
+macro_rules! corrupted {
+    () => {
+        return Err(crate::Error::Corrupted.into())
+    };
+}
+
+#[cfg(feature = "panic-on-corrupted")]
+macro_rules! corrupted {
+    () => {
+        panic!("corrupted")
+    };
+}
+
+macro_rules! check_corrupted {
+    ($e:expr) => {
+        match $e {
+            Ok(x) => x,
+            Err(_) => {
+                corrupted!();
+            }
+        }
+    };
+}

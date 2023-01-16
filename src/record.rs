@@ -25,7 +25,7 @@ impl<F: Flash> Database<F> {
 
         // TODO recover from this
         if !m.is_empty(0) {
-            return Err(Error::Corrupted);
+            corrupted!();
         }
 
         Ok(Self { files: m })
@@ -110,7 +110,7 @@ impl<F: Flash> Database<F> {
             match read_key(m, r, buf) {
                 Ok(()) => Ok(()),
                 Err(ReadError::Eof) => Ok(buf.truncate(0)),
-                Err(ReadError::Corrupted) => Err(Error::Corrupted),
+                Err(ReadError::Corrupted) => corrupted!(),
             }
         }
 
@@ -164,7 +164,7 @@ impl<F: Flash> Database<F> {
                     // Advance all the others
                     for j in 0..BRANCHING_FACTOR {
                         if j != i && (bits & 1 << j) != 0 {
-                            skip_value(m, &mut r[j]).map_err(|_| Error::Corrupted)?;
+                            check_corrupted!(skip_value(m, &mut r[j]));
                             read_key_or_empty(m, &mut r[j], &mut k[j])?;
                         }
                     }
@@ -322,7 +322,7 @@ fn write_value<F: Flash>(m: &mut FileManager<F>, w: &mut FileWriter, value: &[u8
 }
 
 fn copy_value<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader, w: &mut FileWriter) -> Result<(), Error> {
-    let mut len = read_leb128(m, r).map_err(|_| Error::Corrupted)? as usize;
+    let mut len = check_corrupted!(read_leb128(m, r)) as usize;
     write_leb128(m, w, len as _)?;
 
     let mut buf = [0; 128];
@@ -330,7 +330,7 @@ fn copy_value<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader, w: &mut File
         let n = len.min(buf.len());
         len -= n;
 
-        r.read(m, &mut buf[..n]).map_err(|_| Error::Corrupted)?;
+        check_corrupted!(r.read(m, &mut buf[..n]));
         w.write(m, &buf[..n])?;
     }
     w.record_end();
@@ -363,14 +363,14 @@ fn read_key<F: Flash>(
     let len = read_leb128(m, r)? as usize;
     if len > MAX_KEY_SIZE {
         info!("key too long: {}", len);
-        return Err(ReadError::Corrupted);
+        corrupted!();
     }
     unsafe { buf.set_len(len) };
     r.read(m, buf)
 }
 
 fn read_value<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader, value: &mut [u8]) -> Result<usize, ReadKeyError> {
-    let len = read_leb128(m, r).map_err(|_| ReadKeyError::Corrupted)? as usize;
+    let len = check_corrupted!(read_leb128(m, r)) as usize;
     if len > value.len() {
         return Err(ReadKeyError::BufferTooSmall);
     }
@@ -396,7 +396,7 @@ fn read_leb128<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader) -> Result<u
     loop {
         let x = read_u8(m, r)?;
         if shift >= 32 {
-            return Err(ReadError::Corrupted);
+            corrupted!()
         }
         res |= (x as u32 & 0x7F) << shift;
         if x & 0x80 == 0 {

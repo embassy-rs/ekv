@@ -14,6 +14,10 @@ std = []
 log = ["dep:log", "std"]
 defmt = ["dep:defmt"]
 
+# Panic on corrupted, instead of returning Error::Corrupted.
+# Useful for seeing the stack trace of the corruption check that tripped. Intended for debugging only. 
+panic-on-corrupted = []
+
 [dependencies]
 defmt = { version = "0.3.2", optional = true }
 log = { version = "0.4.17", optional = true }

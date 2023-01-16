@@ -78,6 +78,8 @@ impl<F: Flash> PageManager<F> {
 
         let page_header = PageHeader::from_bytes(buf[..PageHeader::SIZE].try_into().unwrap());
         if page_header.magic != H::MAGIC {
+            // don't use `corrupted!()` here, this can happen during normal
+            // operation while searching for meta pages, for mount/format.
             return Err(Error::Corrupted);
         }
 
@@ -198,9 +200,11 @@ impl PageReader {
             return Ok(false);
         }
 
-        let data_end = data_start.checked_add(header.len as usize).ok_or(Error::Corrupted)?;
+        let Some(data_end) = data_start.checked_add(header.len as usize) else {
+            corrupted!()
+        };
         if data_end > PAGE_SIZE {
-            return Err(Error::Corrupted);
+            corrupted!();
         }
 
         trace!("open chunk at offs={} len={}", self.chunk_offset, header.len);

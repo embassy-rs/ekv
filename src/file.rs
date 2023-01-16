@@ -140,7 +140,7 @@ impl<F: Flash> FileManager<F> {
 
         let Some(meta_page_id) = meta_page_id else {
             debug!("Meta page not found");
-            return Err(Error::Corrupted)
+            corrupted!()
         };
         self.meta_page_id = meta_page_id;
         self.meta_seq = meta_seq;
@@ -167,24 +167,24 @@ impl<F: Flash> FileManager<F> {
             }
             if n != FileMeta::SIZE {
                 debug!("meta page last entry incomplete, size {}", n);
-                return Err(Error::Corrupted);
+                corrupted!();
             }
 
             let meta = FileMeta::from_bytes(meta);
             if meta.file_id >= FILE_COUNT as _ {
                 debug!("meta file_id out of range: {}", meta.file_id);
-                return Err(Error::Corrupted);
+                corrupted!();
             }
 
             if let Some(page_id) = meta.last_page_id.into_option() {
                 if page_id.index() >= PAGE_COUNT {
                     debug!("meta last_page_id out of range: {}", meta.file_id);
-                    return Err(Error::Corrupted);
+                    corrupted!();
                 }
             } else {
                 if meta.first_seq.0 != 0 {
                     debug!("meta last_page_id invalid, but first seq nonzero: {}", meta.file_id);
-                    return Err(Error::Corrupted);
+                    corrupted!();
                 }
             }
 
@@ -218,7 +218,7 @@ impl<F: Flash> FileManager<F> {
                     "meta: file {} first_seq {:?} not smaller than last_seq {:?}",
                     file_id, fi.first_seq, last_seq
                 );
-                return Err(Error::Corrupted);
+                corrupted!();
             }
 
             self.files[file_id as usize] = FileState {
@@ -230,7 +230,7 @@ impl<F: Flash> FileManager<F> {
             while let Some(pp) = p {
                 if self.alloc.is_used(pp.page_id) {
                     info!("page used by multiple files at the same time. page_id={:?}", pp.page_id);
-                    return Err(Error::Corrupted);
+                    corrupted!();
                 }
                 self.alloc.mark_used(pp.page_id);
                 p = pp.prev(self, fi.first_seq)?;
@@ -311,7 +311,7 @@ impl<F: Flash> FileManager<F> {
         };
         match res {
             Ok(()) => Ok(()),
-            Err(WriteError::Corrupted) => Err(Error::Corrupted),
+            Err(WriteError::Corrupted) => corrupted!(),
             Err(WriteError::Full) => {
                 // Existing meta page was full. Write a new one.
 
@@ -381,7 +381,7 @@ impl<F: Flash> FileManager<F> {
     }
 
     #[cfg(feature = "std")]
-    pub(crate) fn dump(&mut self) {
+    pub fn dump(&mut self) {
         for file_id in 0..FILE_COUNT {
             debug!("====== FILE {} ======", file_id);
             self.dump_file(file_id as _)
@@ -389,7 +389,7 @@ impl<F: Flash> FileManager<F> {
     }
 
     #[cfg(feature = "std")]
-    pub(crate) fn dump_file(&mut self, file_id: FileID) {
+    pub fn dump_file(&mut self, file_id: FileID) {
         let f = self.files[file_id as usize];
         debug!(
             "  seq: {:?}..{:?} len {:?} last_page {:?}",
@@ -460,10 +460,10 @@ impl PagePointer {
 
         if p2.index() >= PAGE_COUNT {
             debug!("prev page out of range {:?}", p2);
-            return Err(Error::Corrupted);
+            corrupted!();
         }
 
-        let h2 = m.read_header::<DataHeader>(p2)?;
+        let h2 = check_corrupted!(m.read_header::<DataHeader>(p2));
 
         // Check seq always decreases. This avoids infinite loops
         // TODO we can make this check stricter: h2.seq == self.header.seq - page_len
@@ -472,7 +472,7 @@ impl PagePointer {
                 "seq not decreasing when walking back: curr={:?} prev={:?}",
                 self.header.seq, h2.seq
             );
-            return Err(Error::Corrupted);
+            corrupted!();
         }
         Ok(Some(PagePointer {
             page_id: p2,
@@ -485,14 +485,14 @@ impl PagePointer {
             let i = skiplist_index(seq, self.header.seq);
             let Some(p2) = self.header.skiplist[i].into_option() else {
                 debug!("no prev page??");
-                return Err(Error::Corrupted);
+                corrupted!();
             };
             if p2.index() >= PAGE_COUNT {
                 debug!("prev page out of range {:?}", p2);
-                return Err(Error::Corrupted);
+                corrupted!();
             }
 
-            let h2 = m.read_header::<DataHeader>(p2)?;
+            let h2 = check_corrupted!(m.read_header::<DataHeader>(p2));
 
             // Check seq always decreases. This avoids infinite loops
             if h2.seq >= self.header.seq {
@@ -500,7 +500,7 @@ impl PagePointer {
                     "seq not decreasing when walking back: curr={:?} prev={:?}",
                     self.header.seq, h2.seq
                 );
-                return Err(Error::Corrupted);
+                corrupted!();
             }
             self = PagePointer {
                 page_id: p2,
@@ -534,7 +534,7 @@ impl FileReader {
         }
     }
 
-    pub(crate) fn curr_seq(&mut self, m: &mut FileManager<impl Flash>) -> Seq {
+    pub fn curr_seq(&mut self, m: &mut FileManager<impl Flash>) -> Seq {
         match &self.state {
             ReaderState::Created => m.files[self.file_id as usize].first_seq,
             ReaderState::Reading(s) => s.seq,
@@ -561,7 +561,7 @@ impl FileReader {
                         "found seq hole in file. page={:?} h.seq={:?} seq={:?} n={} got_n={} eof={}",
                         pp.page_id, h.seq, seq, n, got_n, eof
                     );
-                    return Err(Error::Corrupted);
+                    corrupted!();
                 }
                 ReaderState::Reading(ReaderStateReading { seq, reader: r })
             }
@@ -706,7 +706,7 @@ impl FileSearcher {
         match f.last_page {
             Some(pp) => {
                 if f.last_seq <= pp.header.seq {
-                    return Err(Error::Corrupted);
+                    corrupted!();
                 }
 
                 // Create skiplist.
@@ -750,7 +750,7 @@ impl FileSearcher {
                         self.curr_high = seq;
                         match self.seek_to_page(m, page_id, Some(self.left)) {
                             Ok(()) => return Ok(true),
-                            Err(SearchSeekError::Corrupted) => return Err(Error::Corrupted),
+                            Err(SearchSeekError::Corrupted) => corrupted!(),
                             Err(SearchSeekError::TooMuchLeft) => {
                                 let new_left = seq.add(1).unwrap();
                                 assert!(new_left >= self.left);
@@ -765,7 +765,7 @@ impl FileSearcher {
                 let page_id = self.left_page.into_option().unwrap();
                 return match self.seek_to_page(m, page_id, None) {
                     Ok(()) => Ok(false),
-                    Err(SearchSeekError::Corrupted) => Err(Error::Corrupted),
+                    Err(SearchSeekError::Corrupted) => corrupted!(),
                     Err(SearchSeekError::TooMuchLeft) => unreachable!(),
                 };
             }
@@ -785,7 +785,7 @@ impl FileSearcher {
 
         let (h, mut r) = loop {
             if page_id.index() >= PAGE_COUNT {
-                return Err(SearchSeekError::Corrupted);
+                corrupted!()
             }
             let (h, r) = m.read_page::<DataHeader>(page_id).inspect_err(|e| {
                 debug!("failed read next page={:?}: {:?}", page_id, e);
@@ -813,7 +813,7 @@ impl FileSearcher {
                 trace!("search: no record boundary, trying again with page {:?}", page_id);
             } else {
                 debug!("first page in file has no record boundary!");
-                return Err(SearchSeekError::Corrupted);
+                corrupted!()
             }
         };
 
@@ -821,7 +821,7 @@ impl FileSearcher {
         let b = h.record_boundary as usize;
         let n = r.skip(&mut m.flash, b)?;
         if n != b {
-            return Err(SearchSeekError::Corrupted);
+            corrupted!()
         }
         let state_seq = h.seq.add(b).unwrap();
 
@@ -1016,11 +1016,11 @@ impl Seq {
     fn add(self, offs: usize) -> Result<Self, Error> {
         let Ok(offs_u32) = offs.try_into() else {
             debug!("seq add overflow, offs doesn't fit u32: {}", offs);
-            return Err(Error::Corrupted);
+            corrupted!();
         };
         let Some(res) = self.0.checked_add(offs_u32) else {
             debug!("seq add overflow, self={} offs={}", self.0, offs_u32);
-            return Err(Error::Corrupted);
+            corrupted!();
         };
         Ok(Self(res))
     }
