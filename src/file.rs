@@ -88,6 +88,10 @@ impl<F: Flash> FileManager<F> {
         }
     }
 
+    pub fn used_pages(&self) -> usize {
+        self.alloc.used()
+    }
+
     pub fn flash_mut(&mut self) -> &mut F {
         &mut self.flash
     }

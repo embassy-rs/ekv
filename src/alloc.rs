@@ -10,6 +10,7 @@ pub enum PageState {
 /// Page allocator
 pub struct Allocator {
     pages: [PageState; PAGE_COUNT], // TODO use a bitfield
+    used: usize,
     next_page_id: RawPageID,
 }
 
@@ -17,11 +18,13 @@ impl Allocator {
     pub fn new() -> Self {
         Self {
             pages: [PageState::Free; PAGE_COUNT],
+            used: 0,
             next_page_id: 0, // TODO make random to spread out wear
         }
     }
 
     pub fn reset(&mut self) {
+        self.used = 0;
         self.pages.fill(PageState::Free);
     }
 
@@ -37,6 +40,7 @@ impl Allocator {
             let v = &mut self.pages[p as usize];
             if *v == PageState::Free {
                 *v = PageState::Used;
+                self.used += 1;
                 return PageID::from_raw(p).unwrap();
             }
 
@@ -49,6 +53,7 @@ impl Allocator {
     pub fn mark_used(&mut self, page_id: PageID) {
         assert_eq!(self.pages[page_id.index()], PageState::Free);
         self.pages[page_id.index()] = PageState::Used;
+        self.used += 1;
     }
 
     pub fn free(&mut self, page_id: PageID) {
@@ -57,9 +62,14 @@ impl Allocator {
             PageState::Free => panic!("double free"),
             PageState::Used => PageState::Free,
         };
+        self.used -= 1;
     }
 
     pub fn is_used(&self, page_id: PageID) -> bool {
         self.pages[page_id.index()] == PageState::Used
+    }
+
+    pub fn used(&self) -> usize {
+        self.used
     }
 }
