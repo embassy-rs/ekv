@@ -22,14 +22,14 @@ macro_rules! impl_bytes {
     };
 }
 
-#[cfg(not(feature = "panic-on-corrupted"))]
+#[cfg(not(feature = "_panic-on-corrupted"))]
 macro_rules! corrupted {
     () => {
         return Err(crate::Error::Corrupted.into())
     };
 }
 
-#[cfg(feature = "panic-on-corrupted")]
+#[cfg(feature = "_panic-on-corrupted")]
 macro_rules! corrupted {
     () => {
         panic!("corrupted")

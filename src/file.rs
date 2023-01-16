@@ -342,7 +342,7 @@ impl<F: Flash> FileManager<F> {
                 w.commit(&mut self.flash);
 
                 // free the old one.
-                self.alloc.free(self.meta_page_id);
+                self.free_page(self.meta_page_id);
                 self.meta_page_id = page_id;
 
                 Ok(())
@@ -374,7 +374,7 @@ impl<F: Flash> FileManager<F> {
                     break;
                 }
             }
-            self.alloc.free(pp.page_id);
+            self.free_page(pp.page_id);
             from = pp.prev(self, seq_limit)?;
         }
         Ok(())
@@ -390,6 +390,12 @@ impl<F: Flash> FileManager<F> {
 
     fn write_page<H: Header>(&mut self, page_id: PageID) -> PageWriter<H> {
         self.pages.write(&mut self.flash, page_id)
+    }
+
+    fn free_page(&mut self, page_id: PageID) {
+        self.alloc.free(page_id);
+        #[cfg(feature = "_erase-on-free")]
+        self.flash.erase(page_id);
     }
 
     #[cfg(feature = "std")]
@@ -1005,7 +1011,7 @@ impl FileWriter {
         if let Some(w) = &self.writer {
             // Free the page we're writing now (not yet committed)
             let page_id = w.page_id();
-            m.alloc.free(page_id);
+            m.free_page(page_id);
 
             // Free previous pages, if any
             let f = &m.files[self.file_id as usize];

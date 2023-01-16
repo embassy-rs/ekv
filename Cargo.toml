@@ -14,11 +14,17 @@ std = []
 log = ["dep:log", "std"]
 defmt = ["dep:defmt"]
 
-# Panic on corrupted, instead of returning Error::Corrupted.
-# Useful for seeing the stack trace of the corruption check that tripped. Intended for debugging only. 
-panic-on-corrupted = []
+### FEATURES FOR TESTING ONLY. NOT COVERED BY SEMVER.
 
-# Expose inner guts. FOR TESTING ONLY. NOT COVERED BY SEMVER.
+# Panic on corrupted, instead of returning Error::Corrupted.
+# Useful for seeing the stack trace of the corruption check that tripped.
+_panic-on-corrupted = []
+
+# Erase pages immediately when freeing them.
+# Helps catch use-after-frees.
+_erase-on-free = []
+
+# Expose inner guts.
 _test = []
 
 [dependencies]
