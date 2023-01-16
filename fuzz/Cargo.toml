@@ -11,7 +11,7 @@ cargo-fuzz = true
 arbitrary = { version = "1.2.2", features = ["derive"] }
 libfuzzer-sys = "0.4"
 env_logger = "0.10"
-ekv = { path = "..", features= ["std", "log"]}
+ekv = { path = "..", features= ["std", "log", "_test"]}
 
 
 [[bin]]
@@ -23,5 +23,11 @@ doc = false
 [[bin]]
 name = "ops"
 path = "fuzz_targets/ops.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "file"
+path = "fuzz_targets/file.rs"
 test = false
 doc = false

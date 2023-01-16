@@ -4,7 +4,8 @@ use core::{fmt, mem};
 use crate::alloc::Allocator;
 use crate::config::*;
 use crate::flash::Flash;
-use crate::page::{ChunkHeader, Header, PageHeader, PageManager, PageReader, PageWriter, ReadError};
+pub use crate::page::ReadError;
+use crate::page::{ChunkHeader, Header, PageHeader, PageManager, PageReader, PageWriter};
 use crate::types::{OptionPageID, PageID};
 use crate::{page, Error};
 
@@ -276,6 +277,7 @@ impl<F: Flash> FileManager<F> {
 
         for &(file_id, trunc_len) in truncate {
             let f = &mut self.files[file_id as usize];
+            let old_f = *f;
 
             let len = f.last_seq.sub(f.first_seq);
             let seq = f.first_seq.add(len.min(trunc_len))?;
@@ -296,6 +298,16 @@ impl<F: Flash> FileManager<F> {
             } else {
                 f.first_seq = seq;
             }
+
+            trace!(
+                "truncate file_id={:?} trunc_len={:?} old=(first_seq={:?} last_seq={:?}) new=(first_seq={:?} last_seq={:?})",
+                file_id,
+                trunc_len,
+                old_f.first_seq,
+                old_f.last_seq,
+                f.first_seq,
+                f.last_seq
+            );
         }
 
         // Try appending to the existing meta page.
@@ -888,6 +900,16 @@ impl FileWriter {
         }
     }
 
+    fn curr_seq(&mut self, m: &mut FileManager<impl Flash>) -> Seq {
+        let n = self.writer.as_ref().map(|w| w.len()).unwrap_or(0);
+        self.seq.add(n).unwrap()
+    }
+
+    pub fn offset(&mut self, m: &mut FileManager<impl Flash>) -> usize {
+        let first_seq = m.files[self.file_id as usize].first_seq;
+        self.curr_seq(m).sub(first_seq)
+    }
+
     fn flush_header(&mut self, m: &mut FileManager<impl Flash>, mut w: PageWriter<DataHeader>) -> Result<(), Error> {
         let page_size = w.len();
         let page_id = w.page_id();
@@ -963,8 +985,18 @@ impl FileWriter {
         if let Some(w) = mem::replace(&mut self.writer, None) {
             self.flush_header(m, w)?;
             let f = &mut m.files[self.file_id as usize];
+            let old_f = *f;
             f.last_page = self.last_page;
             f.last_seq = self.seq;
+
+            trace!(
+                "commit file_id={:?} old=(first_seq={:?} last_seq={:?}) new=(first_seq={:?} last_seq={:?})",
+                self.file_id,
+                old_f.first_seq,
+                old_f.last_seq,
+                f.first_seq,
+                f.last_seq
+            );
         }
         Ok(())
     }

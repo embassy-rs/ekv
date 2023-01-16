@@ -1,5 +1,5 @@
 use crate::config::*;
-use crate::types::PageID;
+pub use crate::types::PageID;
 
 /// NOR flash memory trait
 /// TODO use embedded-storage

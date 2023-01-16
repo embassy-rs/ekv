@@ -9,12 +9,23 @@ mod macros;
 
 mod alloc;
 pub mod config;
-mod file;
 pub mod flash;
-mod page;
-mod record;
 mod types;
 pub use record::Database;
+
+#[cfg(feature = "_test")]
+pub mod file;
+#[cfg(feature = "_test")]
+pub mod page;
+#[cfg(feature = "_test")]
+pub mod record;
+
+#[cfg(not(feature = "_test"))]
+mod file;
+#[cfg(not(feature = "_test"))]
+mod page;
+#[cfg(not(feature = "_test"))]
+mod record;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
