@@ -807,6 +807,8 @@ impl FileSearcher {
     ) -> Result<(), SearchSeekError> {
         trace!("search: seek_to_page page_id={:?} target_seq={:?}", page_id, target_seq,);
 
+        let mut right_limit = self.right;
+
         let (h, mut r) = loop {
             if page_id.index() >= PAGE_COUNT {
                 corrupted!()
@@ -814,6 +816,10 @@ impl FileSearcher {
             let (h, r) = m.read_page::<DataHeader>(page_id).inspect_err(|e| {
                 debug!("failed read next page={:?}: {:?}", page_id, e);
             })?;
+
+            if h.seq >= right_limit || h.seq > target_seq {
+                corrupted!()
+            }
 
             if h.record_boundary != u16::MAX {
                 // If page has a record boundary, check it's within bounds.
@@ -848,6 +854,9 @@ impl FileSearcher {
                 debug!("first page in file has no record boundary!");
                 corrupted!()
             }
+
+            // prevent infinite loops on corrupted flash images.
+            right_limit = h.seq;
         };
 
         // seek to record start.
