@@ -404,12 +404,14 @@ impl<F: Flash> FileManager<F> {
     pub fn dump(&mut self) {
         for file_id in 0..FILE_COUNT {
             debug!("====== FILE {} ======", file_id);
-            self.dump_file(file_id as _)
+            if let Err(e) = self.dump_file(file_id as _) {
+                debug!("failed to dump file: {:?}", e);
+            }
         }
     }
 
     #[cfg(feature = "std")]
-    pub fn dump_file(&mut self, file_id: FileID) {
+    pub fn dump_file(&mut self, file_id: FileID) -> Result<(), Error> {
         let f = self.files[file_id as usize];
         debug!(
             "  seq: {:?}..{:?} len {:?} last_page {:?}",
@@ -423,13 +425,13 @@ impl<F: Flash> FileManager<F> {
         let mut pp = f.last_page;
         while let Some(p) = pp {
             pages.push(p);
-            pp = p.prev(self, f.first_seq).unwrap();
+            pp = p.prev(self, f.first_seq)?;
         }
 
         let mut buf = [0; 1024];
         for p in pages.iter().rev() {
-            let (h, mut r) = self.read_page::<DataHeader>(p.page_id).unwrap();
-            let n = r.read(&mut self.flash, &mut buf).unwrap();
+            let (h, mut r) = self.read_page::<DataHeader>(p.page_id)?;
+            let n = r.read(&mut self.flash, &mut buf)?;
             let data = &buf[..n];
 
             let rb = if h.record_boundary == u16::MAX {
@@ -438,7 +440,7 @@ impl<F: Flash> FileManager<F> {
                 format!(
                     "{} (seq {:?})",
                     h.record_boundary,
-                    h.seq.add(h.record_boundary as usize).unwrap()
+                    h.seq.add(h.record_boundary as usize)?
                 )
             };
 
@@ -446,7 +448,7 @@ impl<F: Flash> FileManager<F> {
                 "  page {:?}: seq {:?}..{:?} len {:?} record_boundary {} skiplist {:?}",
                 p.page_id,
                 h.seq,
-                h.seq.add(n).unwrap(),
+                h.seq.add(n)?,
                 n,
                 rb,
                 h.skiplist
@@ -455,9 +457,11 @@ impl<F: Flash> FileManager<F> {
             let mut s = h.seq;
             for c in data.chunks(32) {
                 debug!("     {:04}: {:02x?}", s.0, c);
-                s = s.add(c.len()).unwrap();
+                s = s.add(c.len())?;
             }
         }
+
+        Ok(())
     }
 }
 

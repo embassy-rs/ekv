@@ -186,26 +186,36 @@ impl<F: Flash> Database<F> {
     }
 
     #[cfg(feature = "std")]
-    pub(crate) fn dump(&mut self) {
-        for file_id in 0..FILE_COUNT as u16 {
+    pub fn dump(&mut self) {
+        for file_id in 0..FILE_COUNT {
             debug!("====== FILE {} ======", file_id);
-            self.files.dump_file(file_id);
-
-            let mut r = self.files.read(file_id);
-            let mut key = Vec::new();
-            let mut value = [0u8; 1024];
-            loop {
-                let seq = r.curr_seq(&mut self.files);
-                match read_key(&mut self.files, &mut r, &mut key) {
-                    Err(ReadError::Eof) => break,
-                    x => x.unwrap(),
-                }
-                let n = read_value(&mut self.files, &mut r, &mut value).unwrap();
-                let value = &value[..n];
-
-                debug!("record at seq={:?}: key={:02x?} value={:02x?}", seq, key, value);
+            if let Err(e) = self.dump_file(file_id as _) {
+                debug!("failed to dump file: {:?}", e);
             }
         }
+    }
+
+    #[cfg(feature = "std")]
+    pub fn dump_file(&mut self, file_id: FileID) -> Result<(), Error> {
+        self.files.dump_file(file_id)?;
+
+        let mut r = self.files.read(file_id);
+        let mut key = Vec::new();
+        let mut value = [0u8; 1024];
+        loop {
+            let seq = r.curr_seq(&mut self.files);
+            match read_key(&mut self.files, &mut r, &mut key) {
+                Ok(()) => {}
+                Err(ReadError::Eof) => break,
+                Err(ReadError::Corrupted) => corrupted!(),
+            }
+            let n = check_corrupted!(read_value(&mut self.files, &mut r, &mut value));
+            let value = &value[..n];
+
+            debug!("record at seq={:?}: key={:02x?} value={:02x?}", seq, key, value);
+        }
+
+        Ok(())
     }
 }
 
