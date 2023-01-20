@@ -818,7 +818,7 @@ impl FileSearcher {
                 // that we should pretend it's not there.
 
                 let boundary_seq = h.seq.add(h.record_boundary as _).unwrap();
-                if boundary_seq >= self.left {
+                if boundary_seq > self.left {
                     // All good
                     break (h, r);
                 } else {
@@ -827,7 +827,7 @@ impl FileSearcher {
                     return Err(SearchSeekError::TooMuchLeft);
                 }
             } else {
-                if h.seq < self.left {
+                if h.seq <= self.left {
                     // previous page is truncated.
                     trace!("search: seek_to_page page hit self.left");
                     return Err(SearchSeekError::TooMuchLeft);
@@ -878,6 +878,7 @@ impl FileSearcher {
             self.right_skiplist
         );
 
+        assert!(self.left <= self.curr_low);
         assert!(self.curr_low <= self.curr_mid);
         assert!(self.curr_mid <= self.curr_high);
         assert!(self.curr_high <= self.right);
@@ -1937,20 +1938,11 @@ mod tests {
         m.commit(&mut w).unwrap();
 
         let mut buf = [0u8; 1];
-        // Seek left
-        let mut s = FileSearcher::new(m.read(1));
-        assert_eq!(s.start(&mut m).unwrap(), true);
-        assert_eq!(s.reader().offset(&mut m), 0);
-        s.reader().read(&mut m, &mut buf).unwrap();
-        assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), false);
-        assert_eq!(s.reader().offset(&mut m), 0);
 
-        // Seek right
+        // start immediately return false, because there's nothing to bisect.
+        // Only possible point to seek is start of the only page.
         let mut s = FileSearcher::new(m.read(1));
-        assert_eq!(s.start(&mut m).unwrap(), true);
-        assert_eq!(s.reader().offset(&mut m), 0);
-        s.reader().read(&mut m, &mut buf).unwrap();
-        assert_eq!(s.seek(&mut m, SeekDirection::Right).unwrap(), false);
+        assert_eq!(s.start(&mut m).unwrap(), false);
         assert_eq!(s.reader().offset(&mut m), 0);
     }
 
@@ -1971,8 +1963,6 @@ mod tests {
         let mut s = FileSearcher::new(m.read(1));
         assert_eq!(s.start(&mut m).unwrap(), true);
         assert_eq!(s.reader().offset(&mut m), 1);
-        assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), true);
-        assert_eq!(s.reader().offset(&mut m), 0);
         assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), false);
         assert_eq!(s.reader().offset(&mut m), 0);
 
@@ -1995,21 +1985,10 @@ mod tests {
         w.record_end();
         m.commit(&mut w).unwrap();
 
-        let mut buf = [0u8; 1];
-        // Seek left
+        // start immediately return false, because there's nothing to bisect.
+        // Only possible point to seek is start of the only page.
         let mut s = FileSearcher::new(m.read(1));
-        assert_eq!(s.start(&mut m).unwrap(), true);
-        assert_eq!(s.reader().offset(&mut m), 0);
-        s.reader().read(&mut m, &mut buf).unwrap();
-        assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), false);
-        assert_eq!(s.reader().offset(&mut m), 0);
-
-        // Seek right
-        let mut s = FileSearcher::new(m.read(1));
-        assert_eq!(s.start(&mut m).unwrap(), true);
-        assert_eq!(s.reader().offset(&mut m), 0);
-        s.reader().read(&mut m, &mut buf).unwrap();
-        assert_eq!(s.seek(&mut m, SeekDirection::Right).unwrap(), false);
+        assert_eq!(s.start(&mut m).unwrap(), false);
         assert_eq!(s.reader().offset(&mut m), 0);
     }
 
@@ -2025,21 +2004,10 @@ mod tests {
         w.record_end();
         m.commit(&mut w).unwrap();
 
-        let mut buf = [0u8; 1];
-        // Seek left
+        // start immediately return false, because there's nothing to bisect.
+        // Only possible point to seek is start of the only page.
         let mut s = FileSearcher::new(m.read(1));
-        assert_eq!(s.start(&mut m).unwrap(), true);
-        assert_eq!(s.reader().offset(&mut m), 0);
-        s.reader().read(&mut m, &mut buf).unwrap();
-        assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), false);
-        assert_eq!(s.reader().offset(&mut m), 0);
-
-        // Seek right
-        let mut s = FileSearcher::new(m.read(1));
-        assert_eq!(s.start(&mut m).unwrap(), true);
-        assert_eq!(s.reader().offset(&mut m), 0);
-        s.reader().read(&mut m, &mut buf).unwrap();
-        assert_eq!(s.seek(&mut m, SeekDirection::Right).unwrap(), false);
+        assert_eq!(s.start(&mut m).unwrap(), false);
         assert_eq!(s.reader().offset(&mut m), 0);
     }
 
@@ -2062,9 +2030,6 @@ mod tests {
         let mut s = FileSearcher::new(m.read(1));
         assert_eq!(s.start(&mut m).unwrap(), true);
         assert_eq!(s.reader().offset(&mut m), 4348);
-        s.reader().read(&mut m, &mut buf).unwrap();
-        assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), true);
-        assert_eq!(s.reader().offset(&mut m), 0);
         s.reader().read(&mut m, &mut buf).unwrap();
         assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), false);
         assert_eq!(s.reader().offset(&mut m), 0);
@@ -2103,9 +2068,6 @@ mod tests {
         assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), true);
         assert_eq!(s.reader().offset(&mut m), 4348);
         s.reader().read(&mut m, &mut buf).unwrap();
-        assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), true);
-        assert_eq!(s.reader().offset(&mut m), 0);
-        s.reader().read(&mut m, &mut buf).unwrap();
         assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), false);
         assert_eq!(s.reader().offset(&mut m), 0);
 
@@ -2117,10 +2079,7 @@ mod tests {
         assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), true);
         assert_eq!(s.reader().offset(&mut m), 4348);
         s.reader().read(&mut m, &mut buf).unwrap();
-        assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), true);
-        assert_eq!(s.reader().offset(&mut m), 0);
-        s.reader().read(&mut m, &mut buf).unwrap();
-        assert_eq!(s.seek(&mut m, SeekDirection::Right).unwrap(), false);
+        assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), false);
         assert_eq!(s.reader().offset(&mut m), 0);
 
         // Seek middle
@@ -2141,6 +2100,55 @@ mod tests {
         s.reader().read(&mut m, &mut buf).unwrap();
         assert_eq!(s.seek(&mut m, SeekDirection::Right).unwrap(), false);
         assert_eq!(s.reader().offset(&mut m), 8696);
+    }
+
+    #[test]
+    fn test_search_truncate() {
+        let mut f = MemFlash::new();
+        let mut m = FileManager::new(&mut f);
+        m.format();
+        m.mount().unwrap();
+
+        const N: usize = PAGE_MAX_PAYLOAD_SIZE + 3;
+        let mut w = m.write(1);
+        w.write(&mut m, &[0x00; N]).unwrap();
+        w.record_end();
+        w.write(&mut m, &[0x00; N]).unwrap();
+        w.record_end();
+        w.write(&mut m, &[0x00; N]).unwrap();
+        w.record_end();
+        w.write(&mut m, &[0x00; N]).unwrap();
+        w.record_end();
+        m.commit(&mut w).unwrap();
+
+        let mut buf = [0u8; 1];
+        // Seek left
+        let mut s = FileSearcher::new(m.read(1));
+        assert_eq!(s.start(&mut m).unwrap(), true);
+        assert_eq!(s.reader().offset(&mut m), N * 2);
+        s.reader().read(&mut m, &mut buf).unwrap();
+        assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), true);
+        assert_eq!(s.reader().offset(&mut m), N);
+        s.reader().read(&mut m, &mut buf).unwrap();
+        assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), false);
+        assert_eq!(s.reader().offset(&mut m), 0);
+
+        m.commit_and_truncate(None, &[(1, N * 2)]).unwrap();
+
+        // Seek left
+        let mut s = FileSearcher::new(m.read(1));
+        assert_eq!(s.start(&mut m).unwrap(), true);
+        assert_eq!(s.reader().offset(&mut m), N);
+        s.reader().read(&mut m, &mut buf).unwrap();
+        assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), false);
+        assert_eq!(s.reader().offset(&mut m), 0);
+
+        m.commit_and_truncate(None, &[(1, N)]).unwrap();
+
+        // Seek left
+        let mut s = FileSearcher::new(m.read(1));
+        assert_eq!(s.start(&mut m).unwrap(), false);
+        assert_eq!(s.reader().offset(&mut m), 0);
     }
 
     #[test]
