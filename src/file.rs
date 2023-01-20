@@ -566,9 +566,26 @@ impl FileReader {
         }
     }
 
+    fn page_id(&self) -> Option<PageID> {
+        match &self.state {
+            ReaderState::Reading(r) => Some(r.reader.page_id()),
+            _ => None,
+        }
+    }
     fn next_page(&mut self, m: &mut FileManager<impl Flash>) -> Result<(), Error> {
         let seq = self.curr_seq(m);
-        self.seek_seq(m, seq)
+
+        let prev_page_id = self.page_id();
+
+        self.seek_seq(m, seq)?;
+
+        let curr_page_id = self.page_id();
+        if prev_page_id == curr_page_id && curr_page_id.is_some() {
+            // prevent infinite loopwhen corrupted zero-len pages.
+            corrupted!()
+        }
+
+        Ok(())
     }
 
     fn seek_seq(&mut self, m: &mut FileManager<impl Flash>, seq: Seq) -> Result<(), Error> {
