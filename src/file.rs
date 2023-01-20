@@ -838,34 +838,18 @@ impl FileSearcher {
                 corrupted!()
             }
 
-            if h.record_boundary != u16::MAX {
-                // If page has a record boundary, check it's within bounds.
-                // It could be that the file has been truncated at a seq that falls in the
-                // middle of the page, so the start of the page contains truncated data
-                // that we should pretend it's not there.
-
-                let boundary_seq = check_corrupted!(h.seq.add(h.record_boundary as _));
-                if boundary_seq >= right_limit {
-                    corrupted!()
-                }
-
-                if boundary_seq > self.left {
-                    // All good
-                    break (h, r);
-                } else {
-                    // first record is truncated.
-                    trace!("search: seek_to_page: page OK, but record boundary hit self.left");
-                    return Err(SearchSeekError::TooMuchLeft);
-                }
-            } else {
-                if h.seq <= self.left {
-                    // previous page is truncated.
-                    trace!("search: seek_to_page page hit self.left");
-                    return Err(SearchSeekError::TooMuchLeft);
-                }
-                // otherwise we're guaranteed the previous page is valid, so try
-                // again with it.
+            if h.seq <= self.left {
+                // previous page is truncated.
+                trace!("search: seek_to_page page hit self.left");
+                return Err(SearchSeekError::TooMuchLeft);
             }
+
+            if h.record_boundary != u16::MAX {
+                break (h, r);
+            }
+
+            // otherwise we're guaranteed the previous page is valid, thanks to the
+            // 'h.seq <= self.left` check above. so try again with it.
 
             // No record boundary within this page. Try the previous one.
             if let Some(prev) = h.skiplist[0].into_option() {
@@ -888,12 +872,26 @@ impl FileSearcher {
             corrupted!()
         }
 
+        let boundary_seq = check_corrupted!(h.seq.add(b));
+        if boundary_seq >= right_limit {
+            corrupted!()
+        }
+
+        // If page has a record boundary, check it's within bounds.
+        // It could be that the file has been truncated at a seq that falls in the
+        // middle of the page, so the start of the page contains truncated data
+        // that we should pretend it's not there.
+        if boundary_seq <= self.left {
+            trace!("search: seek_to_page: page OK, but record boundary hit self.left");
+            return Err(SearchSeekError::TooMuchLeft);
+        }
+
         let n = r.skip(&mut m.flash, b)?;
         if n != b {
             corrupted!()
         }
-        self.curr_mid = check_corrupted!(h.seq.add(b));
-        self.curr_high = target_seq.max(self.curr_mid);
+        self.curr_mid = boundary_seq;
+        self.curr_high = target_seq.max(boundary_seq);
 
         self.r.state = ReaderState::Reading(ReaderStateReading {
             seq: self.curr_mid,
