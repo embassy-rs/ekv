@@ -22,6 +22,7 @@ enum Op {
     Append { len: usize },
     Search { id: u32 },
     Commit,
+    Truncate { i: usize },
 }
 
 struct Record {
@@ -31,7 +32,8 @@ struct Record {
 }
 
 fn fuzz(ops: Input) {
-    if std::env::var_os("RUST_LOG").is_some() {
+    let logging = std::env::var_os("RUST_LOG").is_some();
+    if logging {
         env_logger::init();
     }
 
@@ -46,6 +48,8 @@ fn fuzz(ops: Input) {
     let mut buf = [0; MAX_LEN];
 
     let mut records = Vec::new();
+    let mut write_offs: usize = 0;
+    let mut trunc_offs: usize = 0;
 
     for op in ops.ops {
         match op {
@@ -65,13 +69,15 @@ fn fuzz(ops: Input) {
                 records.push(Record {
                     id,
                     len,
-                    offs: w.offset(&mut m),
+                    offs: write_offs,
                 });
 
                 w.write(&mut m, &id.to_le_bytes()).unwrap();
                 buf[..len].fill(id as u8);
                 w.write(&mut m, &buf[..len]).unwrap();
                 w.record_end();
+
+                write_offs += 4 + len;
             }
             Op::Commit => {
                 if let Some(w) = &mut w {
@@ -84,6 +90,10 @@ fn fuzz(ops: Input) {
                     m.commit(w).unwrap();
                 }
                 w = None;
+
+                if logging {
+                    m.dump();
+                }
 
                 let mut s = FileSearcher::new(m.read(FILE_ID));
                 let mut ok = s.start(&mut m).unwrap();
@@ -133,8 +143,27 @@ fn fuzz(ops: Input) {
                     s.reader().skip(&mut m, r.len).unwrap();
                 }
 
-                let should_found = id % 2 == 1 && id / 2 < records.len() as u32;
+                let i = id as usize / 2;
+                let should_found = id % 2 == 1 && i < records.len() && records[i].offs >= trunc_offs;
                 assert_eq!(found, should_found);
+            }
+            Op::Truncate { i } => {
+                if i >= records.len() {
+                    continue;
+                }
+
+                let offs = records[i].offs;
+                if offs <= trunc_offs {
+                    continue;
+                }
+
+                if let Some(w) = &mut w {
+                    m.commit(w).unwrap();
+                }
+                w = None;
+
+                m.commit_and_truncate(None, &[(FILE_ID, offs - trunc_offs)]).unwrap();
+                trunc_offs = offs;
             }
         }
     }
