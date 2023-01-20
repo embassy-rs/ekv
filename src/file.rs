@@ -328,6 +328,7 @@ impl<F: Flash> FileManager<F> {
                 // Existing meta page was full. Write a new one.
 
                 let page_id = self.alloc.allocate();
+                trace!("meta: allocated page {:?}", page_id);
                 let mut w = self.write_page(page_id);
                 for file_id in 0..FILE_COUNT as FileID {
                     // Since we're writing a new page from scratch, no need to
@@ -393,6 +394,7 @@ impl<F: Flash> FileManager<F> {
     }
 
     fn free_page(&mut self, page_id: PageID) {
+        trace!("free page {:?}", page_id);
         self.alloc.free(page_id);
         #[cfg(feature = "_erase-on-free")]
         self.flash.erase(page_id);
@@ -689,13 +691,15 @@ impl From<Error> for WriteError {
 pub struct FileSearcher {
     r: FileReader,
 
+    result: Seq,
+
     left: Seq,
-    left_page: OptionPageID,
 
     right: Seq,
     right_skiplist: [OptionPageID; SKIPLIST_LEN],
 
     curr_low: Seq,
+    curr_mid: Seq,
     curr_high: Seq,
     curr_page: OptionPageID,
     curr_skiplist: [OptionPageID; SKIPLIST_LEN],
@@ -705,11 +709,12 @@ impl FileSearcher {
     pub fn new(r: FileReader) -> Self {
         Self {
             r,
+            result: Seq::MAX,
             left: Seq::MAX,
-            left_page: OptionPageID::none(),
             right: Seq::MAX,
             right_skiplist: [OptionPageID::none(); SKIPLIST_LEN],
             curr_low: Seq::MAX,
+            curr_mid: Seq::MAX,
             curr_high: Seq::MAX,
             curr_page: OptionPageID::none(),
             curr_skiplist: [OptionPageID::none(); SKIPLIST_LEN],
@@ -718,6 +723,7 @@ impl FileSearcher {
 
     pub fn start(&mut self, m: &mut FileManager<impl Flash>) -> Result<bool, Error> {
         let f = &m.files[self.r.file_id as usize];
+        self.result = f.first_seq;
         self.left = f.first_seq;
         self.right = f.last_seq;
 
@@ -765,8 +771,7 @@ impl FileSearcher {
                 if let Some(page_id) = self.right_skiplist[i].into_option() {
                     let seq = skiplist_seq(self.right, i);
                     if seq >= self.left {
-                        self.curr_high = seq;
-                        match self.seek_to_page(m, page_id, Some(self.left)) {
+                        match self.seek_to_page(m, page_id, seq) {
                             Ok(()) => return Ok(true),
                             Err(SearchSeekError::Corrupted) => corrupted!(),
                             Err(SearchSeekError::TooMuchLeft) => {
@@ -780,12 +785,9 @@ impl FileSearcher {
             }
 
             if i == 0 {
-                let page_id = self.left_page.into_option().unwrap();
-                return match self.seek_to_page(m, page_id, None) {
-                    Ok(()) => Ok(false),
-                    Err(SearchSeekError::Corrupted) => corrupted!(),
-                    Err(SearchSeekError::TooMuchLeft) => unreachable!(),
-                };
+                let seq = self.result;
+                self.reader().seek_seq(m, seq)?;
+                return Ok(false);
             }
 
             // Seek failed. Try again less hard.
@@ -797,9 +799,9 @@ impl FileSearcher {
         &mut self,
         m: &mut FileManager<impl Flash>,
         mut page_id: PageID,
-        left_limit: Option<Seq>,
+        target_seq: Seq,
     ) -> Result<(), SearchSeekError> {
-        trace!("search: seek_to_page page_id={:?} left_limit={:?}", page_id, left_limit);
+        trace!("search: seek_to_page page_id={:?} target_seq={:?}", page_id, target_seq,);
 
         let (h, mut r) = loop {
             if page_id.index() >= PAGE_COUNT {
@@ -809,20 +811,29 @@ impl FileSearcher {
                 debug!("failed read next page={:?}: {:?}", page_id, e);
             })?;
 
-            if h.skiplist[0].is_none() {
-                trace!("search: arrived to first file page, setting left_page to {:?}", page_id);
-                self.left_page = page_id.into();
-            }
+            if h.record_boundary != u16::MAX {
+                // If page has a record boundary, check it's within bounds.
+                // It could be that the file has been truncated at a seq that falls in the
+                // middle of the page, so the start of the page contains truncated data
+                // that we should pretend it's not there.
 
-            if let Some(left_limit) = left_limit {
-                if h.seq < left_limit {
-                    trace!("search: seek_to_page hit left_limit");
+                let boundary_seq = h.seq.add(h.record_boundary as _).unwrap();
+                if boundary_seq >= self.left {
+                    // All good
+                    break (h, r);
+                } else {
+                    // first record is truncated.
+                    trace!("search: seek_to_page: page OK, but record boundary hit self.left");
                     return Err(SearchSeekError::TooMuchLeft);
                 }
-            }
-
-            if h.record_boundary != u16::MAX {
-                break (h, r);
+            } else {
+                if h.seq < self.left {
+                    // previous page is truncated.
+                    trace!("search: seek_to_page page hit self.left");
+                    return Err(SearchSeekError::TooMuchLeft);
+                }
+                // otherwise we're guaranteed the previous page is valid, so try
+                // again with it.
             }
 
             // No record boundary within this page. Try the previous one.
@@ -841,28 +852,35 @@ impl FileSearcher {
         if n != b {
             corrupted!()
         }
-        let state_seq = h.seq.add(b).unwrap();
+        self.curr_mid = h.seq.add(b).unwrap();
+        self.curr_high = target_seq.max(self.curr_mid);
 
         self.r.state = ReaderState::Reading(ReaderStateReading {
-            seq: state_seq,
+            seq: self.curr_mid,
             reader: r,
         });
         self.curr_low = h.seq;
         self.curr_skiplist = h.skiplist;
         self.curr_page = page_id.into();
         trace!(
-            "search: curr seq={:?}..{:?} page {:?} skiplist={:?}",
+            "search: curr seq={:?}..{:?}..{:?} page {:?} skiplist={:?}",
             self.curr_low,
+            self.curr_mid,
             self.curr_high,
             self.curr_page,
             self.curr_skiplist
         );
-        trace!("        left seq={:?} page {:?}", self.left, self.left_page,);
+        trace!("        result seq={:?}", self.result);
+        trace!("        left seq={:?}", self.left);
         trace!(
             "        right seq={:?}   skiplist={:?}",
             self.right,
             self.right_skiplist
         );
+
+        assert!(self.curr_low <= self.curr_mid);
+        assert!(self.curr_mid <= self.curr_high);
+        assert!(self.curr_high <= self.right);
 
         Ok(())
     }
@@ -877,7 +895,7 @@ impl FileSearcher {
             SeekDirection::Right => {
                 trace!("search seek right");
                 self.left = self.curr_high.add(1).unwrap();
-                self.left_page = self.curr_page;
+                self.result = self.curr_mid;
             }
         }
 
@@ -968,6 +986,7 @@ impl FileWriter {
         }
 
         let page_id = m.alloc.allocate();
+        trace!("writer: allocated page {:?}", page_id);
         self.writer = Some(m.write_page(page_id));
         Ok(())
     }
