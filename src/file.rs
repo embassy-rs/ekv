@@ -844,7 +844,11 @@ impl FileSearcher {
                 // middle of the page, so the start of the page contains truncated data
                 // that we should pretend it's not there.
 
-                let boundary_seq = h.seq.add(h.record_boundary as _).unwrap();
+                let boundary_seq = check_corrupted!(h.seq.add(h.record_boundary as _));
+                if boundary_seq >= right_limit {
+                    corrupted!()
+                }
+
                 if boundary_seq > self.left {
                     // All good
                     break (h, r);
@@ -877,12 +881,18 @@ impl FileSearcher {
         };
 
         // seek to record start.
+        assert!(h.record_boundary != u16::MAX);
+
         let b = h.record_boundary as usize;
+        if b >= PAGE_MAX_PAYLOAD_SIZE {
+            corrupted!()
+        }
+
         let n = r.skip(&mut m.flash, b)?;
         if n != b {
             corrupted!()
         }
-        self.curr_mid = h.seq.add(b).unwrap();
+        self.curr_mid = check_corrupted!(h.seq.add(b));
         self.curr_high = target_seq.max(self.curr_mid);
 
         self.r.state = ReaderState::Reading(ReaderStateReading {
