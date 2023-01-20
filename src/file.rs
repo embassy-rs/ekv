@@ -889,8 +889,10 @@ pub struct FileWriter {
     file_id: FileID,
     last_page: Option<PagePointer>,
     seq: Seq,
-    record_boundary: Option<usize>,
     writer: Option<PageWriter<DataHeader>>,
+
+    at_record_boundary: bool,
+    record_boundary: Option<u16>,
 }
 
 impl FileWriter {
@@ -901,6 +903,7 @@ impl FileWriter {
             file_id,
             last_page: f.last_page,
             seq: f.last_seq,
+            at_record_boundary: true,
             record_boundary: Some(0),
             writer: None,
         }
@@ -930,12 +933,8 @@ impl FileWriter {
         let next_seq = self.seq.add(page_size)?;
 
         let record_boundary = match self.record_boundary {
-            Some(b) if b >= page_size => u16::MAX,
-            Some(b) => {
-                self.record_boundary = None;
-                b as u16
-            }
-            None => u16::MAX,
+            Some(b) if (b as usize) < page_size => b,
+            _ => u16::MAX,
         };
         let header = DataHeader {
             seq: self.seq,
@@ -954,6 +953,11 @@ impl FileWriter {
 
         self.seq = next_seq;
         self.last_page = Some(PagePointer { page_id, header });
+
+        self.record_boundary = None;
+        if self.at_record_boundary {
+            self.record_boundary = Some(0)
+        }
 
         Ok(())
     }
@@ -981,6 +985,9 @@ impl FileWriter {
                     if n == 0 {
                         self.next_page(m)?;
                     }
+
+                    // Wrote some data, we're no longer at a boundary.
+                    self.at_record_boundary = false;
                 }
             }
         }
@@ -1021,8 +1028,9 @@ impl FileWriter {
 
     pub fn record_end(&mut self) {
         if self.record_boundary.is_none() {
-            self.record_boundary = Some(self.writer.as_mut().unwrap().len());
+            self.record_boundary = Some(self.writer.as_mut().unwrap().len().try_into().unwrap());
         }
+        self.at_record_boundary = true;
     }
 }
 
@@ -1855,6 +1863,35 @@ mod tests {
         let h = m.read_header::<DataHeader>(page(5)).unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32 * 4));
         assert_eq!(h.record_boundary, 3);
+    }
+
+    #[test]
+    fn test_record_boundary_exact_page() {
+        let mut f = MemFlash::new();
+        let mut m = FileManager::new(&mut f);
+        m.format();
+        m.mount().unwrap();
+
+        let mut w = m.write(1);
+        w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE]).unwrap();
+        w.record_end();
+        w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE]).unwrap();
+        w.record_end();
+        w.write(&mut m, &[0x00]).unwrap();
+        w.record_end();
+        m.commit(&mut w).unwrap();
+
+        let h = m.read_header::<DataHeader>(page(1)).unwrap();
+        assert_eq!(h.seq, Seq(0));
+        assert_eq!(h.record_boundary, 0);
+
+        let h = m.read_header::<DataHeader>(page(2)).unwrap();
+        assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32));
+        assert_eq!(h.record_boundary, 0);
+
+        let h = m.read_header::<DataHeader>(page(3)).unwrap();
+        assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32 * 2));
+        assert_eq!(h.record_boundary, 0);
     }
 
     #[test]
