@@ -28,7 +28,8 @@ struct InsertOp {
 }
 
 fn fuzz(ops: Input) {
-    if std::env::var_os("RUST_LOG").is_some() {
+    let logging = std::env::var_os("RUST_LOG").is_some();
+    if logging {
         env_logger::init();
     }
 

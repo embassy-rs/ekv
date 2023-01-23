@@ -6,7 +6,8 @@ use libfuzzer_sys::fuzz_target;
 fuzz_target!(|data: &[u8]| { fuzz(data) });
 
 fn fuzz(data: &[u8]) {
-    if std::env::var_os("RUST_LOG").is_some() {
+    let logging = std::env::var_os("RUST_LOG").is_some();
+    if logging {
         env_logger::init();
     }
 
@@ -15,6 +16,10 @@ fn fuzz(data: &[u8]) {
     f.data[..n].copy_from_slice(&data[..n]);
 
     let Ok(mut db) = Database::new(&mut f) else { return };
+
+    if logging {
+        db.dump();
+    }
 
     let mut buf = [0; 64];
     let Ok(mut rtx) = db.read_transaction() else { return };

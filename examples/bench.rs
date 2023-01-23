@@ -101,14 +101,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .max_by(|a, b| a.partial_cmp(b).unwrap())
         .unwrap();
 
-    let root = BitMapBackend::new(OUT_FILE_NAME, (1024, 768)).into_drawing_area();
+    let root = BitMapBackend::new(OUT_FILE_NAME, (1920, 768)).into_drawing_area();
 
     root.fill(&WHITE)?;
 
     let mut chart = ChartBuilder::on(&root)
         .set_label_area_size(LabelAreaPosition::Left, 60)
         .set_label_area_size(LabelAreaPosition::Bottom, 60)
-        .caption("Area Chart Demo", ("sans-serif", 40))
         .build_cartesian_2d(0.0..(max as f64), 0.0..max_y)?;
 
     chart.configure_mesh().disable_x_mesh().disable_y_mesh().draw()?;

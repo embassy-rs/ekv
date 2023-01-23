@@ -85,5 +85,18 @@ fn main() {
         }
     }
 
+    // remount, recheck everything.
+    let mut db = Database::new(&mut f).unwrap();
+    for i in 0..KEY_COUNT {
+        let key = &keys[i];
+
+        let mut rtx = db.read_transaction().unwrap();
+        let n = rtx.read(key, &mut buf).unwrap();
+        let val1 = &buf[..n];
+        let val2 = m.get(key).map(|v| &v[..]).unwrap_or(&[]);
+
+        assert_eq!(val1, val2);
+    }
+
     std::fs::write("out.bin", &f.data).unwrap();
 }
