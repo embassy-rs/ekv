@@ -2,7 +2,7 @@
 
 use std::cmp::Ordering;
 
-use ekv::config::{PAGE_COUNT, PAGE_SIZE};
+use ekv::config::{FileID, PAGE_COUNT, PAGE_SIZE};
 use ekv::file::{FileManager, FileSearcher, ReadError, SeekDirection};
 use ekv::flash::MemFlash;
 use libfuzzer_sys::arbitrary::Arbitrary;
@@ -42,7 +42,7 @@ fn fuzz(ops: Input) {
     m.format();
     m.mount().unwrap();
 
-    const FILE_ID: u16 = 1;
+    const FILE_ID: FileID = 1;
 
     let mut w = None;
     let mut buf = [0; MAX_LEN];

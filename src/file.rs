@@ -50,6 +50,7 @@ unsafe impl page::Header for DataHeader {
 #[repr(C)]
 pub struct FileMeta {
     file_id: FileID,
+    flags: u8,
     last_page_id: OptionPageID,
     first_seq: Seq,
 }
@@ -60,6 +61,7 @@ struct FileState {
     last_page: Option<PagePointer>,
     first_seq: Seq,
     last_seq: Seq,
+    flags: u8,
 }
 
 pub struct FileManager<F: Flash> {
@@ -78,6 +80,7 @@ impl<F: Flash> FileManager<F> {
             last_page: None,
             first_seq: Seq::ZERO,
             last_seq: Seq::ZERO,
+            flags: 0,
         };
         Self {
             flash,
@@ -107,6 +110,10 @@ impl<F: Flash> FileManager<F> {
 
     pub fn write(&mut self, file_id: FileID) -> FileWriter {
         FileWriter::new(self, file_id)
+    }
+
+    pub fn file_flags(&mut self, file_id: FileID) -> u8 {
+        self.files[file_id as usize].flags
     }
 
     pub fn format(&mut self) {
@@ -147,16 +154,13 @@ impl<F: Flash> FileManager<F> {
         self.meta_seq = meta_seq;
         self.alloc.mark_used(meta_page_id);
 
-        #[derive(Clone, Copy)]
-        struct FileInfo {
-            last_page_id: OptionPageID,
-            first_seq: Seq,
-        }
-
         let (_, mut r) = self.read_page::<MetaHeader>(meta_page_id).inspect_err(|e| {
             debug!("failed read meta_page_id={:?}: {:?}", meta_page_id, e);
         })?;
-        let mut files = [FileInfo {
+
+        let mut files = [FileMeta {
+            file_id: 0,
+            flags: 0,
             last_page_id: OptionPageID::none(),
             first_seq: Seq::ZERO,
         }; FILE_COUNT];
@@ -189,16 +193,13 @@ impl<F: Flash> FileManager<F> {
                 }
             }
 
-            files[meta.file_id as usize] = FileInfo {
-                last_page_id: meta.last_page_id,
-                first_seq: meta.first_seq,
-            }
+            files[meta.file_id as usize] = meta
         }
 
         for file_id in 0..FILE_COUNT as FileID {
-            let fi = files[file_id as usize];
+            let meta = files[file_id as usize];
 
-            let Some(last_page_id) = fi.last_page_id.into_option() else {
+            let Some(last_page_id) = meta.last_page_id.into_option() else {
                 continue;
             };
 
@@ -214,18 +215,19 @@ impl<F: Flash> FileManager<F> {
             });
 
             // note: first_seq == last_seq is corruption too, because in that case what we do is delete the file.
-            if fi.first_seq >= last_seq {
+            if meta.first_seq >= last_seq {
                 debug!(
                     "meta: file {} first_seq {:?} not smaller than last_seq {:?}",
-                    file_id, fi.first_seq, last_seq
+                    file_id, meta.first_seq, last_seq
                 );
                 corrupted!();
             }
 
             self.files[file_id as usize] = FileState {
                 last_page: p,
-                first_seq: fi.first_seq,
+                first_seq: meta.first_seq,
                 last_seq,
+                flags: meta.flags,
             };
 
             while let Some(pp) = p {
@@ -234,7 +236,7 @@ impl<F: Flash> FileManager<F> {
                     corrupted!();
                 }
                 self.alloc.mark_used(pp.page_id);
-                p = pp.prev(self, fi.first_seq)?;
+                p = pp.prev(self, meta.first_seq)?;
             }
         }
 
@@ -255,6 +257,7 @@ impl<F: Flash> FileManager<F> {
         let f = &self.files[file_id as usize];
         let meta = FileMeta {
             file_id,
+            flags: f.flags,
             first_seq: f.first_seq,
             last_page_id: f.last_page.as_ref().map(|pp| pp.page_id).into(),
         };
@@ -295,6 +298,7 @@ impl<F: Flash> FileManager<F> {
                 f.first_seq = Seq::ZERO;
                 f.last_seq = Seq::ZERO;
                 f.last_page = None;
+                f.flags = 0;
             } else {
                 f.first_seq = seq;
             }
@@ -947,6 +951,7 @@ pub struct FileWriter {
     last_page: Option<PagePointer>,
     seq: Seq,
     writer: Option<PageWriter<DataHeader>>,
+    flags: u8,
 
     at_record_boundary: bool,
     record_boundary: Option<u16>,
@@ -963,6 +968,7 @@ impl FileWriter {
             at_record_boundary: true,
             record_boundary: Some(0),
             writer: None,
+            flags: f.flags,
         }
     }
 
@@ -1059,6 +1065,7 @@ impl FileWriter {
             let old_f = *f;
             f.last_page = self.last_page;
             f.last_seq = self.seq;
+            f.flags = self.flags;
 
             trace!(
                 "commit file_id={:?} old=(first_seq={:?} last_seq={:?}) new=(first_seq={:?} last_seq={:?})",
@@ -1089,6 +1096,14 @@ impl FileWriter {
             self.record_boundary = Some(self.writer.as_mut().unwrap().len().try_into().unwrap());
         }
         self.at_record_boundary = true;
+    }
+
+    pub fn flags(&self) -> u8 {
+        self.flags
+    }
+
+    pub fn set_flags(&mut self, flags: u8) {
+        self.flags = flags;
     }
 }
 
@@ -1748,6 +1763,52 @@ mod tests {
         let mut buf = [0; 32];
         r.read(&mut m, &mut buf).unwrap();
         assert_eq!(buf[..], data[..]);
+    }
+
+    #[test]
+    fn test_flags() {
+        let mut f = MemFlash::new();
+        let mut m = FileManager::new(&mut f);
+        m.format();
+        m.mount().unwrap();
+
+        assert_eq!(m.file_flags(1), 0x00);
+
+        let mut w = m.write(1);
+        w.write(&mut m, &[0x00]).unwrap();
+        w.set_flags(0x42);
+        assert_eq!(w.flags(), 0x42);
+
+        assert_eq!(m.file_flags(1), 0x00);
+        m.commit(&mut w).unwrap();
+        assert_eq!(m.file_flags(1), 0x42);
+
+        // when writing to a file, old flags are kept if we don't `.set_flags()`
+        let mut w = m.write(1);
+        w.write(&mut m, &[0x00]).unwrap();
+        assert_eq!(w.flags(), 0x42);
+
+        assert_eq!(m.file_flags(1), 0x42);
+        m.commit(&mut w).unwrap();
+        assert_eq!(m.file_flags(1), 0x42);
+
+        // Remount
+        m.mount().unwrap();
+
+        assert_eq!(m.file_flags(1), 0x42);
+
+        // when truncating the file, flags are kept.
+        m.commit_and_truncate(None, &[(1, 1)]).unwrap();
+        assert_eq!(m.file_flags(1), 0x42);
+
+        // when deleting the file, flags are gone.
+        m.commit_and_truncate(None, &[(1, 1)]).unwrap();
+        assert_eq!(m.file_flags(1), 0x00);
+
+        // Remount
+        m.mount().unwrap();
+
+        assert_eq!(m.file_flags(1), 0x00);
     }
 
     #[test]

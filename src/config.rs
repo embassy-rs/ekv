@@ -32,4 +32,4 @@ pub const FILE_COUNT: usize = BRANCHING_FACTOR * LEVEL_COUNT + 1;
 // ======== Key-value database parameters
 pub const MAX_KEY_SIZE: usize = 64;
 
-pub type FileID = u16;
+pub type FileID = u8;
