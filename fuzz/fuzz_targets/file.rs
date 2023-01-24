@@ -162,7 +162,10 @@ fn fuzz(ops: Input) {
                 }
                 w = None;
 
-                m.commit_and_truncate(None, &[(FILE_ID, offs - trunc_offs)]).unwrap();
+                let mut tx = m.transaction();
+                tx.truncate(FILE_ID, offs - trunc_offs).unwrap();
+                tx.commit().unwrap();
+
                 trunc_offs = offs;
             }
         }

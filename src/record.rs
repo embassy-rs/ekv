@@ -248,16 +248,18 @@ impl<F: Flash> Database<F> {
             }
         }
 
-        let mut truncate = [(0, usize::MAX); BRANCHING_FACTOR];
-        for (i, &file_id) in src.iter().enumerate() {
-            truncate[i] = (file_id, usize::MAX);
+        let mut tx = self.files.transaction();
+        for file_id in src {
+            tx.truncate(file_id, usize::MAX)?;
         }
-        self.files.commit_and_truncate(Some(&mut w), &truncate[..src.len()])?;
+        w.commit(&mut tx)?;
 
         // special case: if compacting from level 0
         if dst == 0 {
-            self.files.rename(0, Self::file_id(0, 0))?;
+            tx.rename(0, Self::file_id(0, 0))?;
         }
+
+        tx.commit()?;
 
         Ok(())
     }

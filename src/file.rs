@@ -58,6 +58,8 @@ impl_bytes!(FileMeta);
 
 #[derive(Debug, Clone, Copy)]
 struct FileState {
+    dirty: bool,
+
     last_page: Option<PagePointer>,
     first_seq: Seq,
     last_seq: Seq,
@@ -77,6 +79,7 @@ pub struct FileManager<F: Flash> {
 impl<F: Flash> FileManager<F> {
     pub fn new(flash: F) -> Self {
         const DUMMY_FILE: FileState = FileState {
+            dirty: false,
             last_page: None,
             first_seq: Seq::ZERO,
             last_seq: Seq::ZERO,
@@ -228,6 +231,7 @@ impl<F: Flash> FileManager<F> {
             }
 
             self.files[file_id as usize] = FileState {
+                dirty: false,
                 last_page: p,
                 first_seq: meta.first_seq,
                 last_seq,
@@ -247,116 +251,24 @@ impl<F: Flash> FileManager<F> {
         Ok(())
     }
 
-    // TODO remove this
-    pub fn rename(&mut self, from: FileID, to: FileID) -> Result<(), Error> {
-        self.files.swap(from as usize, to as usize);
-        self.commit_and_truncate(None, &[])
+    pub fn transaction(&mut self) -> Transaction<'_, F> {
+        Transaction { m: self }
     }
 
+    // convenience method
     pub fn commit(&mut self, w: &mut FileWriter) -> Result<(), Error> {
-        self.commit_and_truncate(Some(w), &[])
-    }
-
-    fn write_file_meta(&mut self, w: &mut PageWriter<MetaHeader>, file_id: FileID) -> Result<(), WriteError> {
-        let f = &self.files[file_id as usize];
-        let meta = FileMeta {
-            file_id,
-            flags: f.flags,
-            first_seq: f.first_seq,
-            last_page_id: f.last_page.as_ref().map(|pp| pp.page_id).into(),
-        };
-        let n = w.write(&mut self.flash, &meta.to_bytes());
-        if n != FileMeta::SIZE {
-            return Err(WriteError::Full);
-        }
-
+        let mut tx = self.transaction();
+        w.commit(&mut tx)?;
+        tx.commit()?;
         Ok(())
     }
 
-    pub fn commit_and_truncate(
-        &mut self,
-        mut w: Option<&mut FileWriter>,
-        truncate: &[(FileID, usize)],
-    ) -> Result<(), Error> {
-        if let Some(w) = &mut w {
-            w.do_commit(self)?;
-        }
-
-        for &(file_id, trunc_len) in truncate {
-            let f = &mut self.files[file_id as usize];
-            let old_f = *f;
-
-            let len = f.last_seq.sub(f.first_seq);
-            let seq = f.first_seq.add(len.min(trunc_len))?;
-
-            let old_seq = f.first_seq;
-            let p = if seq == f.last_seq {
-                f.last_page
-            } else {
-                self.get_file_page(file_id, seq)?.unwrap().prev(self, old_seq)?
-            };
-            self.free_between(p, None, old_seq)?;
-
-            let f = &mut self.files[file_id as usize];
-            if seq == f.last_seq {
-                f.first_seq = Seq::ZERO;
-                f.last_seq = Seq::ZERO;
-                f.last_page = None;
-                f.flags = 0;
-            } else {
-                f.first_seq = seq;
-            }
-
-            trace!(
-                "truncate file_id={:?} trunc_len={:?} old=(first_seq={:?} last_seq={:?}) new=(first_seq={:?} last_seq={:?})",
-                file_id,
-                trunc_len,
-                old_f.first_seq,
-                old_f.last_seq,
-                f.first_seq,
-                f.last_seq
-            );
-        }
-
-        // Try appending to the existing meta page.
-        let res: Result<(), WriteError> = try {
-            let (_, mut mw) = self.pages.write_append(&mut self.flash, self.meta_page_id)?;
-            if let Some(w) = w {
-                self.write_file_meta(&mut mw, w.file_id)?;
-            }
-            for &(file_id, _) in truncate {
-                self.write_file_meta(&mut mw, file_id)?;
-            }
-            mw.commit(&mut self.flash);
-        };
-        match res {
-            Ok(()) => Ok(()),
-            Err(WriteError::Corrupted) => corrupted!(),
-            Err(WriteError::Full) => {
-                // Existing meta page was full. Write a new one.
-
-                let page_id = self.alloc.allocate();
-                trace!("meta: allocated page {:?}", page_id);
-                let mut w = self.write_page(page_id);
-                for file_id in 0..FILE_COUNT as FileID {
-                    // Since we're writing a new page from scratch, no need to
-                    // write metas for empty files.
-                    if self.files[file_id as usize].last_page.is_some() {
-                        self.write_file_meta(&mut w, file_id).unwrap();
-                    }
-                }
-
-                self.meta_seq = self.meta_seq.add(1)?; // TODO handle wraparound
-                w.write_header(&mut self.flash, MetaHeader { seq: self.meta_seq });
-                w.commit(&mut self.flash);
-
-                // free the old one.
-                self.free_page(self.meta_page_id);
-                self.meta_page_id = page_id;
-
-                Ok(())
-            }
-        }
+    // convenience method
+    pub fn truncate(&mut self, file_id: FileID, bytes: usize) -> Result<(), Error> {
+        let mut tx = self.transaction();
+        tx.truncate(file_id, bytes)?;
+        tx.commit()?;
+        Ok(())
     }
 
     fn get_file_page(&mut self, file_id: FileID, seq: Seq) -> Result<Option<PagePointer>, Error> {
@@ -470,6 +382,123 @@ impl<F: Flash> FileManager<F> {
         }
 
         Ok(())
+    }
+}
+
+pub struct Transaction<'a, F: Flash> {
+    m: &'a mut FileManager<F>,
+}
+
+impl<'a, F: Flash> Drop for Transaction<'a, F> {
+    fn drop(&mut self) {
+        // TODO: if a transaction is aborted halfway, mark the FileManager
+        // as inconsistent, so that it is remounted at next operation.
+    }
+}
+
+impl<'a, F: Flash> Transaction<'a, F> {
+    pub fn rename(&mut self, from: FileID, to: FileID) -> Result<(), Error> {
+        self.m.files.swap(from as usize, to as usize);
+        self.m.files[from as usize].dirty = true;
+        self.m.files[to as usize].dirty = true;
+        Ok(())
+    }
+
+    pub fn truncate(&mut self, file_id: FileID, bytes: usize) -> Result<(), Error> {
+        let f = &mut self.m.files[file_id as usize];
+        let old_f = *f;
+
+        let len = f.last_seq.sub(f.first_seq);
+        let seq = f.first_seq.add(len.min(bytes))?;
+
+        let old_seq = f.first_seq;
+        let p = if seq == f.last_seq {
+            f.last_page
+        } else {
+            self.m.get_file_page(file_id, seq)?.unwrap().prev(self.m, old_seq)?
+        };
+        self.m.free_between(p, None, old_seq)?;
+
+        let f = &mut self.m.files[file_id as usize];
+        if seq == f.last_seq {
+            f.first_seq = Seq::ZERO;
+            f.last_seq = Seq::ZERO;
+            f.last_page = None;
+            f.flags = 0;
+        } else {
+            f.first_seq = seq;
+        }
+        f.dirty = true;
+
+        trace!(
+            "truncate file_id={:?} trunc_len={:?} old=(first_seq={:?} last_seq={:?}) new=(first_seq={:?} last_seq={:?})",
+            file_id,
+            bytes,
+            old_f.first_seq,
+            old_f.last_seq,
+            f.first_seq,
+            f.last_seq
+        );
+
+        Ok(())
+    }
+
+    fn write_file_meta(&mut self, w: &mut PageWriter<MetaHeader>, file_id: FileID) -> Result<(), WriteError> {
+        let f = &self.m.files[file_id as usize];
+        let meta = FileMeta {
+            file_id,
+            flags: f.flags,
+            first_seq: f.first_seq,
+            last_page_id: f.last_page.as_ref().map(|pp| pp.page_id).into(),
+        };
+        let n = w.write(&mut self.m.flash, &meta.to_bytes());
+        if n != FileMeta::SIZE {
+            return Err(WriteError::Full);
+        }
+
+        Ok(())
+    }
+
+    pub fn commit(mut self) -> Result<(), Error> {
+        // Try appending to the existing meta page.
+        let res: Result<(), WriteError> = try {
+            let (_, mut mw) = self.m.pages.write_append(&mut self.m.flash, self.m.meta_page_id)?;
+            for file_id in 0..FILE_COUNT {
+                if self.m.files[file_id].dirty {
+                    self.write_file_meta(&mut mw, file_id as FileID)?;
+                }
+            }
+            mw.commit(&mut self.m.flash);
+        };
+
+        match res {
+            Ok(()) => Ok(()),
+            Err(WriteError::Corrupted) => corrupted!(),
+            Err(WriteError::Full) => {
+                // Existing meta page was full. Write a new one.
+
+                let page_id = self.m.alloc.allocate();
+                trace!("meta: allocated page {:?}", page_id);
+                let mut w = self.m.write_page(page_id);
+                for file_id in 0..FILE_COUNT as FileID {
+                    // Since we're writing a new page from scratch, no need to
+                    // write metas for empty files.
+                    if self.m.files[file_id as usize].last_page.is_some() {
+                        self.write_file_meta(&mut w, file_id).unwrap();
+                    }
+                }
+
+                self.m.meta_seq = self.m.meta_seq.add(1)?; // TODO handle wraparound
+                w.write_header(&mut self.m.flash, MetaHeader { seq: self.m.meta_seq });
+                w.commit(&mut self.m.flash);
+
+                // free the old one.
+                self.m.free_page(self.m.meta_page_id);
+                self.m.meta_page_id = page_id;
+
+                Ok(())
+            }
+        }
     }
 }
 
@@ -1062,14 +1091,15 @@ impl FileWriter {
         Ok(())
     }
 
-    fn do_commit(&mut self, m: &mut FileManager<impl Flash>) -> Result<(), Error> {
+    pub fn commit(&mut self, tx: &mut Transaction<'_, impl Flash>) -> Result<(), Error> {
         if let Some(w) = mem::replace(&mut self.writer, None) {
-            self.flush_header(m, w)?;
-            let f = &mut m.files[self.file_id as usize];
+            self.flush_header(tx.m, w)?;
+            let f = &mut tx.m.files[self.file_id as usize];
             let old_f = *f;
             f.last_page = self.last_page;
             f.last_seq = self.seq;
             f.flags = self.flags;
+            f.dirty = true;
 
             trace!(
                 "commit file_id={:?} old=(first_seq={:?} last_seq={:?}) new=(first_seq={:?} last_seq={:?})",
@@ -1304,14 +1334,14 @@ mod tests {
         w.write(&mut m, &[1, 2, 3, 4, 5]).unwrap();
         m.commit(&mut w).unwrap();
 
-        m.commit_and_truncate(None, &[(0, 2)]).unwrap();
+        m.truncate(0, 2).unwrap();
 
         let mut r = m.read(0);
         let mut buf = [0; 3];
         r.read(&mut m, &mut buf).unwrap();
         assert_eq!(buf, [3, 4, 5]);
 
-        m.commit_and_truncate(None, &[(0, 1)]).unwrap();
+        m.truncate(0, 1).unwrap();
 
         let mut r = m.read(0);
         let mut buf = [0; 2];
@@ -1341,21 +1371,24 @@ mod tests {
         let mut w = m.write(0);
         w.write(&mut m, &[6, 7, 8, 9]).unwrap();
 
-        m.commit_and_truncate(Some(&mut w), &[(0, 2)]).unwrap();
+        let mut tx = m.transaction();
+        w.commit(&mut tx).unwrap();
+        tx.truncate(0, 2).unwrap();
+        tx.commit().unwrap();
 
         let mut r = m.read(0);
         let mut buf = [0; 7];
         r.read(&mut m, &mut buf).unwrap();
         assert_eq!(buf, [3, 4, 5, 6, 7, 8, 9]);
 
-        m.commit_and_truncate(None, &[(0, 1)]).unwrap();
+        m.truncate(0, 1).unwrap();
 
         let mut r = m.read(0);
         let mut buf = [0; 6];
         r.read(&mut m, &mut buf).unwrap();
         assert_eq!(buf, [4, 5, 6, 7, 8, 9]);
 
-        m.commit_and_truncate(None, &[(0, 5)]).unwrap();
+        m.truncate(0, 5).unwrap();
 
         let mut r = m.read(0);
         let mut buf = [0; 1];
@@ -1393,7 +1426,7 @@ mod tests {
 
         assert_eq!(m.alloc.is_used(page(1)), true);
 
-        m.commit_and_truncate(None, &[(0, 5)]).unwrap();
+        m.truncate(0, 5).unwrap();
 
         assert_eq!(m.alloc.is_used(page(1)), false);
 
@@ -1423,7 +1456,7 @@ mod tests {
 
         assert_eq!(m.alloc.is_used(page(1)), true);
 
-        m.commit_and_truncate(None, &[(0, 5)]).unwrap();
+        m.truncate(0, 5).unwrap();
 
         assert_eq!(m.alloc.is_used(page(1)), false);
 
@@ -1457,11 +1490,11 @@ mod tests {
         assert_eq!(m.alloc.is_used(page(1)), true);
         assert_eq!(m.alloc.is_used(page(2)), true);
 
-        m.commit_and_truncate(None, &[(0, PAGE_MAX_PAYLOAD_SIZE)]).unwrap();
+        m.truncate(0, PAGE_MAX_PAYLOAD_SIZE).unwrap();
         assert_eq!(m.alloc.is_used(page(1)), false);
         assert_eq!(m.alloc.is_used(page(2)), true);
 
-        m.commit_and_truncate(None, &[(0, PAGE_MAX_PAYLOAD_SIZE)]).unwrap();
+        m.truncate(0, PAGE_MAX_PAYLOAD_SIZE).unwrap();
         assert_eq!(m.alloc.is_used(page(1)), false);
         assert_eq!(m.alloc.is_used(page(2)), false);
 
@@ -1802,11 +1835,11 @@ mod tests {
         assert_eq!(m.file_flags(1), 0x42);
 
         // when truncating the file, flags are kept.
-        m.commit_and_truncate(None, &[(1, 1)]).unwrap();
+        m.truncate(1, 1).unwrap();
         assert_eq!(m.file_flags(1), 0x42);
 
         // when deleting the file, flags are gone.
-        m.commit_and_truncate(None, &[(1, 1)]).unwrap();
+        m.truncate(1, 1).unwrap();
         assert_eq!(m.file_flags(1), 0x00);
 
         // Remount
@@ -2236,7 +2269,7 @@ mod tests {
         assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), false);
         assert_eq!(s.reader().offset(&mut m), 0);
 
-        m.commit_and_truncate(None, &[(1, N * 2)]).unwrap();
+        m.truncate(1, N * 2).unwrap();
 
         // Seek left
         let mut s = FileSearcher::new(m.read(1));
@@ -2246,7 +2279,7 @@ mod tests {
         assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), false);
         assert_eq!(s.reader().offset(&mut m), 0);
 
-        m.commit_and_truncate(None, &[(1, N)]).unwrap();
+        m.truncate(1, N).unwrap();
 
         // Seek left
         let mut s = FileSearcher::new(m.read(1));
@@ -2340,7 +2373,7 @@ mod tests {
                 0 => {
                     let s = rand_between(0, seq_max - seq_min);
                     debug!("{} {}, truncate {}", seq_min, seq_max, s);
-                    m.commit_and_truncate(None, &[(file_id, s)]).unwrap();
+                    m.truncate(file_id, s).unwrap();
                     seq_min += s;
                 }
                 // append
