@@ -83,6 +83,8 @@ fn run(p: Params) -> f64 {
 const OUT_FILE_NAME: &'static str = "area-chart.png";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    env_logger::init();
+
     let max = 500;
 
     let mut data = Vec::new();

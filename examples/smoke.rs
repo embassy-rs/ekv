@@ -27,6 +27,8 @@ fn rand_data(len: usize) -> Vec<u8> {
 }
 
 fn main() {
+    env_logger::init();
+
     println!("Hi there!");
 
     // Generate keys
