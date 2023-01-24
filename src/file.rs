@@ -99,6 +99,10 @@ impl<F: Flash> FileManager<F> {
         self.alloc.used()
     }
 
+    pub fn free_pages(&self) -> usize {
+        PAGE_COUNT - self.alloc.used()
+    }
+
     pub fn flash_mut(&mut self) -> &mut F {
         &mut self.flash
     }
@@ -397,6 +401,16 @@ impl<'a, F: Flash> Drop for Transaction<'a, F> {
 }
 
 impl<'a, F: Flash> Transaction<'a, F> {
+    pub fn set_flags(&mut self, file_id: FileID, flags: u8) -> Result<(), Error> {
+        let f = &mut self.m.files[file_id as usize];
+        // flags only stick to nonempty files.
+        if f.last_page.is_some() && f.flags != flags {
+            f.flags = flags;
+            f.dirty = true;
+        }
+        Ok(())
+    }
+
     pub fn rename(&mut self, from: FileID, to: FileID) -> Result<(), Error> {
         self.m.files.swap(from as usize, to as usize);
         self.m.files[from as usize].dirty = true;
@@ -405,6 +419,10 @@ impl<'a, F: Flash> Transaction<'a, F> {
     }
 
     pub fn truncate(&mut self, file_id: FileID, bytes: usize) -> Result<(), Error> {
+        if bytes == 0 {
+            return Ok(());
+        }
+
         let f = &mut self.m.files[file_id as usize];
         let old_f = *f;
 
@@ -984,7 +1002,6 @@ pub struct FileWriter {
     last_page: Option<PagePointer>,
     seq: Seq,
     writer: Option<PageWriter<DataHeader>>,
-    flags: u8,
 
     at_record_boundary: bool,
     record_boundary: Option<u16>,
@@ -1001,7 +1018,6 @@ impl FileWriter {
             at_record_boundary: true,
             record_boundary: Some(0),
             writer: None,
-            flags: f.flags,
         }
     }
 
@@ -1098,7 +1114,6 @@ impl FileWriter {
             let old_f = *f;
             f.last_page = self.last_page;
             f.last_seq = self.seq;
-            f.flags = self.flags;
             f.dirty = true;
 
             trace!(
@@ -1132,12 +1147,11 @@ impl FileWriter {
         self.at_record_boundary = true;
     }
 
-    pub fn flags(&self) -> u8 {
-        self.flags
-    }
-
-    pub fn set_flags(&mut self, flags: u8) {
-        self.flags = flags;
+    pub fn space_left_on_current_page(&self) -> usize {
+        match &self.writer {
+            None => 0,
+            Some(w) => PAGE_MAX_PAYLOAD_SIZE - w.len(),
+        }
     }
 }
 
@@ -1811,27 +1825,29 @@ mod tests {
 
         assert_eq!(m.file_flags(1), 0x00);
 
+        // flags for empty files stay at 0.
+        let mut tx = m.transaction();
+        tx.set_flags(1, 0x42).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(m.file_flags(1), 0x00);
+
+        // flags for nonempty files get set properly.
         let mut w = m.write(1);
         w.write(&mut m, &[0x00]).unwrap();
-        w.set_flags(0x42);
-        assert_eq!(w.flags(), 0x42);
-
-        assert_eq!(m.file_flags(1), 0x00);
-        m.commit(&mut w).unwrap();
+        let mut tx = m.transaction();
+        w.commit(&mut tx).unwrap();
+        tx.set_flags(1, 0x42).unwrap();
+        tx.commit().unwrap();
         assert_eq!(m.file_flags(1), 0x42);
 
         // when writing to a file, old flags are kept if we don't `.set_flags()`
         let mut w = m.write(1);
         w.write(&mut m, &[0x00]).unwrap();
-        assert_eq!(w.flags(), 0x42);
-
-        assert_eq!(m.file_flags(1), 0x42);
         m.commit(&mut w).unwrap();
         assert_eq!(m.file_flags(1), 0x42);
 
-        // Remount
+        // flags are kept across remounts.
         m.mount().unwrap();
-
         assert_eq!(m.file_flags(1), 0x42);
 
         // when truncating the file, flags are kept.
@@ -1844,7 +1860,6 @@ mod tests {
 
         // Remount
         m.mount().unwrap();
-
         assert_eq!(m.file_flags(1), 0x00);
     }
 
