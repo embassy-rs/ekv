@@ -1,5 +1,6 @@
 use core::cmp::Ordering;
 use core::mem::MaybeUninit;
+use core::slice;
 
 use heapless::Vec;
 
@@ -41,16 +42,21 @@ impl<F: Flash> Database<F> {
 
     pub fn write_transaction(&mut self) -> Result<WriteTransaction<'_, F>, Error> {
         trace!("record wtx: start");
-        let num_compacts = (0..LEVEL_COUNT)
-            .rev()
-            .take_while(|&i| self.find_empty_file_in_level(i).is_none())
-            .count();
 
-        for level in (LEVEL_COUNT - num_compacts)..LEVEL_COUNT {
-            self.compact(level)?;
-        }
+        let file_id = loop {
+            match self.find_empty_file_in_level(LEVEL_COUNT - 1) {
+                Some(f) => break f,
+                None => {
+                    trace!("record wtx: no free file, compacting.");
+                    let did_something = self.compact()?;
 
-        let file_id = self.find_empty_file_in_level(LEVEL_COUNT - 1).unwrap();
+                    // if last level is full, compact should always
+                    // find something to do.
+                    assert!(did_something);
+                }
+            }
+        };
+
         trace!("record wtx: writing file {}", file_id);
         let w = self.files.write(file_id);
         Ok(WriteTransaction {
@@ -75,30 +81,100 @@ impl<F: Flash> Database<F> {
         None
     }
 
-    /// Compact all files within the level into a single file in the upper level.
-    /// Upper level MUST not be full.
-    fn compact(&mut self, level: usize) -> Result<(), Error> {
-        // Open file in higher level for writing.
-        let fw = match level {
-            0 => 0,
-            _ => self.find_empty_file_in_level(level - 1).unwrap(),
-        };
-        assert!(self.files.is_empty(fw));
-        let mut w = self.files.write(fw);
+    fn is_level_full(&self, level: usize) -> bool {
+        (0..BRANCHING_FACTOR).all(|i| !self.files.is_empty(Self::file_id(level, i)))
+    }
 
-        trace!(
-            "record: compacting {}..{} -> {}",
-            Self::file_id(level, 0),
-            Self::file_id(level, BRANCHING_FACTOR - 1),
-            fw
-        );
+    fn is_level_empty(&self, level: usize) -> bool {
+        (0..BRANCHING_FACTOR).all(|i| self.files.is_empty(Self::file_id(level, i)))
+    }
+
+    fn level_file_count(&self, level: usize) -> usize {
+        (0..BRANCHING_FACTOR)
+            .filter(|&i| !self.files.is_empty(Self::file_id(level, i)))
+            .count()
+    }
+
+    fn compact_find_work(&mut self) -> Result<Option<(Vec<FileID, BRANCHING_FACTOR>, FileID)>, Error> {
+        const FILE_FLAG_COMPACT_DEST: u8 = 0x01;
+        const FILE_FLAG_COMPACT_SRC: u8 = 0x02;
+
+        // Check if there's an in-progress compaction that we should continue.
+        match self.files.files_with_flag(FILE_FLAG_COMPACT_DEST).single() {
+            Ok(dst) => {
+                let mut src = Vec::new();
+                for src_file in self.files.files_with_flag(FILE_FLAG_COMPACT_SRC) {
+                    if src_file <= dst {
+                        // All src files should be after dst in the tree.
+                        corrupted!()
+                    }
+
+                    if let Err(_) = src.push(src_file) {
+                        // at most BRANCHING_FACTOR src files
+                        corrupted!()
+                    }
+                }
+                return Ok(Some((src, dst)));
+            }
+            Err(SingleError::MultipleElements) => corrupted!(), // should never happen
+            Err(SingleError::NoElements) => {}                  // no compaction in progress
+        }
+
+        // File 0 should always be empty if there's no in-progress compaction.
+        if !self.files.is_empty(0) {
+            corrupted!()
+        }
+
+        // Otherwise, start a new compaction.
+
+        // Find a level...
+        let lv = (0..LEVEL_COUNT)
+            // ... that we can compact (level above is not full)
+            .filter(|&lv| lv == 0 || !self.is_level_full(lv - 1))
+            // ... and that is the fullest.
+            // In case of a tie, pick the lowest level (max_by_key picks the latest element on ties)
+            .max_by_key(|&lv| self.level_file_count(lv));
+
+        let Some(lv) = lv else {
+            // No compaction work to do.
+            return Ok(None)
+        };
+
+        // destination file
+        let dst = if lv == 0 {
+            0
+        } else {
+            self.find_empty_file_in_level(lv - 1).unwrap()
+        };
+
+        // source files
+        let mut src = Vec::new();
+        for i in 0..BRANCHING_FACTOR {
+            let src_file = Self::file_id(lv, i);
+            if !self.files.is_empty(src_file) {
+                src.push(src_file).unwrap();
+            }
+        }
+
+        if src.is_empty() || (src.len() == 1 && lv == 0) {
+            // No compaction work to do.
+            return Ok(None);
+        }
+
+        Ok(Some((src, dst)))
+    }
+
+    fn do_compact(&mut self, src: Vec<FileID, BRANCHING_FACTOR>, dst: FileID) -> Result<(), Error> {
+        trace!("record: compacting {:?} -> {}", src, dst);
+
+        let mut w = self.files.write(dst);
 
         // Open all files in level for reading.
         let mut r: [MaybeUninit<FileReader>; BRANCHING_FACTOR] = unsafe { MaybeUninit::uninit().assume_init() };
-        for i in 0..BRANCHING_FACTOR {
-            r[i].write(self.files.read(Self::file_id(level, i)));
+        for (i, &file_id) in src.iter().enumerate() {
+            r[i].write(self.files.read(file_id));
         }
-        let r = unsafe { &mut *(&mut r as *mut _ as *mut [FileReader; BRANCHING_FACTOR]) };
+        let r = unsafe { slice::from_raw_parts_mut(r.as_mut_ptr() as *mut FileReader, src.len()) };
 
         let m = &mut self.files;
 
@@ -117,7 +193,7 @@ impl<F: Flash> Database<F> {
         const NEW_VEC: Vec<u8, MAX_KEY_SIZE> = Vec::new();
         let mut k = [NEW_VEC; BRANCHING_FACTOR];
 
-        for i in 0..BRANCHING_FACTOR {
+        for i in 0..src.len() {
             read_key_or_empty(m, &mut r[i], &mut k[i])?;
         }
 
@@ -130,7 +206,7 @@ impl<F: Flash> Database<F> {
             }
 
             let mut bits: u32 = 0;
-            for i in 0..BRANCHING_FACTOR {
+            for i in 0..src.len() {
                 // Ignore files that have already reached the end.
                 if k[i].is_empty() {
                     continue;
@@ -173,16 +249,26 @@ impl<F: Flash> Database<F> {
         }
 
         let mut truncate = [(0, usize::MAX); BRANCHING_FACTOR];
-        for i in 0..BRANCHING_FACTOR {
-            truncate[i] = (Self::file_id(level, i), usize::MAX);
+        for (i, &file_id) in src.iter().enumerate() {
+            truncate[i] = (file_id, usize::MAX);
         }
-        self.files.commit_and_truncate(Some(&mut w), &truncate)?;
+        self.files.commit_and_truncate(Some(&mut w), &truncate[..src.len()])?;
 
-        if level == 0 {
-            self.files.rename(0, Self::file_id(level, 0))?;
+        // special case: if compacting from level 0
+        if dst == 0 {
+            self.files.rename(0, Self::file_id(0, 0))?;
         }
 
         Ok(())
+    }
+
+    fn compact(&mut self) -> Result<bool, Error> {
+        let Some((src, dst)) = self.compact_find_work()? else{
+            return Ok(false)
+        };
+
+        self.do_compact(src, dst)?;
+        Ok(true)
     }
 
     #[cfg(feature = "std")]
@@ -415,6 +501,33 @@ fn read_leb128<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader) -> Result<u
         shift += 7;
     }
     Ok(res)
+}
+
+pub trait Single: Iterator {
+    /// Get the single element from a single-element iterator.
+    fn single(self) -> Result<Self::Item, SingleError>;
+}
+
+/// An error in the execution of [`Single::single`](trait.Single.html#tymethod.single).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum SingleError {
+    /// Asked empty iterator for single element.
+    NoElements,
+    /// Asked iterator with multiple elements for single element.
+    MultipleElements,
+}
+
+impl<I: Iterator> Single for I {
+    fn single(mut self) -> Result<Self::Item, SingleError> {
+        match self.next() {
+            None => Err(SingleError::NoElements),
+            Some(element) => match self.next() {
+                None => Ok(element),
+                Some(_) => Err(SingleError::MultipleElements),
+            },
+        }
+    }
 }
 
 #[cfg(test)]

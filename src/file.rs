@@ -100,7 +100,7 @@ impl<F: Flash> FileManager<F> {
         &mut self.flash
     }
 
-    pub fn is_empty(&mut self, file_id: FileID) -> bool {
+    pub fn is_empty(&self, file_id: FileID) -> bool {
         self.files[file_id as usize].last_page.is_none()
     }
 
@@ -112,8 +112,12 @@ impl<F: Flash> FileManager<F> {
         FileWriter::new(self, file_id)
     }
 
-    pub fn file_flags(&mut self, file_id: FileID) -> u8 {
+    pub fn file_flags(&self, file_id: FileID) -> u8 {
         self.files[file_id as usize].flags
+    }
+
+    pub fn files_with_flag(&self, flag: u8) -> impl Iterator<Item = FileID> + '_ {
+        (0..FILE_COUNT as FileID).filter(move |&i| self.file_flags(i) & flag != 0)
     }
 
     pub fn format(&mut self) {
