@@ -5,10 +5,13 @@ use core::slice;
 use heapless::Vec;
 
 use crate::config::*;
-use crate::file::{FileManager, FileReader, FileSearcher, FileWriter, SeekDirection, Seq};
+use crate::file::{FileManager, FileReader, FileSearcher, FileWriter, SeekDirection, PAGE_MAX_PAYLOAD_SIZE};
 use crate::flash::Flash;
 use crate::page::ReadError;
 use crate::{Error, ReadKeyError};
+
+const FILE_FLAG_COMPACT_DEST: u8 = 0x01;
+const FILE_FLAG_COMPACT_SRC: u8 = 0x02;
 
 pub struct Database<F: Flash> {
     files: FileManager<F>,
@@ -41,13 +44,13 @@ impl<F: Flash> Database<F> {
     }
 
     pub fn write_transaction(&mut self) -> Result<WriteTransaction<'_, F>, Error> {
-        trace!("record wtx: start");
+        debug!("write_transaction: start");
 
         let file_id = loop {
-            match self.find_empty_file_in_level(LEVEL_COUNT - 1) {
+            match self.new_file_in_level(LEVEL_COUNT - 1) {
                 Some(f) => break f,
                 None => {
-                    trace!("record wtx: no free file, compacting.");
+                    debug!("write_transaction: no free file, compacting.");
                     let did_something = self.compact()?;
 
                     // if last level is full, compact should always
@@ -57,7 +60,7 @@ impl<F: Flash> Database<F> {
             }
         };
 
-        trace!("record wtx: writing file {}", file_id);
+        debug!("write_transaction: writing file {}", file_id);
         let w = self.files.write(file_id);
         Ok(WriteTransaction {
             db: self,
@@ -70,23 +73,27 @@ impl<F: Flash> Database<F> {
         (1 + level * BRANCHING_FACTOR + index) as _
     }
 
-    /// Returns None if level is full.
-    fn find_empty_file_in_level(&mut self, level: usize) -> Option<FileID> {
+    /// Get a file_id suitable for appending data to a given level, if possible.
+    fn new_file_in_level(&mut self, level: usize) -> Option<FileID> {
+        // Get the first empty slot that doesn't have a nonempty slot after it.
+        // This is important, because the new file must be the last in the level.
+
+        let mut res = None;
         for i in 0..BRANCHING_FACTOR {
             let file_id = Self::file_id(level, i);
             if self.files.is_empty(file_id) {
-                return Some(file_id);
+                if res.is_none() {
+                    res = Some(file_id)
+                }
+            } else {
+                res = None
             }
         }
-        None
+        res
     }
 
     fn is_level_full(&self, level: usize) -> bool {
         (0..BRANCHING_FACTOR).all(|i| !self.files.is_empty(Self::file_id(level, i)))
-    }
-
-    fn is_level_empty(&self, level: usize) -> bool {
-        (0..BRANCHING_FACTOR).all(|i| self.files.is_empty(Self::file_id(level, i)))
     }
 
     fn level_file_count(&self, level: usize) -> usize {
@@ -96,12 +103,10 @@ impl<F: Flash> Database<F> {
     }
 
     fn compact_find_work(&mut self) -> Result<Option<(Vec<FileID, BRANCHING_FACTOR>, FileID)>, Error> {
-        const FILE_FLAG_COMPACT_DEST: u8 = 0x01;
-        const FILE_FLAG_COMPACT_SRC: u8 = 0x02;
-
         // Check if there's an in-progress compaction that we should continue.
         match self.files.files_with_flag(FILE_FLAG_COMPACT_DEST).single() {
             Ok(dst) => {
+                debug!("compact_find_work: continuing in-progress compact.");
                 let mut src = Vec::new();
                 for src_file in self.files.files_with_flag(FILE_FLAG_COMPACT_SRC) {
                     if src_file <= dst {
@@ -133,18 +138,15 @@ impl<F: Flash> Database<F> {
             .filter(|&lv| lv == 0 || !self.is_level_full(lv - 1))
             // ... and that is the fullest.
             // In case of a tie, pick the lowest level (max_by_key picks the latest element on ties)
-            .max_by_key(|&lv| self.level_file_count(lv));
-
-        let Some(lv) = lv else {
-            // No compaction work to do.
-            return Ok(None)
-        };
+            .max_by_key(|&lv| self.level_file_count(lv))
+            // unwrap is OK because we'll always have at least level 0.
+            .unwrap();
 
         // destination file
         let dst = if lv == 0 {
             0
         } else {
-            self.find_empty_file_in_level(lv - 1).unwrap()
+            self.new_file_in_level(lv - 1).unwrap()
         };
 
         // source files
@@ -158,14 +160,26 @@ impl<F: Flash> Database<F> {
 
         if src.is_empty() || (src.len() == 1 && lv == 0) {
             // No compaction work to do.
+            debug!("compact_find_work: no work.");
             return Ok(None);
         }
 
+        debug!("compact_find_work: starting new compact.");
         Ok(Some((src, dst)))
     }
 
     fn do_compact(&mut self, src: Vec<FileID, BRANCHING_FACTOR>, dst: FileID) -> Result<(), Error> {
-        trace!("record: compacting {:?} -> {}", src, dst);
+        debug!("do_compact {:?} -> {}", src, dst);
+
+        assert!(!src.is_empty());
+
+        if self.files.is_empty(dst) && src.len() == 1 {
+            debug!("do_compact: short-circuit rename");
+            let mut tx = self.files.transaction();
+            tx.rename(src[0], dst)?;
+            tx.commit()?;
+            return Ok(());
+        }
 
         let mut w = self.files.write(dst);
 
@@ -192,12 +206,13 @@ impl<F: Flash> Database<F> {
 
         const NEW_VEC: Vec<u8, MAX_KEY_SIZE> = Vec::new();
         let mut k = [NEW_VEC; BRANCHING_FACTOR];
+        let mut trunc = [0; BRANCHING_FACTOR];
 
         for i in 0..src.len() {
             read_key_or_empty(m, &mut r[i], &mut k[i])?;
         }
 
-        loop {
+        let done = loop {
             fn highest_bit(x: u32) -> Option<usize> {
                 match x {
                     0 => None,
@@ -223,39 +238,70 @@ impl<F: Flash> Database<F> {
                 }
             }
 
-            // All keys empty, means we've finished
-            if bits == 0 {
-                break;
-            }
-
+            trace!("do_compact: bits {:02x}", bits);
             match highest_bit(bits) {
                 // All keys empty, means we've finished
-                None => break,
+                None => break true,
                 Some(i) => {
+                    let val_len = check_corrupted!(read_leb128(m, &mut r[i]));
+
+                    let record_size = record_size(k[i].len(), val_len as usize);
+                    let need_size = record_size + FREE_PAGE_BUFFER_COMMIT * PAGE_MAX_PAYLOAD_SIZE;
+                    let available_size = w.space_left_on_current_page() + m.free_pages() * PAGE_MAX_PAYLOAD_SIZE;
+
+                    trace!(
+                        "do_compact: key_len={} val_len={} space_left={} free_pages={} size={} available_size={}",
+                        k[i].len(),
+                        val_len,
+                        w.space_left_on_current_page(),
+                        m.free_pages(),
+                        need_size,
+                        available_size
+                    );
+
+                    if need_size > available_size {
+                        // it will not fit, so stop.
+                        break false;
+                    }
+
+                    trace!("do_compact: copying key from file {:?}: {:02x?}", src[i], &k[i][..]);
+
                     // Copy value from the highest bit (so newest file)
                     write_key(m, &mut w, &k[i])?;
-                    copy_value(m, &mut r[i], &mut w)?;
-                    read_key_or_empty(m, &mut r[i], &mut k[i])?;
+                    write_leb128(m, &mut w, val_len)?;
+                    copy(m, &mut r[i], &mut w, val_len as usize)?;
 
-                    // Advance all the others
+                    // Advance all readers
                     for j in 0..BRANCHING_FACTOR {
-                        if j != i && (bits & 1 << j) != 0 {
-                            check_corrupted!(skip_value(m, &mut r[j]));
+                        if (bits & 1 << j) != 0 {
+                            if j != i {
+                                check_corrupted!(skip_value(m, &mut r[j]));
+                            }
+                            trunc[j] = r[j].offset(m);
                             read_key_or_empty(m, &mut r[j], &mut k[j])?;
                         }
                     }
                 }
             }
-        }
+        };
+
+        debug!("do_compact: stopped. done={:?}", done);
+
+        let (src_flag, dst_flag) = match done {
+            true => (0, 0),
+            false => (FILE_FLAG_COMPACT_SRC, FILE_FLAG_COMPACT_DEST),
+        };
 
         let mut tx = self.files.transaction();
-        for file_id in src {
-            tx.truncate(file_id, usize::MAX)?;
+        for (i, &file_id) in src.iter().enumerate() {
+            tx.set_flags(file_id, src_flag)?;
+            tx.truncate(file_id, trunc[i])?;
         }
         w.commit(&mut tx)?;
+        tx.set_flags(dst, dst_flag)?;
 
         // special case: if compacting from level 0
-        if dst == 0 {
+        if dst == 0 && done {
             tx.rename(0, Self::file_id(0, 0))?;
         }
 
@@ -276,9 +322,9 @@ impl<F: Flash> Database<F> {
     #[cfg(feature = "std")]
     pub fn dump(&mut self) {
         for file_id in 0..FILE_COUNT {
-            debug!("====== FILE {} ======", file_id);
+            info!("====== FILE {} ======", file_id);
             if let Err(e) = self.dump_file(file_id as _) {
-                debug!("failed to dump file: {:?}", e);
+                info!("failed to dump file: {:?}", e);
             }
         }
     }
@@ -289,7 +335,7 @@ impl<F: Flash> Database<F> {
 
         let mut r = self.files.read(file_id);
         let mut key = Vec::new();
-        let mut value = [0u8; 1024];
+        let mut value = [0u8; 32 * 1024];
         loop {
             let seq = r.curr_seq(&mut self.files);
             match read_key(&mut self.files, &mut r, &mut key) {
@@ -300,7 +346,13 @@ impl<F: Flash> Database<F> {
             let n = check_corrupted!(read_value(&mut self.files, &mut r, &mut value));
             let value = &value[..n];
 
-            debug!("record at seq={:?}: key={:02x?} value={:02x?}", seq, key, value);
+            debug!(
+                "record at seq={:?}: key={:02x?} value_len={} value={:02x?}",
+                seq,
+                key,
+                value.len(),
+                value
+            );
         }
 
         Ok(())
@@ -388,6 +440,23 @@ impl<'a, F: Flash + 'a> WriteTransaction<'a, F> {
         }
         self.last_key = Vec::from_slice(key).unwrap();
 
+        loop {
+            let record_size = record_size(key.len(), value.len());
+            let need_size = record_size + FREE_PAGE_BUFFER * PAGE_MAX_PAYLOAD_SIZE;
+            let available_size =
+                self.w.space_left_on_current_page() + self.db.files.free_pages() * PAGE_MAX_PAYLOAD_SIZE;
+            if need_size <= available_size {
+                break;
+            }
+
+            debug!("free pages less than buffer, compacting.");
+            let did_something = self.db.compact()?;
+            if !did_something {
+                // TODO return nice error.
+                panic!("storage is full");
+            }
+        }
+
         write_record(&mut self.db.files, &mut self.w, key, value)?;
 
         Ok(())
@@ -419,10 +488,7 @@ fn write_value<F: Flash>(m: &mut FileManager<F>, w: &mut FileWriter, value: &[u8
     Ok(())
 }
 
-fn copy_value<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader, w: &mut FileWriter) -> Result<(), Error> {
-    let mut len = check_corrupted!(read_leb128(m, r)) as usize;
-    write_leb128(m, w, len as _)?;
-
+fn copy<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader, w: &mut FileWriter, mut len: usize) -> Result<(), Error> {
     let mut buf = [0; 128];
     while len != 0 {
         let n = len.min(buf.len());
@@ -431,7 +497,6 @@ fn copy_value<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader, w: &mut File
         check_corrupted!(r.read(m, &mut buf[..n]));
         w.write(m, &buf[..n])?;
     }
-    w.record_end();
     Ok(())
 }
 
@@ -451,6 +516,25 @@ fn write_leb128<F: Flash>(m: &mut FileManager<F>, w: &mut FileWriter, mut val: u
         val = rest
     }
     Ok(())
+}
+
+fn leb128_size(mut val: u32) -> usize {
+    let mut size = 0;
+    loop {
+        let rest = val >> 7;
+
+        size += 1;
+
+        if rest == 0 {
+            break;
+        }
+        val = rest
+    }
+    size
+}
+
+fn record_size(key_len: usize, val_len: usize) -> usize {
+    leb128_size(key_len.try_into().unwrap()) + key_len + leb128_size(val_len.try_into().unwrap()) + val_len
 }
 
 fn read_key<F: Flash>(

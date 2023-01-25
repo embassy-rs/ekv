@@ -12,6 +12,7 @@ arbitrary = { version = "1.2.2", features = ["derive"] }
 libfuzzer-sys = "0.4"
 env_logger = "0.10"
 ekv = { path = "..", features= ["std", "log", "_test"]}
+log = { version = "0.4.17" }
 
 
 [[bin]]

@@ -32,4 +32,14 @@ pub const FILE_COUNT: usize = BRANCHING_FACTOR * LEVEL_COUNT + 1;
 // ======== Key-value database parameters
 pub const MAX_KEY_SIZE: usize = 64;
 
+// Compaction will be triggered when there's thisamount of free pages left or less.
+// there's some lower bound to this that guarantees progressive compaction will never get stuck. it's something like:
+// FREE_PAGE_BUFFER_COMMIT + BRANCHING_FACTOR + ceil(max_record_size / page_max_payload_size)
+// TODO: figure out exact formula, prove it
+pub const FREE_PAGE_BUFFER: usize = 13;
+
+// Compaction will be stopped when there's this amount of free pages left.
+// We need at least one page free, in case file commit needs to write a new meta page.
+pub const FREE_PAGE_BUFFER_COMMIT: usize = 1;
+
 pub type FileID = u8;

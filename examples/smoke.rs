@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, HashMap};
 
+use ekv::config::{PAGE_COUNT, PAGE_SIZE};
 use ekv::flash::MemFlash;
 use ekv::Database;
 use rand::Rng;
 
-const KEY_COUNT: usize = 100;
+const KEY_COUNT: usize = 1000;
 const KEY_MIN_LEN: usize = 1;
 const KEY_MAX_LEN: usize = 10;
 const VAL_MIN_LEN: usize = 1;
@@ -30,6 +31,15 @@ fn main() {
     env_logger::init();
 
     println!("Hi there!");
+    println!("flash size: {}", PAGE_SIZE * PAGE_COUNT);
+    println!(
+        "avg data size: {}",
+        (KEY_COUNT + TX_MAX_COUNT) * (KEY_MIN_LEN + KEY_MAX_LEN + VAL_MIN_LEN + VAL_MAX_LEN) / 2
+    );
+    println!(
+        "max data size: {}",
+        (KEY_COUNT + TX_MAX_COUNT) * (KEY_MAX_LEN + VAL_MAX_LEN)
+    );
 
     // Generate keys
     let mut keys = Vec::new();

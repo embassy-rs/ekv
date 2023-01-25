@@ -1,13 +1,13 @@
 #![no_main]
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use ekv::flash::MemFlash;
 use ekv::Database;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-const VAL_MAX_LEN: usize = 543;
+const VAL_MAX_LEN: usize = 2500;
 
 fuzz_target!(|data: Input| { fuzz(data) });
 
@@ -43,6 +43,8 @@ fn fuzz(ops: Input) {
     let mut buf = [0; VAL_MAX_LEN];
 
     for (i, op) in ops.ops.into_iter().enumerate() {
+        log::info!("==================================================== op: {:?}", op);
+
         match op {
             Op::Insert(op) => {
                 if op.value_len > VAL_MAX_LEN {
@@ -64,13 +66,20 @@ fn fuzz(ops: Input) {
             }
         }
 
+        db.dump();
+
         // Check everything
         for (key, val) in &m {
             let mut rtx = db.read_transaction().unwrap();
             let n = rtx.read(key, &mut buf).unwrap();
             let got_val = &buf[..n];
 
-            assert_eq!(val, got_val);
+            if val != got_val {
+                panic!(
+                    "mismatch found!\nkey={:02x?}\nwant val={:02x?}\ngot val={:02x?}",
+                    key, val, got_val
+                );
+            }
         }
     }
 }
