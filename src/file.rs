@@ -7,7 +7,7 @@ use crate::flash::Flash;
 pub use crate::page::ReadError;
 use crate::page::{ChunkHeader, Header, PageHeader, PageManager, PageReader, PageWriter};
 use crate::types::{OptionPageID, PageID};
-use crate::{page, Error};
+use crate::{page, CorruptedError, Error};
 
 pub const PAGE_MAX_PAYLOAD_SIZE: usize = PAGE_SIZE - PageHeader::SIZE - size_of::<DataHeader>() - ChunkHeader::SIZE;
 
@@ -115,7 +115,7 @@ impl<F: Flash> FileManager<F> {
         FileReader::new(self, file_id)
     }
 
-    pub fn write(&mut self, file_id: FileID) -> Result<FileWriter, Error> {
+    pub fn write(&mut self, file_id: FileID) -> Result<FileWriter, Error<F::Error>> {
         FileWriter::new(self, file_id)
     }
 
@@ -127,22 +127,24 @@ impl<F: Flash> FileManager<F> {
         (0..FILE_COUNT as FileID).filter(move |&i| self.file_flags(i) & flag != 0)
     }
 
-    pub fn format(&mut self) {
+    pub fn format(&mut self) -> Result<(), Error<F::Error>> {
         // Erase all meta pages.
         for page_id in 0..PAGE_COUNT {
             let page_id = PageID::from_raw(page_id as _).unwrap();
             if let Ok(h) = self.read_header::<MetaHeader>(page_id) {
-                self.flash.erase(page_id);
+                self.flash.erase(page_id).map_err(Error::Flash)?;
             }
         }
 
         // Write initial meta page.
         let page_id = PageID::from_raw(0).unwrap();
         let mut w = self.write_page(page_id);
-        w.write_header(&mut self.flash, MetaHeader { seq: Seq(1) });
+        w.write_header(&mut self.flash, MetaHeader { seq: Seq(1) })?;
+
+        Ok(())
     }
 
-    pub fn mount(&mut self) -> Result<(), Error> {
+    pub fn mount(&mut self) -> Result<(), Error<F::Error>> {
         self.alloc.reset();
 
         let mut meta_page_id = None;
@@ -260,7 +262,7 @@ impl<F: Flash> FileManager<F> {
     }
 
     // convenience method
-    pub fn commit(&mut self, w: &mut FileWriter) -> Result<(), Error> {
+    pub fn commit(&mut self, w: &mut FileWriter) -> Result<(), Error<F::Error>> {
         let mut tx = self.transaction();
         w.commit(&mut tx)?;
         tx.commit()?;
@@ -268,14 +270,14 @@ impl<F: Flash> FileManager<F> {
     }
 
     // convenience method
-    pub fn truncate(&mut self, file_id: FileID, bytes: usize) -> Result<(), Error> {
+    pub fn truncate(&mut self, file_id: FileID, bytes: usize) -> Result<(), Error<F::Error>> {
         let mut tx = self.transaction();
         tx.truncate(file_id, bytes)?;
         tx.commit()?;
         Ok(())
     }
 
-    fn get_file_page(&mut self, file_id: FileID, seq: Seq) -> Result<Option<PagePointer>, Error> {
+    fn get_file_page(&mut self, file_id: FileID, seq: Seq) -> Result<Option<PagePointer>, Error<F::Error>> {
         let f = &self.files[file_id as usize];
         let Some(last) = f.last_page else {
             return Ok(None)
@@ -292,7 +294,7 @@ impl<F: Flash> FileManager<F> {
         mut from: Option<PagePointer>,
         to: Option<PagePointer>,
         seq_limit: Seq,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Error<F::Error>> {
         while let Some(pp) = from {
             if let Some(to) = to {
                 if pp.page_id == to.page_id {
@@ -305,11 +307,11 @@ impl<F: Flash> FileManager<F> {
         Ok(())
     }
 
-    fn read_page<H: Header>(&mut self, page_id: PageID) -> Result<(H, PageReader), Error> {
+    fn read_page<H: Header>(&mut self, page_id: PageID) -> Result<(H, PageReader), Error<F::Error>> {
         self.pages.read(&mut self.flash, page_id)
     }
 
-    fn read_header<H: Header>(&mut self, page_id: PageID) -> Result<H, Error> {
+    fn read_header<H: Header>(&mut self, page_id: PageID) -> Result<H, Error<F::Error>> {
         self.pages.read_header(&mut self.flash, page_id)
     }
 
@@ -335,7 +337,7 @@ impl<F: Flash> FileManager<F> {
     }
 
     #[cfg(feature = "std")]
-    pub fn dump_file(&mut self, file_id: FileID) -> Result<(), Error> {
+    pub fn dump_file(&mut self, file_id: FileID) -> Result<(), Error<F::Error>> {
         let f = self.files[file_id as usize];
         info!(
             "  seq: {:?}..{:?} len {:?} last_page {:?} flags {:02x}",
@@ -402,7 +404,7 @@ impl<'a, F: Flash> Drop for Transaction<'a, F> {
 }
 
 impl<'a, F: Flash> Transaction<'a, F> {
-    pub fn set_flags(&mut self, file_id: FileID, flags: u8) -> Result<(), Error> {
+    pub fn set_flags(&mut self, file_id: FileID, flags: u8) -> Result<(), Error<F::Error>> {
         let f = &mut self.m.files[file_id as usize];
         // flags only stick to nonempty files.
         if f.last_page.is_some() && f.flags != flags {
@@ -412,14 +414,14 @@ impl<'a, F: Flash> Transaction<'a, F> {
         Ok(())
     }
 
-    pub fn rename(&mut self, from: FileID, to: FileID) -> Result<(), Error> {
+    pub fn rename(&mut self, from: FileID, to: FileID) -> Result<(), Error<F::Error>> {
         self.m.files.swap(from as usize, to as usize);
         self.m.files[from as usize].dirty = true;
         self.m.files[to as usize].dirty = true;
         Ok(())
     }
 
-    pub fn truncate(&mut self, file_id: FileID, bytes: usize) -> Result<(), Error> {
+    pub fn truncate(&mut self, file_id: FileID, bytes: usize) -> Result<(), Error<F::Error>> {
         if bytes == 0 {
             return Ok(());
         }
@@ -462,7 +464,7 @@ impl<'a, F: Flash> Transaction<'a, F> {
         Ok(())
     }
 
-    fn write_file_meta(&mut self, w: &mut PageWriter<MetaHeader>, file_id: FileID) -> Result<(), WriteError> {
+    fn write_file_meta(&mut self, w: &mut PageWriter<MetaHeader>, file_id: FileID) -> Result<(), WriteError<F::Error>> {
         let f = &self.m.files[file_id as usize];
         let meta = FileMeta {
             file_id,
@@ -470,7 +472,7 @@ impl<'a, F: Flash> Transaction<'a, F> {
             first_seq: f.first_seq,
             last_page_id: f.last_page.as_ref().map(|pp| pp.page_id).into(),
         };
-        let n = w.write(&mut self.m.flash, &meta.to_bytes());
+        let n = w.write(&mut self.m.flash, &meta.to_bytes())?;
         if n != FileMeta::SIZE {
             return Err(WriteError::Full);
         }
@@ -478,20 +480,21 @@ impl<'a, F: Flash> Transaction<'a, F> {
         Ok(())
     }
 
-    pub fn commit(mut self) -> Result<(), Error> {
+    pub fn commit(mut self) -> Result<(), Error<F::Error>> {
         // Try appending to the existing meta page.
-        let res: Result<(), WriteError> = try {
+        let res: Result<(), WriteError<F::Error>> = try {
             let (_, mut mw) = self.m.pages.write_append(&mut self.m.flash, self.m.meta_page_id)?;
             for file_id in 0..FILE_COUNT {
                 if self.m.files[file_id].dirty {
                     self.write_file_meta(&mut mw, file_id as FileID)?;
                 }
             }
-            mw.commit(&mut self.m.flash);
+            mw.commit(&mut self.m.flash)?;
         };
 
         match res {
             Ok(()) => Ok(()),
+            Err(WriteError::Flash(e)) => return Err(Error::Flash(e)),
             Err(WriteError::Corrupted) => corrupted!(),
             Err(WriteError::Full) => {
                 // Existing meta page was full. Write a new one.
@@ -508,8 +511,8 @@ impl<'a, F: Flash> Transaction<'a, F> {
                 }
 
                 self.m.meta_seq = self.m.meta_seq.add(1)?; // TODO handle wraparound
-                w.write_header(&mut self.m.flash, MetaHeader { seq: self.m.meta_seq });
-                w.commit(&mut self.m.flash);
+                w.write_header(&mut self.m.flash, MetaHeader { seq: self.m.meta_seq })?;
+                w.commit(&mut self.m.flash)?;
 
                 // free the old one.
                 self.m.free_page(self.m.meta_page_id);
@@ -529,7 +532,7 @@ struct PagePointer {
 }
 
 impl PagePointer {
-    fn prev(self, m: &mut FileManager<impl Flash>, seq_limit: Seq) -> Result<Option<PagePointer>, Error> {
+    fn prev<F: Flash>(self, m: &mut FileManager<F>, seq_limit: Seq) -> Result<Option<PagePointer>, Error<F::Error>> {
         if self.header.seq <= seq_limit {
             return Ok(None);
         }
@@ -560,7 +563,7 @@ impl PagePointer {
         }))
     }
 
-    fn prev_seq(mut self, m: &mut FileManager<impl Flash>, seq: Seq) -> Result<PagePointer, Error> {
+    fn prev_seq<F: Flash>(mut self, m: &mut FileManager<F>, seq: Seq) -> Result<PagePointer, Error<F::Error>> {
         while self.header.seq > seq {
             let i = skiplist_index(seq, self.header.seq);
             let Some(p2) = self.header.skiplist[i].into_option() else {
@@ -607,14 +610,14 @@ struct ReaderStateReading {
 }
 
 impl FileReader {
-    fn new(_m: &mut FileManager<impl Flash>, file_id: FileID) -> Self {
+    fn new<F: Flash>(_m: &mut FileManager<F>, file_id: FileID) -> Self {
         Self {
             file_id,
             state: ReaderState::Created,
         }
     }
 
-    pub fn curr_seq(&mut self, m: &mut FileManager<impl Flash>) -> Seq {
+    pub fn curr_seq<F: Flash>(&mut self, m: &mut FileManager<F>) -> Seq {
         match &self.state {
             ReaderState::Created => m.files[self.file_id as usize].first_seq,
             ReaderState::Reading(s) => s.seq,
@@ -628,7 +631,7 @@ impl FileReader {
             _ => None,
         }
     }
-    fn next_page(&mut self, m: &mut FileManager<impl Flash>) -> Result<(), Error> {
+    fn next_page<F: Flash>(&mut self, m: &mut FileManager<F>) -> Result<(), Error<F::Error>> {
         let seq = self.curr_seq(m);
 
         let prev_page_id = self.page_id();
@@ -644,7 +647,7 @@ impl FileReader {
         Ok(())
     }
 
-    fn seek_seq(&mut self, m: &mut FileManager<impl Flash>, seq: Seq) -> Result<(), Error> {
+    fn seek_seq<F: Flash>(&mut self, m: &mut FileManager<F>, seq: Seq) -> Result<(), Error<F::Error>> {
         self.state = match m.get_file_page(self.file_id, seq)? {
             Some(pp) => {
                 let (h, mut r) = m.read_page::<DataHeader>(pp.page_id).inspect_err(|e| {
@@ -667,7 +670,7 @@ impl FileReader {
         Ok(())
     }
 
-    pub fn read(&mut self, m: &mut FileManager<impl Flash>, mut data: &mut [u8]) -> Result<(), ReadError> {
+    pub fn read<F: Flash>(&mut self, m: &mut FileManager<F>, mut data: &mut [u8]) -> Result<(), ReadError<F::Error>> {
         while !data.is_empty() {
             match &mut self.state {
                 ReaderState::Finished => return Err(ReadError::Eof),
@@ -688,7 +691,7 @@ impl FileReader {
         Ok(())
     }
 
-    pub fn skip(&mut self, m: &mut FileManager<impl Flash>, mut len: usize) -> Result<(), ReadError> {
+    pub fn skip<F: Flash>(&mut self, m: &mut FileManager<F>, mut len: usize) -> Result<(), ReadError<F::Error>> {
         // advance within the current page.
         if let ReaderState::Reading(s) = &mut self.state {
             // Only worth trying if the skip might not exhaust the current page
@@ -718,12 +721,12 @@ impl FileReader {
         Ok(())
     }
 
-    pub fn offset(&mut self, m: &mut FileManager<impl Flash>) -> usize {
+    pub fn offset<F: Flash>(&mut self, m: &mut FileManager<F>) -> usize {
         let first_seq = m.files[self.file_id as usize].first_seq;
         self.curr_seq(m).sub(first_seq)
     }
 
-    pub fn seek(&mut self, m: &mut FileManager<impl Flash>, offs: usize) -> Result<(), ReadError> {
+    pub fn seek<F: Flash>(&mut self, m: &mut FileManager<F>, offs: usize) -> Result<(), ReadError<F::Error>> {
         let first_seq = m.files[self.file_id as usize].first_seq;
         let new_seq = first_seq.add(offs).map_err(|_| ReadError::Eof)?;
         if new_seq > m.files[self.file_id as usize].last_seq {
@@ -737,14 +740,16 @@ impl FileReader {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub enum SearchSeekError {
+pub enum SearchSeekError<E> {
+    Flash(E),
     TooMuchLeft,
     Corrupted,
 }
 
-impl From<Error> for SearchSeekError {
-    fn from(e: Error) -> Self {
+impl<E> From<Error<E>> for SearchSeekError<E> {
+    fn from(e: Error<E>) -> Self {
         match e {
+            Error::Flash(e) => Self::Flash(e),
             Error::Corrupted => Self::Corrupted,
         }
     }
@@ -752,14 +757,16 @@ impl From<Error> for SearchSeekError {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub enum WriteError {
+pub enum WriteError<E> {
+    Flash(E),
     Full,
     Corrupted,
 }
 
-impl From<Error> for WriteError {
-    fn from(e: Error) -> Self {
+impl<E> From<Error<E>> for WriteError<E> {
+    fn from(e: Error<E>) -> Self {
         match e {
+            Error::Flash(e) => Self::Flash(e),
             Error::Corrupted => Self::Corrupted,
         }
     }
@@ -798,7 +805,11 @@ impl FileSearcher {
         }
     }
 
-    pub fn start(&mut self, m: &mut FileManager<impl Flash>) -> Result<bool, Error> {
+    pub fn reader(&mut self) -> &mut FileReader {
+        &mut self.r
+    }
+
+    pub fn start<F: Flash>(&mut self, m: &mut FileManager<F>) -> Result<bool, Error<F::Error>> {
         let f = &m.files[self.r.file_id as usize];
         self.result = f.first_seq;
         self.left = f.first_seq;
@@ -831,11 +842,7 @@ impl FileSearcher {
         }
     }
 
-    pub fn reader(&mut self) -> &mut FileReader {
-        &mut self.r
-    }
-
-    fn really_seek(&mut self, m: &mut FileManager<impl Flash>) -> Result<bool, Error> {
+    fn really_seek<F: Flash>(&mut self, m: &mut FileManager<F>) -> Result<bool, Error<F::Error>> {
         let left = self.left.add(1).unwrap();
         let mut i = if left >= self.right {
             0
@@ -850,6 +857,7 @@ impl FileSearcher {
                     if seq >= self.left {
                         match self.seek_to_page(m, page_id, seq) {
                             Ok(()) => return Ok(true),
+                            Err(SearchSeekError::Flash(e)) => return Err(Error::Flash(e)),
                             Err(SearchSeekError::Corrupted) => corrupted!(),
                             Err(SearchSeekError::TooMuchLeft) => {
                                 let new_left = seq.add(1).unwrap();
@@ -872,12 +880,12 @@ impl FileSearcher {
         }
     }
 
-    fn seek_to_page(
+    fn seek_to_page<F: Flash>(
         &mut self,
-        m: &mut FileManager<impl Flash>,
+        m: &mut FileManager<F>,
         mut page_id: PageID,
         target_seq: Seq,
-    ) -> Result<(), SearchSeekError> {
+    ) -> Result<(), SearchSeekError<F::Error>> {
         trace!("search: seek_to_page page_id={:?} target_seq={:?}", page_id, target_seq,);
 
         let mut right_limit = self.right;
@@ -980,7 +988,7 @@ impl FileSearcher {
         Ok(())
     }
 
-    pub fn seek(&mut self, m: &mut FileManager<impl Flash>, dir: SeekDirection) -> Result<bool, Error> {
+    pub fn seek<F: Flash>(&mut self, m: &mut FileManager<F>, dir: SeekDirection) -> Result<bool, Error<F::Error>> {
         match dir {
             SeekDirection::Left => {
                 trace!("search seek left");
@@ -1013,7 +1021,7 @@ pub struct FileWriter {
 }
 
 impl FileWriter {
-    fn new(m: &mut FileManager<impl Flash>, file_id: FileID) -> Result<Self, Error> {
+    fn new<F: Flash>(m: &mut FileManager<F>, file_id: FileID) -> Result<Self, Error<F::Error>> {
         let f = m.files[file_id as usize];
 
         let mut this = Self {
@@ -1063,7 +1071,7 @@ impl FileWriter {
                     }
                     let mut data = &buf[..n];
                     while !data.is_empty() {
-                        let n = w.write(&mut m.flash, data);
+                        let n = w.write(&mut m.flash, data)?;
                         data = &data[n..];
 
                         // the new page can't get full, because we're not writing more
@@ -1084,17 +1092,21 @@ impl FileWriter {
         Ok(this)
     }
 
-    fn curr_seq(&mut self, m: &mut FileManager<impl Flash>) -> Seq {
+    fn curr_seq<F: Flash>(&mut self, m: &mut FileManager<F>) -> Seq {
         let n = self.writer.as_ref().map(|w| w.len()).unwrap_or(0);
         self.seq.add(n).unwrap()
     }
 
-    pub fn offset(&mut self, m: &mut FileManager<impl Flash>) -> usize {
+    pub fn offset<F: Flash>(&mut self, m: &mut FileManager<F>) -> usize {
         let first_seq = m.files[self.file_id as usize].first_seq;
         self.curr_seq(m).sub(first_seq)
     }
 
-    fn flush_header(&mut self, m: &mut FileManager<impl Flash>, mut w: PageWriter<DataHeader>) -> Result<(), Error> {
+    fn flush_header<F: Flash>(
+        &mut self,
+        m: &mut FileManager<F>,
+        mut w: PageWriter<DataHeader>,
+    ) -> Result<(), Error<F::Error>> {
         let page_size = w.len();
         let page_id = w.page_id();
         let mut skiplist = [OptionPageID::none(); SKIPLIST_LEN];
@@ -1116,8 +1128,8 @@ impl FileWriter {
             skiplist,
             record_boundary,
         };
-        w.write_header(&mut m.flash, header);
-        w.commit(&mut m.flash);
+        w.write_header(&mut m.flash, header)?;
+        w.commit(&mut m.flash)?;
 
         trace!(
             "flush_header: page={:?} h={:?} record_boundary={:?}",
@@ -1137,7 +1149,7 @@ impl FileWriter {
         Ok(())
     }
 
-    fn next_page(&mut self, m: &mut FileManager<impl Flash>) -> Result<(), Error> {
+    fn next_page<F: Flash>(&mut self, m: &mut FileManager<F>) -> Result<(), Error<F::Error>> {
         if let Some(w) = mem::replace(&mut self.writer, None) {
             self.flush_header(m, w)?;
         }
@@ -1148,7 +1160,7 @@ impl FileWriter {
         Ok(())
     }
 
-    pub fn write(&mut self, m: &mut FileManager<impl Flash>, mut data: &[u8]) -> Result<(), Error> {
+    pub fn write<F: Flash>(&mut self, m: &mut FileManager<F>, mut data: &[u8]) -> Result<(), Error<F::Error>> {
         while !data.is_empty() {
             match &mut self.writer {
                 None => {
@@ -1156,7 +1168,7 @@ impl FileWriter {
                     continue;
                 }
                 Some(w) => {
-                    let n = w.write(&mut m.flash, data);
+                    let n = w.write(&mut m.flash, data)?;
                     data = &data[n..];
                     if n == 0 {
                         self.next_page(m)?;
@@ -1170,7 +1182,7 @@ impl FileWriter {
         Ok(())
     }
 
-    pub fn commit(&mut self, tx: &mut Transaction<'_, impl Flash>) -> Result<(), Error> {
+    pub fn commit<F: Flash>(&mut self, tx: &mut Transaction<'_, F>) -> Result<(), Error<F::Error>> {
         if let Some(w) = mem::replace(&mut self.writer, None) {
             self.flush_header(tx.m, w)?;
             let f = &mut tx.m.files[self.file_id as usize];
@@ -1196,7 +1208,7 @@ impl FileWriter {
         Ok(())
     }
 
-    pub fn discard(&mut self, m: &mut FileManager<impl Flash>) {
+    pub fn discard<F: Flash>(&mut self, m: &mut FileManager<F>) {
         if let Some(w) = &self.writer {
             // Free the page we're writing now (not yet committed)
             let page_id = w.page_id();
@@ -1248,7 +1260,7 @@ impl Seq {
         self.0.checked_sub(other.0).unwrap() as _
     }
 
-    fn add(self, offs: usize) -> Result<Self, Error> {
+    fn add(self, offs: usize) -> Result<Self, CorruptedError> {
         let Ok(offs_u32) = offs.try_into() else {
             debug!("seq add overflow, offs doesn't fit u32: {}", offs);
             corrupted!();
@@ -1326,7 +1338,7 @@ mod tests {
     fn test_read_write() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format();
+        m.format().unwrap();
         m.mount().unwrap();
 
         let data = dummy_data(24);
@@ -1353,7 +1365,7 @@ mod tests {
     fn test_read_write_long() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format();
+        m.format().unwrap();
         m.mount().unwrap();
 
         let data = dummy_data(23456);
@@ -1381,7 +1393,7 @@ mod tests {
     fn test_append() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format();
+        m.format().unwrap();
         m.mount().unwrap();
 
         let mut w = m.write(0).unwrap();
@@ -1409,7 +1421,7 @@ mod tests {
     fn test_truncate() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format();
+        m.format().unwrap();
         m.mount().unwrap();
 
         let mut w = m.write(0).unwrap();
@@ -1443,7 +1455,7 @@ mod tests {
     fn test_append_truncate() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format();
+        m.format().unwrap();
         m.mount().unwrap();
 
         let mut w = m.write(0).unwrap();
@@ -1499,7 +1511,7 @@ mod tests {
     fn test_delete() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format();
+        m.format().unwrap();
         m.mount().unwrap();
 
         let mut w = m.write(0).unwrap();
@@ -1527,7 +1539,7 @@ mod tests {
     fn test_truncate_alloc() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format();
+        m.format().unwrap();
         m.mount().unwrap();
 
         assert_eq!(m.alloc.is_used(page(1)), false);
@@ -1557,7 +1569,7 @@ mod tests {
     fn test_truncate_alloc_2() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format();
+        m.format().unwrap();
         m.mount().unwrap();
 
         assert_eq!(m.alloc.is_used(page(1)), false);
@@ -1596,7 +1608,7 @@ mod tests {
     fn test_append_no_commit() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format();
+        m.format().unwrap();
         m.mount().unwrap();
 
         let mut w = m.write(0).unwrap();
@@ -1629,7 +1641,7 @@ mod tests {
     fn test_read_unwritten() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format();
+        m.format().unwrap();
         m.mount().unwrap();
 
         let mut r = m.read(0);
@@ -1642,7 +1654,7 @@ mod tests {
     fn test_read_uncommitted() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format();
+        m.format().unwrap();
         m.mount().unwrap();
 
         let data = dummy_data(1234);
@@ -1661,7 +1673,7 @@ mod tests {
     fn test_alloc_commit() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format();
+        m.format().unwrap();
         m.mount().unwrap();
 
         assert_eq!(m.alloc.is_used(page(1)), false);
@@ -1700,7 +1712,7 @@ mod tests {
     fn test_alloc_discard_1page() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format();
+        m.format().unwrap();
         m.mount().unwrap();
 
         assert_eq!(m.alloc.is_used(page(0)), true);
@@ -1731,7 +1743,7 @@ mod tests {
     fn test_alloc_discard_2page() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format();
+        m.format().unwrap();
         m.mount().unwrap();
 
         assert_eq!(m.alloc.is_used(page(0)), true);
@@ -1769,7 +1781,7 @@ mod tests {
     fn test_alloc_discard_3page() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format();
+        m.format().unwrap();
         m.mount().unwrap();
 
         assert_eq!(m.alloc.is_used(page(0)), true);
@@ -1806,7 +1818,7 @@ mod tests {
     fn test_append_alloc_discard() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format();
+        m.format().unwrap();
         m.mount().unwrap();
 
         assert_eq!(m.alloc.is_used(page(0)), true);
@@ -1846,7 +1858,7 @@ mod tests {
     fn test_write_2_files() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format();
+        m.format().unwrap();
         m.mount().unwrap();
 
         let data = dummy_data(32);
@@ -1888,7 +1900,7 @@ mod tests {
     fn test_flags() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format();
+        m.format().unwrap();
         m.mount().unwrap();
 
         assert_eq!(m.file_flags(1), 0x00);
@@ -1935,7 +1947,7 @@ mod tests {
     fn test_record_boundary_one() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format();
+        m.format().unwrap();
         m.mount().unwrap();
 
         let mut w = m.write(1).unwrap();
@@ -1952,7 +1964,7 @@ mod tests {
     fn test_record_boundary_two() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format();
+        m.format().unwrap();
         m.mount().unwrap();
 
         let mut w = m.write(1).unwrap();
@@ -1975,7 +1987,7 @@ mod tests {
     fn test_record_boundary_three() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format();
+        m.format().unwrap();
         m.mount().unwrap();
 
         let mut w = m.write(1).unwrap();
@@ -2000,7 +2012,7 @@ mod tests {
     fn test_record_boundary_overlong() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format();
+        m.format().unwrap();
         m.mount().unwrap();
 
         let mut w = m.write(1).unwrap();
@@ -2027,7 +2039,7 @@ mod tests {
     fn test_record_boundary_overlong_2() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format();
+        m.format().unwrap();
         m.mount().unwrap();
 
         let mut w = m.write(1).unwrap();
@@ -2064,7 +2076,7 @@ mod tests {
     fn test_record_boundary_overlong_3() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format();
+        m.format().unwrap();
         m.mount().unwrap();
 
         let mut w = m.write(1).unwrap();
@@ -2108,7 +2120,7 @@ mod tests {
     fn test_record_boundary_exact_page() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format();
+        m.format().unwrap();
         m.mount().unwrap();
 
         let mut w = m.write(1).unwrap();
@@ -2137,7 +2149,7 @@ mod tests {
     fn test_search_empty() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format();
+        m.format().unwrap();
         m.mount().unwrap();
 
         let mut s = FileSearcher::new(m.read(1));
@@ -2149,7 +2161,7 @@ mod tests {
     fn test_search_one_page() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format();
+        m.format().unwrap();
         m.mount().unwrap();
 
         let mut w = m.write(1).unwrap();
@@ -2169,7 +2181,7 @@ mod tests {
     fn test_search_two_pages() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format();
+        m.format().unwrap();
         m.mount().unwrap();
 
         let mut w = m.write(1).unwrap();
@@ -2196,7 +2208,7 @@ mod tests {
     fn test_search_no_boundary_on_second_page() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format();
+        m.format().unwrap();
         m.mount().unwrap();
 
         let mut w = m.write(1).unwrap();
@@ -2215,7 +2227,7 @@ mod tests {
     fn test_search_no_boundary_more_pages() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format();
+        m.format().unwrap();
         m.mount().unwrap();
 
         let mut w = m.write(1).unwrap();
@@ -2234,7 +2246,7 @@ mod tests {
     fn test_search_no_boundary_more_pages_two() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format();
+        m.format().unwrap();
         m.mount().unwrap();
 
         let mut w = m.write(1).unwrap();
@@ -2266,7 +2278,7 @@ mod tests {
     fn test_search_no_boundary_more_pages_three() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format();
+        m.format().unwrap();
         m.mount().unwrap();
 
         let mut w = m.write(1).unwrap();
@@ -2325,7 +2337,7 @@ mod tests {
     fn test_search_truncate() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format();
+        m.format().unwrap();
         m.mount().unwrap();
 
         const N: usize = PAGE_MAX_PAYLOAD_SIZE + 3;
@@ -2374,7 +2386,7 @@ mod tests {
     fn test_search_long() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format();
+        m.format().unwrap();
         m.mount().unwrap();
 
         let count = 20000 / 4;
@@ -2441,7 +2453,7 @@ mod tests {
     fn test_smoke() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format();
+        m.format().unwrap();
         m.mount().unwrap();
 
         let mut seq_min = 0;

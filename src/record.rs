@@ -20,12 +20,13 @@ pub struct Database<F: Flash> {
 }
 
 impl<F: Flash> Database<F> {
-    pub fn format(flash: F) {
+    pub fn format(flash: F) -> Result<(), Error<F::Error>> {
         let mut m = FileManager::new(flash);
-        m.format();
+        m.format()?;
+        Ok(())
     }
 
-    pub fn new(flash: F) -> Result<Self, Error> {
+    pub fn new(flash: F) -> Result<Self, Error<F::Error>> {
         debug!("creating database!");
         debug!(
             "page_size={}, page_count={}, total_size={}",
@@ -73,11 +74,11 @@ impl<F: Flash> Database<F> {
         self.files.flash_mut()
     }
 
-    pub fn read_transaction(&mut self) -> Result<ReadTransaction<'_, F>, Error> {
+    pub fn read_transaction(&mut self) -> Result<ReadTransaction<'_, F>, Error<F::Error>> {
         Ok(ReadTransaction { db: self })
     }
 
-    pub fn write_transaction(&mut self) -> Result<WriteTransaction<'_, F>, Error> {
+    pub fn write_transaction(&mut self) -> Result<WriteTransaction<'_, F>, Error<F::Error>> {
         debug!("write_transaction: start");
 
         let file_id = loop {
@@ -136,7 +137,7 @@ impl<F: Flash> Database<F> {
             .count()
     }
 
-    fn compact_find_work(&mut self) -> Result<Option<(Vec<FileID, BRANCHING_FACTOR>, FileID)>, Error> {
+    fn compact_find_work(&mut self) -> Result<Option<(Vec<FileID, BRANCHING_FACTOR>, FileID)>, Error<F::Error>> {
         // Check if there's an in-progress compaction that we should continue.
         match self.files.files_with_flag(FILE_FLAG_COMPACT_DEST).single() {
             Ok(dst) => {
@@ -202,7 +203,7 @@ impl<F: Flash> Database<F> {
         Ok(Some((src, dst)))
     }
 
-    fn do_compact(&mut self, src: Vec<FileID, BRANCHING_FACTOR>, dst: FileID) -> Result<(), Error> {
+    fn do_compact(&mut self, src: Vec<FileID, BRANCHING_FACTOR>, dst: FileID) -> Result<(), Error<F::Error>> {
         debug!("do_compact {:?} -> {}", src, dst);
 
         assert!(!src.is_empty());
@@ -230,9 +231,10 @@ impl<F: Flash> Database<F> {
             m: &mut FileManager<F>,
             r: &mut FileReader,
             buf: &mut Vec<u8, MAX_KEY_SIZE>,
-        ) -> Result<(), Error> {
+        ) -> Result<(), Error<F::Error>> {
             match read_key(m, r, buf) {
                 Ok(()) => Ok(()),
+                Err(ReadError::Flash(e)) => Err(Error::Flash(e)),
                 Err(ReadError::Eof) => Ok(buf.truncate(0)),
                 Err(ReadError::Corrupted) => corrupted!(),
             }
@@ -352,7 +354,7 @@ impl<F: Flash> Database<F> {
         Ok(())
     }
 
-    fn compact(&mut self) -> Result<bool, Error> {
+    fn compact(&mut self) -> Result<bool, Error<F::Error>> {
         let Some((src, dst)) = self.compact_find_work()? else{
             return Ok(false)
         };
@@ -372,7 +374,7 @@ impl<F: Flash> Database<F> {
     }
 
     #[cfg(feature = "std")]
-    pub fn dump_file(&mut self, file_id: FileID) -> Result<(), Error> {
+    pub fn dump_file(&mut self, file_id: FileID) -> Result<(), Error<F::Error>> {
         self.files.dump_file(file_id)?;
 
         let mut r = self.files.read(file_id);
@@ -382,6 +384,7 @@ impl<F: Flash> Database<F> {
             let seq = r.curr_seq(&mut self.files);
             match read_key(&mut self.files, &mut r, &mut key) {
                 Ok(()) => {}
+                Err(ReadError::Flash(e)) => return Err(Error::Flash(e)),
                 Err(ReadError::Eof) => break,
                 Err(ReadError::Corrupted) => corrupted!(),
             }
@@ -406,7 +409,7 @@ pub struct ReadTransaction<'a, F: Flash + 'a> {
 }
 
 impl<'a, F: Flash + 'a> ReadTransaction<'a, F> {
-    pub fn read(&mut self, key: &[u8], value: &mut [u8]) -> Result<usize, ReadKeyError> {
+    pub fn read(&mut self, key: &[u8], value: &mut [u8]) -> Result<usize, ReadKeyError<F::Error>> {
         for file_id in (0..FILE_COUNT).rev() {
             if let Some(res) = self.read_in_file(file_id as _, key, value)? {
                 return Ok(res);
@@ -415,7 +418,12 @@ impl<'a, F: Flash + 'a> ReadTransaction<'a, F> {
         Ok(0)
     }
 
-    fn read_in_file(&mut self, file_id: FileID, key: &[u8], value: &mut [u8]) -> Result<Option<usize>, ReadKeyError> {
+    fn read_in_file(
+        &mut self,
+        file_id: FileID,
+        key: &[u8],
+        value: &mut [u8],
+    ) -> Result<Option<usize>, ReadKeyError<F::Error>> {
         let r = self.db.files.read(file_id);
         let m = &mut self.db.files;
         let mut s = FileSearcher::new(r);
@@ -469,7 +477,7 @@ pub struct WriteTransaction<'a, F: Flash + 'a> {
 }
 
 impl<'a, F: Flash + 'a> WriteTransaction<'a, F> {
-    pub fn write(&mut self, key: &[u8], value: &[u8]) -> Result<(), WriteKeyError> {
+    pub fn write(&mut self, key: &[u8], value: &[u8]) -> Result<(), WriteKeyError<F::Error>> {
         if key.is_empty() {
             panic!("key cannot be empty.")
         }
@@ -504,25 +512,30 @@ impl<'a, F: Flash + 'a> WriteTransaction<'a, F> {
         Ok(())
     }
 
-    pub fn commit(mut self) -> Result<(), Error> {
+    pub fn commit(mut self) -> Result<(), Error<F::Error>> {
         self.db.files.commit(&mut self.w)
     }
 }
 
-fn write_record<F: Flash>(m: &mut FileManager<F>, w: &mut FileWriter, key: &[u8], value: &[u8]) -> Result<(), Error> {
+fn write_record<F: Flash>(
+    m: &mut FileManager<F>,
+    w: &mut FileWriter,
+    key: &[u8],
+    value: &[u8],
+) -> Result<(), Error<F::Error>> {
     write_key(m, w, key)?;
     write_value(m, w, value)?;
     Ok(())
 }
 
-fn write_key<F: Flash>(m: &mut FileManager<F>, w: &mut FileWriter, key: &[u8]) -> Result<(), Error> {
+fn write_key<F: Flash>(m: &mut FileManager<F>, w: &mut FileWriter, key: &[u8]) -> Result<(), Error<F::Error>> {
     let key_len: u32 = key.len().try_into().unwrap();
     write_leb128(m, w, key_len)?;
     w.write(m, key)?;
     Ok(())
 }
 
-fn write_value<F: Flash>(m: &mut FileManager<F>, w: &mut FileWriter, value: &[u8]) -> Result<(), Error> {
+fn write_value<F: Flash>(m: &mut FileManager<F>, w: &mut FileWriter, value: &[u8]) -> Result<(), Error<F::Error>> {
     let value_len: u32 = value.len().try_into().unwrap();
     write_leb128(m, w, value_len)?;
     w.write(m, value)?;
@@ -530,7 +543,12 @@ fn write_value<F: Flash>(m: &mut FileManager<F>, w: &mut FileWriter, value: &[u8
     Ok(())
 }
 
-fn copy<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader, w: &mut FileWriter, mut len: usize) -> Result<(), Error> {
+fn copy<F: Flash>(
+    m: &mut FileManager<F>,
+    r: &mut FileReader,
+    w: &mut FileWriter,
+    mut len: usize,
+) -> Result<(), Error<F::Error>> {
     let mut buf = [0; 128];
     while len != 0 {
         let n = len.min(buf.len());
@@ -542,7 +560,7 @@ fn copy<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader, w: &mut FileWriter
     Ok(())
 }
 
-fn write_leb128<F: Flash>(m: &mut FileManager<F>, w: &mut FileWriter, mut val: u32) -> Result<(), Error> {
+fn write_leb128<F: Flash>(m: &mut FileManager<F>, w: &mut FileWriter, mut val: u32) -> Result<(), Error<F::Error>> {
     loop {
         let mut part = val & 0x7F;
         let rest = val >> 7;
@@ -583,7 +601,7 @@ fn read_key<F: Flash>(
     m: &mut FileManager<F>,
     r: &mut FileReader,
     buf: &mut Vec<u8, MAX_KEY_SIZE>,
-) -> Result<(), ReadError> {
+) -> Result<(), ReadError<F::Error>> {
     let len = read_leb128(m, r)? as usize;
     if len > MAX_KEY_SIZE {
         info!("key too long: {}", len);
@@ -593,7 +611,11 @@ fn read_key<F: Flash>(
     r.read(m, buf)
 }
 
-fn read_value<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader, value: &mut [u8]) -> Result<usize, ReadKeyError> {
+fn read_value<F: Flash>(
+    m: &mut FileManager<F>,
+    r: &mut FileReader,
+    value: &mut [u8],
+) -> Result<usize, ReadKeyError<F::Error>> {
     let len = check_corrupted!(read_leb128(m, r)) as usize;
     if len > value.len() {
         return Err(ReadKeyError::BufferTooSmall);
@@ -602,19 +624,19 @@ fn read_value<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader, value: &mut 
     Ok(len)
 }
 
-fn skip_value<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader) -> Result<(), ReadError> {
+fn skip_value<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader) -> Result<(), ReadError<F::Error>> {
     let len = read_leb128(m, r)? as usize;
     r.skip(m, len)?;
     Ok(())
 }
 
-fn read_u8<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader) -> Result<u8, ReadError> {
+fn read_u8<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader) -> Result<u8, ReadError<F::Error>> {
     let mut buf = [0u8; 1];
     r.read(m, &mut buf)?;
     Ok(buf[0])
 }
 
-fn read_leb128<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader) -> Result<u32, ReadError> {
+fn read_leb128<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader) -> Result<u32, ReadError<F::Error>> {
     let mut res = 0;
     let mut shift = 0;
     loop {
@@ -668,7 +690,7 @@ mod tests {
     #[test]
     fn test() {
         let mut f = MemFlash::new();
-        Database::format(&mut f);
+        Database::format(&mut f).unwrap();
 
         let mut db = Database::new(&mut f).unwrap();
 
@@ -719,7 +741,7 @@ mod tests {
     #[test]
     fn test_buf_too_small() {
         let mut f = MemFlash::new();
-        Database::format(&mut f);
+        Database::format(&mut f).unwrap();
 
         let mut db = Database::new(&mut f).unwrap();
 
@@ -736,7 +758,7 @@ mod tests {
     #[test]
     fn test_remount() {
         let mut f = MemFlash::new();
-        Database::format(&mut f);
+        Database::format(&mut f).unwrap();
 
         let mut db = Database::new(&mut f).unwrap();
 

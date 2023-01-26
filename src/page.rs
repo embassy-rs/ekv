@@ -21,14 +21,16 @@ pub struct ChunkHeader {
 impl_bytes!(ChunkHeader);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ReadError {
+pub enum ReadError<E> {
+    Flash(E),
     Eof,
     Corrupted,
 }
 
-impl From<Error> for ReadError {
-    fn from(err: Error) -> Self {
+impl<E> From<Error<E>> for ReadError<E> {
+    fn from(err: Error<E>) -> Self {
         match err {
+            Error::Flash(e) => Self::Flash(e),
             Error::Corrupted => Self::Corrupted,
         }
     }
@@ -52,7 +54,7 @@ impl<F: Flash> PageManager<F> {
         Self { _phantom: PhantomData }
     }
 
-    fn write_header<H: Header>(flash: &mut F, page_id: PageID, header: H) {
+    fn write_header<H: Header>(flash: &mut F, page_id: PageID, header: H) -> Result<(), Error<F::Error>> {
         assert!(size_of::<H>() <= MAX_HEADER_SIZE);
         let mut buf = [0u8; PageHeader::SIZE + MAX_HEADER_SIZE];
         let buf = &mut buf[..PageHeader::SIZE + size_of::<H>()];
@@ -66,15 +68,16 @@ impl<F: Flash> PageManager<F> {
                 .write_unaligned(header)
         };
 
-        flash.write(page_id as _, 0, buf);
+        flash.write(page_id as _, 0, buf).map_err(Error::Flash)?;
+        Ok(())
     }
 
-    pub fn read_header<H: Header>(&mut self, flash: &mut F, page_id: PageID) -> Result<H, Error> {
+    pub fn read_header<H: Header>(&mut self, flash: &mut F, page_id: PageID) -> Result<H, Error<F::Error>> {
         assert!(size_of::<H>() <= MAX_HEADER_SIZE);
         let mut buf = [0u8; PageHeader::SIZE + MAX_HEADER_SIZE];
         let buf = &mut buf[..PageHeader::SIZE + size_of::<H>()];
 
-        flash.read(page_id as _, 0, buf);
+        flash.read(page_id as _, 0, buf).map_err(Error::Flash)?;
 
         let page_header = PageHeader::from_bytes(buf[..PageHeader::SIZE].try_into().unwrap());
         if page_header.magic != H::MAGIC {
@@ -87,7 +90,7 @@ impl<F: Flash> PageManager<F> {
         Ok(header)
     }
 
-    pub fn read<H: Header>(&mut self, flash: &mut F, page_id: PageID) -> Result<(H, PageReader), Error> {
+    pub fn read<H: Header>(&mut self, flash: &mut F, page_id: PageID) -> Result<(H, PageReader), Error<F::Error>> {
         trace!("page: read {:?}", page_id);
         let header = self.read_header(flash, page_id)?;
         let mut r = PageReader {
@@ -116,7 +119,11 @@ impl<F: Flash> PageManager<F> {
         }
     }
 
-    pub fn write_append<H: Header>(&mut self, flash: &mut F, page_id: PageID) -> Result<(H, PageWriter<H>), Error> {
+    pub fn write_append<H: Header>(
+        &mut self,
+        flash: &mut F,
+        page_id: PageID,
+    ) -> Result<(H, PageWriter<H>), Error<F::Error>> {
         trace!("page: write_append {:?}", page_id);
         let (header, mut r) = self.read(flash, page_id)?;
         while !r.at_end {
@@ -127,12 +134,18 @@ impl<F: Flash> PageManager<F> {
         if r.chunk_offset != PAGE_SIZE {
             const CHUNK_LEN: usize = 128;
             let mut buf = [ERASE_VALUE; CHUNK_LEN];
-            let ok = (r.chunk_offset..PAGE_SIZE).step_by(CHUNK_LEN).all(|start| {
+
+            let mut ok = true;
+            for start in (r.chunk_offset..PAGE_SIZE).step_by(CHUNK_LEN) {
                 let end = (start + CHUNK_LEN).min(PAGE_SIZE);
                 let len = end - start;
-                flash.read(page_id as _, start, &mut buf[..len]);
-                buf[..len].iter().all(|&x| x == ERASE_VALUE)
-            });
+                flash.read(page_id as _, start, &mut buf[..len]).map_err(Error::Flash)?;
+                if !buf[..len].iter().all(|&x| x == ERASE_VALUE) {
+                    ok = false;
+                    break;
+                }
+            }
+
             if !ok {
                 // setting this will make the writer fail writing as if the page was full.
                 r.chunk_offset = PAGE_SIZE;
@@ -177,13 +190,15 @@ impl PageReader {
     pub fn page_id(&self) -> PageID {
         self.page_id
     }
+}
 
-    fn next_chunk(&mut self, flash: &mut impl Flash) -> Result<bool, Error> {
+impl PageReader {
+    fn next_chunk<F: Flash>(&mut self, flash: &mut F) -> Result<bool, Error<F::Error>> {
         self.chunk_offset += ChunkHeader::SIZE + align_up(self.chunk_len);
         self.open_chunk(flash)
     }
 
-    fn open_chunk(&mut self, flash: &mut impl Flash) -> Result<bool, Error> {
+    fn open_chunk<F: Flash>(&mut self, flash: &mut F) -> Result<bool, Error<F::Error>> {
         let data_start = self.chunk_offset + ChunkHeader::SIZE;
         if data_start > PAGE_SIZE {
             self.at_end = true;
@@ -191,7 +206,9 @@ impl PageReader {
         }
 
         let mut header = [0u8; ChunkHeader::SIZE];
-        flash.read(self.page_id as _, self.chunk_offset, &mut header);
+        flash
+            .read(self.page_id as _, self.chunk_offset, &mut header)
+            .map_err(Error::Flash)?;
         let header = ChunkHeader::from_bytes(header);
 
         // TODO make this more robust against written but not committed garbage.
@@ -213,16 +230,18 @@ impl PageReader {
         self.chunk_len = header.len as usize;
 
         let n = align_up(self.chunk_len);
-        flash.read(
-            self.page_id as _,
-            self.chunk_offset + ChunkHeader::SIZE,
-            &mut self.buf[..n],
-        );
+        flash
+            .read(
+                self.page_id as _,
+                self.chunk_offset + ChunkHeader::SIZE,
+                &mut self.buf[..n],
+            )
+            .map_err(Error::Flash)?;
 
         Ok(true)
     }
 
-    pub fn read(&mut self, flash: &mut impl Flash, data: &mut [u8]) -> Result<usize, Error> {
+    pub fn read<F: Flash>(&mut self, flash: &mut F, data: &mut [u8]) -> Result<usize, Error<F::Error>> {
         trace!("PageReader({:?}): read({})", self.page_id, data.len());
         if self.at_end || data.len() == 0 {
             trace!("read: at end or zero len");
@@ -244,7 +263,7 @@ impl PageReader {
         Ok(n)
     }
 
-    pub fn skip(&mut self, flash: &mut impl Flash, len: usize) -> Result<usize, Error> {
+    pub fn skip<F: Flash>(&mut self, flash: &mut F, len: usize) -> Result<usize, Error<F::Error>> {
         trace!("PageReader({:?}): skip({})", self.page_id, len);
         if self.at_end || len == 0 {
             trace!("skip: at end or zero len");
@@ -266,7 +285,7 @@ impl PageReader {
         Ok(n)
     }
 
-    pub fn is_at_eof(&mut self, flash: &mut impl Flash) -> Result<bool, Error> {
+    pub fn is_at_eof<F: Flash>(&mut self, flash: &mut F) -> Result<bool, Error<F::Error>> {
         if self.at_end {
             return Ok(true);
         }
@@ -305,15 +324,15 @@ impl<H: Header> PageWriter<H> {
         self.page_id
     }
 
-    pub fn write(&mut self, flash: &mut impl Flash, data: &[u8]) -> usize {
+    pub fn write<F: Flash>(&mut self, flash: &mut F, data: &[u8]) -> Result<usize, Error<F::Error>> {
         let max_write = PAGE_SIZE.saturating_sub(self.chunk_offset + ChunkHeader::SIZE + self.chunk_pos);
         let total_n = data.len().min(max_write);
         if total_n == 0 {
-            return 0;
+            return Ok(0);
         }
         let mut data = &data[..total_n];
 
-        self.erase_if_needed(flash);
+        self.erase_if_needed(flash)?;
 
         let align_offs = self.chunk_pos % WRITE_SIZE;
         if align_offs != 0 {
@@ -326,21 +345,25 @@ impl<H: Header> PageWriter<H> {
             self.chunk_pos += n;
 
             if n == left {
-                flash.write(
-                    self.page_id as _,
-                    self.chunk_offset + ChunkHeader::SIZE + self.chunk_pos - WRITE_SIZE,
-                    &self.align_buf,
-                );
+                flash
+                    .write(
+                        self.page_id as _,
+                        self.chunk_offset + ChunkHeader::SIZE + self.chunk_pos - WRITE_SIZE,
+                        &self.align_buf,
+                    )
+                    .map_err(Error::Flash)?;
             }
         }
 
         let n = data.len() - (data.len() % WRITE_SIZE);
         if n != 0 {
-            flash.write(
-                self.page_id as _,
-                self.chunk_offset + ChunkHeader::SIZE + self.chunk_pos,
-                &data[..n],
-            );
+            flash
+                .write(
+                    self.page_id as _,
+                    self.chunk_offset + ChunkHeader::SIZE + self.chunk_pos,
+                    &data[..n],
+                )
+                .map_err(Error::Flash)?;
             data = &data[n..];
             self.total_pos += n;
             self.chunk_pos += n;
@@ -352,48 +375,57 @@ impl<H: Header> PageWriter<H> {
         self.total_pos += n;
         self.chunk_pos += n;
 
-        total_n
+        Ok(total_n)
     }
 
-    fn erase_if_needed(&mut self, flash: &mut impl Flash) {
+    fn erase_if_needed<F: Flash>(&mut self, flash: &mut F) -> Result<(), Error<F::Error>> {
         if self.needs_erase {
-            flash.erase(self.page_id as _);
+            flash.erase(self.page_id as _).map_err(Error::Flash)?;
             self.needs_erase = false;
         }
+        Ok(())
     }
 
-    pub fn write_header(&mut self, flash: &mut impl Flash, header: H) {
-        self.erase_if_needed(flash);
+    pub fn write_header<F: Flash>(&mut self, flash: &mut F, header: H) -> Result<(), Error<F::Error>> {
+        self.erase_if_needed(flash)?;
 
-        PageManager::write_header(flash, self.page_id, header);
+        PageManager::write_header(flash, self.page_id, header)?;
+
+        Ok(())
     }
 
-    pub fn commit(&mut self, flash: &mut impl Flash) {
+    pub fn commit<F: Flash>(&mut self, flash: &mut F) -> Result<(), Error<F::Error>> {
         if self.chunk_pos == 0 {
             // nothing to commit.
-            return;
+            return Ok(());
         }
 
-        self.erase_if_needed(flash);
+        self.erase_if_needed(flash)?;
 
         // flush align buf.
         let align_offs = self.chunk_pos % WRITE_SIZE;
         if align_offs != 0 {
-            flash.write(
-                self.page_id as _,
-                self.chunk_offset + ChunkHeader::SIZE + self.chunk_pos - align_offs,
-                &self.align_buf,
-            );
+            flash
+                .write(
+                    self.page_id as _,
+                    self.chunk_offset + ChunkHeader::SIZE + self.chunk_pos - align_offs,
+                    &self.align_buf,
+                )
+                .map_err(Error::Flash)?;
         }
 
         let h = ChunkHeader {
             len: self.chunk_pos as u32,
         };
-        flash.write(self.page_id as _, self.chunk_offset, &h.to_bytes());
+        flash
+            .write(self.page_id as _, self.chunk_offset, &h.to_bytes())
+            .map_err(Error::Flash)?;
 
         // Prepare for next chunk.
         self.chunk_offset += ChunkHeader::SIZE + align_up(self.chunk_pos);
         self.chunk_pos = 0;
+
+        Ok(())
     }
 }
 
@@ -435,7 +467,7 @@ mod tests {
         let f = &mut MemFlash::new();
         let mut m = PageManager::new();
 
-        PageManager::write_header(f, PAGE, HEADER);
+        PageManager::write_header(f, PAGE, HEADER).unwrap();
         let h = m.read_header::<TestHeader>(f, PAGE).unwrap();
         assert_eq!(h, HEADER)
     }
@@ -468,7 +500,7 @@ mod tests {
 
         // Write
         let mut w = b.write::<TestHeader>(f, PAGE);
-        w.write(f, &data);
+        w.write(f, &data).unwrap();
         drop(w); // don't commit
 
         // Read
@@ -485,10 +517,10 @@ mod tests {
 
         // Write
         let mut w = b.write::<TestHeader>(f, PAGE);
-        let n = w.write(f, &data);
+        let n = w.write(f, &data).unwrap();
         assert_eq!(n, 13);
-        w.write_header(f, HEADER);
-        w.commit(f);
+        w.write_header(f, HEADER).unwrap();
+        w.commit(f).unwrap();
 
         // Read
         let (h, mut r) = b.read::<TestHeader>(f, PAGE).unwrap();
@@ -519,9 +551,9 @@ mod tests {
 
         // Write
         let mut w = b.write::<TestHeader>(f, PAGE);
-        w.write(f, &data);
-        w.write_header(f, HEADER);
-        w.commit(f);
+        w.write(f, &data).unwrap();
+        w.write_header(f, HEADER).unwrap();
+        w.commit(f).unwrap();
 
         // Read
         let (h, mut r) = b.read::<TestHeader>(f, PAGE).unwrap();
@@ -541,10 +573,10 @@ mod tests {
 
         // Write
         let mut w = b.write::<TestHeader>(f, PAGE);
-        let n = w.write(f, &data);
+        let n = w.write(f, &data).unwrap();
         assert_eq!(n, MAX_PAYLOAD);
-        w.write_header(f, HEADER);
-        w.commit(f);
+        w.write_header(f, HEADER).unwrap();
+        w.commit(f).unwrap();
 
         // Read
         let (h, mut r) = b.read::<TestHeader>(f, PAGE).unwrap();
@@ -562,12 +594,12 @@ mod tests {
 
         // Write
         let mut w = b.write::<TestHeader>(f, PAGE);
-        let n = w.write(f, &[1, 2, 3]);
+        let n = w.write(f, &[1, 2, 3]).unwrap();
         assert_eq!(n, 3);
-        let n = w.write(f, &[4, 5, 6, 7, 8, 9]);
+        let n = w.write(f, &[4, 5, 6, 7, 8, 9]).unwrap();
         assert_eq!(n, 6);
-        w.write_header(f, HEADER);
-        w.commit(f);
+        w.write_header(f, HEADER).unwrap();
+        w.commit(f).unwrap();
 
         // Read
         let (h, mut r) = b.read::<TestHeader>(f, PAGE).unwrap();
@@ -585,10 +617,10 @@ mod tests {
 
         // Write
         let mut w = b.write::<TestHeader>(f, PAGE);
-        let n = w.write(f, &[1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        let n = w.write(f, &[1, 2, 3, 4, 5, 6, 7, 8, 9]).unwrap();
         assert_eq!(n, 9);
-        w.write_header(f, HEADER);
-        w.commit(f);
+        w.write_header(f, HEADER).unwrap();
+        w.commit(f).unwrap();
 
         // Read
         let (h, mut r) = b.read::<TestHeader>(f, PAGE).unwrap();
@@ -614,13 +646,13 @@ mod tests {
 
         // Write
         let mut w = b.write::<TestHeader>(f, PAGE);
-        let n = w.write(f, &[1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        let n = w.write(f, &[1, 2, 3, 4, 5, 6, 7, 8, 9]).unwrap();
         assert_eq!(n, 9);
-        w.write_header(f, HEADER);
-        w.commit(f);
-        let n = w.write(f, &[10, 11, 12]);
+        w.write_header(f, HEADER).unwrap();
+        w.commit(f).unwrap();
+        let n = w.write(f, &[10, 11, 12]).unwrap();
         assert_eq!(n, 3);
-        w.commit(f);
+        w.commit(f).unwrap();
 
         // Read
         let (h, mut r) = b.read::<TestHeader>(f, PAGE).unwrap();
@@ -650,11 +682,11 @@ mod tests {
 
         // Write
         let mut w = b.write::<TestHeader>(f, PAGE);
-        let n = w.write(f, &[1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        let n = w.write(f, &[1, 2, 3, 4, 5, 6, 7, 8, 9]).unwrap();
         assert_eq!(n, 9);
-        w.write_header(f, HEADER);
-        w.commit(f);
-        let n = w.write(f, &[10, 11, 12]);
+        w.write_header(f, HEADER).unwrap();
+        w.commit(f).unwrap();
+        let n = w.write(f, &[10, 11, 12]).unwrap();
         assert_eq!(n, 3);
         // no commit!
 
@@ -678,15 +710,15 @@ mod tests {
 
         // Write
         let mut w = b.write::<TestHeader>(f, PAGE);
-        let n = w.write(f, &[1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        let n = w.write(f, &[1, 2, 3, 4, 5, 6, 7, 8, 9]).unwrap();
         assert_eq!(n, 9);
-        w.write_header(f, HEADER);
-        w.commit(f);
+        w.write_header(f, HEADER).unwrap();
+        w.commit(f).unwrap();
 
         let (_, mut w) = b.write_append::<TestHeader>(f, PAGE).unwrap();
-        let n = w.write(f, &[10, 11, 12]);
+        let n = w.write(f, &[10, 11, 12]).unwrap();
         assert_eq!(n, 3);
-        w.commit(f);
+        w.commit(f).unwrap();
 
         // Read
         let (h, mut r) = b.read::<TestHeader>(f, PAGE).unwrap();
@@ -712,13 +744,13 @@ mod tests {
 
         // Write
         let mut w = b.write::<TestHeader>(f, PAGE);
-        let n = w.write(f, &[1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        let n = w.write(f, &[1, 2, 3, 4, 5, 6, 7, 8, 9]).unwrap();
         assert_eq!(n, 9);
-        w.write_header(f, HEADER);
-        w.commit(f);
+        w.write_header(f, HEADER).unwrap();
+        w.commit(f).unwrap();
 
         let (_, mut w) = b.write_append::<TestHeader>(f, PAGE).unwrap();
-        let n = w.write(f, &[10, 11, 12]);
+        let n = w.write(f, &[10, 11, 12]).unwrap();
         assert_eq!(n, 3);
         // no commit!
 
@@ -742,14 +774,14 @@ mod tests {
 
         // Write
         let mut w = b.write::<TestHeader>(f, PAGE);
-        let n = w.write(f, &[1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        let n = w.write(f, &[1, 2, 3, 4, 5, 6, 7, 8, 9]).unwrap();
         assert_eq!(n, 9);
-        w.write_header(f, HEADER);
-        w.commit(f);
+        w.write_header(f, HEADER).unwrap();
+        w.commit(f).unwrap();
 
         // Append but don't commit
         let (_, mut w) = b.write_append::<TestHeader>(f, PAGE).unwrap();
-        let n = w.write(f, &[10, 11, 12, 13, 14, 15]);
+        let n = w.write(f, &[10, 11, 12, 13, 14, 15]).unwrap();
         assert_eq!(n, 6);
         // no commit!
 
@@ -757,7 +789,7 @@ mod tests {
         // If there's "left over garbage" we can non longer append to this page. It must
         // behave as if it was full.
         let (_, mut w) = b.write_append::<TestHeader>(f, PAGE).unwrap();
-        let n = w.write(f, &[13, 14, 15]);
+        let n = w.write(f, &[13, 14, 15]).unwrap();
         assert_eq!(n, 0);
 
         // Read

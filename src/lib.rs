@@ -29,28 +29,32 @@ mod record;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub enum Error {
+pub enum Error<E> {
+    Flash(E),
     Corrupted,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub enum ReadKeyError {
+pub enum ReadKeyError<E> {
+    Flash(E),
     BufferTooSmall,
     Corrupted,
 }
 
-impl From<Error> for ReadKeyError {
-    fn from(e: Error) -> Self {
+impl<E> From<Error<E>> for ReadKeyError<E> {
+    fn from(e: Error<E>) -> Self {
         match e {
+            Error::Flash(e) => Self::Flash(e),
             Error::Corrupted => Self::Corrupted,
         }
     }
 }
 
-impl From<page::ReadError> for ReadKeyError {
-    fn from(e: page::ReadError) -> Self {
+impl<E> From<page::ReadError<E>> for ReadKeyError<E> {
+    fn from(e: page::ReadError<E>) -> Self {
         match e {
+            page::ReadError::Flash(e) => Self::Flash(e),
             page::ReadError::Eof => Self::Corrupted,
             page::ReadError::Corrupted => Self::Corrupted,
         }
@@ -59,15 +63,48 @@ impl From<page::ReadError> for ReadKeyError {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub enum WriteKeyError {
+pub enum WriteKeyError<E> {
+    Flash(E),
     Full,
     Corrupted,
 }
 
-impl From<Error> for WriteKeyError {
-    fn from(e: Error) -> Self {
+impl<E> From<Error<E>> for WriteKeyError<E> {
+    fn from(e: Error<E>) -> Self {
         match e {
+            Error::Flash(e) => Self::Flash(e),
             Error::Corrupted => Self::Corrupted,
         }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+struct CorruptedError;
+
+impl<E> From<CorruptedError> for Error<E> {
+    fn from(_: CorruptedError) -> Self {
+        Self::Corrupted
+    }
+}
+impl<E> From<CorruptedError> for page::ReadError<E> {
+    fn from(_: CorruptedError) -> Self {
+        Self::Corrupted
+    }
+}
+impl<E> From<CorruptedError> for ReadKeyError<E> {
+    fn from(_: CorruptedError) -> Self {
+        Self::Corrupted
+    }
+}
+impl<E> From<CorruptedError> for WriteKeyError<E> {
+    fn from(_: CorruptedError) -> Self {
+        Self::Corrupted
+    }
+}
+
+impl<E> From<CorruptedError> for file::SearchSeekError<E> {
+    fn from(_: CorruptedError) -> Self {
+        Self::Corrupted
     }
 }

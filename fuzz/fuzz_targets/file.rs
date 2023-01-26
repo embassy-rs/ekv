@@ -126,6 +126,7 @@ fn fuzz(ops: Input) {
                         Ok(()) => {}
                         Err(ReadError::Corrupted) => panic!("corrupted!!"),
                         Err(ReadError::Eof) => break,
+                        Err(ReadError::Flash(e)) => match e {},
                     }
                     let got_id = u32::from_le_bytes(got_id);
                     assert!(got_id % 2 == 1);

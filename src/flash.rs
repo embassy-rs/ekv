@@ -1,22 +1,26 @@
+use core::fmt::Debug;
+
 use crate::config::*;
 pub use crate::types::PageID;
 
 /// NOR flash memory trait
 /// TODO use embedded-storage
 pub trait Flash {
-    fn erase(&mut self, page_id: PageID);
-    fn read(&mut self, page_id: PageID, offset: usize, data: &mut [u8]);
-    fn write(&mut self, page_id: PageID, offset: usize, data: &[u8]);
+    type Error: Debug;
+    fn erase(&mut self, page_id: PageID) -> Result<(), Self::Error>;
+    fn read(&mut self, page_id: PageID, offset: usize, data: &mut [u8]) -> Result<(), Self::Error>;
+    fn write(&mut self, page_id: PageID, offset: usize, data: &[u8]) -> Result<(), Self::Error>;
 }
 
 impl<T: Flash> Flash for &mut T {
-    fn erase(&mut self, page_id: PageID) {
+    type Error = T::Error;
+    fn erase(&mut self, page_id: PageID) -> Result<(), Self::Error> {
         T::erase(self, page_id)
     }
-    fn read(&mut self, page_id: PageID, offset: usize, data: &mut [u8]) {
+    fn read(&mut self, page_id: PageID, offset: usize, data: &mut [u8]) -> Result<(), Self::Error> {
         T::read(self, page_id, offset, data)
     }
-    fn write(&mut self, page_id: PageID, offset: usize, data: &[u8]) {
+    fn write(&mut self, page_id: PageID, offset: usize, data: &[u8]) -> Result<(), Self::Error> {
         T::write(self, page_id, offset, data)
     }
 }
@@ -59,16 +63,20 @@ impl MemFlash {
 
 #[cfg(feature = "std")]
 impl Flash for MemFlash {
-    fn erase(&mut self, page_id: PageID) {
+    type Error = core::convert::Infallible;
+
+    fn erase(&mut self, page_id: PageID) -> Result<(), Self::Error> {
         let page_id = page_id.index();
 
         assert!(page_id < PAGE_COUNT);
         self.data[page_id * PAGE_SIZE..][..PAGE_SIZE].fill(ERASE_VALUE);
         self.erase_count += 1;
         self.erase_bytes += PAGE_SIZE;
+
+        Ok(())
     }
 
-    fn read(&mut self, page_id: PageID, offset: usize, data: &mut [u8]) {
+    fn read(&mut self, page_id: PageID, offset: usize, data: &mut [u8]) -> Result<(), Self::Error> {
         let page_id = page_id.index();
 
         assert!(page_id < PAGE_COUNT);
@@ -81,9 +89,11 @@ impl Flash for MemFlash {
         data.copy_from_slice(mem);
         self.read_count += 1;
         self.read_bytes += data.len();
+
+        Ok(())
     }
 
-    fn write(&mut self, page_id: PageID, offset: usize, data: &[u8]) {
+    fn write(&mut self, page_id: PageID, offset: usize, data: &[u8]) -> Result<(), Self::Error> {
         let page_id = page_id.index();
 
         assert!(page_id < PAGE_COUNT);
@@ -97,5 +107,7 @@ impl Flash for MemFlash {
         mem.copy_from_slice(data);
         self.write_count += 1;
         self.write_bytes += data.len();
+
+        Ok(())
     }
 }

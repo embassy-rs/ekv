@@ -25,7 +25,7 @@ macro_rules! impl_bytes {
 #[cfg(not(feature = "_panic-on-corrupted"))]
 macro_rules! corrupted {
     () => {
-        return Err(crate::Error::Corrupted.into())
+        return Err(crate::CorruptedError.into())
     };
 }
 

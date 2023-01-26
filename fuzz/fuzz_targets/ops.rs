@@ -62,6 +62,7 @@ fn fuzz(ops: Input) {
                     Ok(()) => {}
                     Err(WriteKeyError::Full) => continue,
                     Err(WriteKeyError::Corrupted) => panic!("corrupted"),
+                    Err(WriteKeyError::Flash(e)) => match e {},
                 }
                 wtx.commit().unwrap();
 
