@@ -45,7 +45,14 @@ impl<F: Flash> Database<F> {
             "branching_factor={}, level_count={}, file_count={}",
             BRANCHING_FACTOR, LEVEL_COUNT, FILE_COUNT
         );
-        debug!("max_key_size={}", MAX_KEY_SIZE);
+        let max_record_size = record_size(MAX_KEY_SIZE, MAX_VALUE_SIZE);
+        debug!(
+            "max_key_size={}, max_value_size={}, max_record_size={} ({} pages)",
+            MAX_KEY_SIZE,
+            MAX_VALUE_SIZE,
+            max_record_size,
+            (max_record_size + PAGE_MAX_PAYLOAD_SIZE - 1) / PAGE_MAX_PAYLOAD_SIZE
+        );
         debug!(
             "free_page_buffer={}, free_page_buffer_commit={}",
             FREE_PAGE_BUFFER, FREE_PAGE_BUFFER_COMMIT
