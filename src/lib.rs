@@ -56,3 +56,18 @@ impl From<page::ReadError> for ReadKeyError {
         }
     }
 }
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum WriteKeyError {
+    Full,
+    Corrupted,
+}
+
+impl From<Error> for WriteKeyError {
+    fn from(e: Error) -> Self {
+        match e {
+            Error::Corrupted => Self::Corrupted,
+        }
+    }
+}

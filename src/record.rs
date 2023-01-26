@@ -8,7 +8,7 @@ use crate::config::*;
 use crate::file::{FileManager, FileReader, FileSearcher, FileWriter, SeekDirection, PAGE_MAX_PAYLOAD_SIZE};
 use crate::flash::Flash;
 use crate::page::ReadError;
-use crate::{Error, ReadKeyError};
+use crate::{Error, ReadKeyError, WriteKeyError};
 
 const FILE_FLAG_COMPACT_DEST: u8 = 0x01;
 const FILE_FLAG_COMPACT_SRC: u8 = 0x02;
@@ -435,7 +435,7 @@ pub struct WriteTransaction<'a, F: Flash + 'a> {
 }
 
 impl<'a, F: Flash + 'a> WriteTransaction<'a, F> {
-    pub fn write(&mut self, key: &[u8], value: &[u8]) -> Result<(), Error> {
+    pub fn write(&mut self, key: &[u8], value: &[u8]) -> Result<(), WriteKeyError> {
         if key.is_empty() {
             panic!("key cannot be empty.")
         }
@@ -460,8 +460,8 @@ impl<'a, F: Flash + 'a> WriteTransaction<'a, F> {
             debug!("free pages less than buffer, compacting.");
             let did_something = self.db.compact()?;
             if !did_something {
-                // TODO return nice error.
-                panic!("storage is full");
+                debug!("storage full");
+                return Err(WriteKeyError::Full);
             }
         }
 

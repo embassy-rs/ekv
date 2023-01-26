@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use ekv::flash::MemFlash;
-use ekv::Database;
+use ekv::{Database, WriteKeyError};
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
@@ -58,7 +58,11 @@ fn fuzz(ops: Input) {
 
                 // Write to DB
                 let mut wtx = db.write_transaction().unwrap();
-                wtx.write(&key, &val).unwrap();
+                match wtx.write(&key, &val) {
+                    Ok(()) => {}
+                    Err(WriteKeyError::Full) => continue,
+                    Err(WriteKeyError::Corrupted) => panic!("corrupted"),
+                }
                 wtx.commit().unwrap();
 
                 // Write to mirror
