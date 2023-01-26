@@ -270,6 +270,7 @@ impl<F: Flash> Database<F> {
                     write_key(m, &mut w, &k[i])?;
                     write_leb128(m, &mut w, val_len)?;
                     copy(m, &mut r[i], &mut w, val_len as usize)?;
+                    w.record_end();
 
                     // Advance all readers
                     for j in 0..BRANCHING_FACTOR {
