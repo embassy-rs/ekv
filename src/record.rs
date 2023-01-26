@@ -1,11 +1,13 @@
 use core::cmp::Ordering;
-use core::mem::MaybeUninit;
+use core::mem::{size_of, MaybeUninit};
 use core::slice;
 
 use heapless::Vec;
 
 use crate::config::*;
-use crate::file::{FileManager, FileReader, FileSearcher, FileWriter, SeekDirection, PAGE_MAX_PAYLOAD_SIZE};
+use crate::file::{
+    DataHeader, FileManager, FileReader, FileSearcher, FileWriter, MetaHeader, SeekDirection, PAGE_MAX_PAYLOAD_SIZE,
+};
 use crate::flash::Flash;
 use crate::page::ReadError;
 use crate::{Error, ReadKeyError, WriteKeyError};
@@ -24,6 +26,31 @@ impl<F: Flash> Database<F> {
     }
 
     pub fn new(flash: F) -> Result<Self, Error> {
+        debug!("creating database!");
+        debug!(
+            "page_size={}, page_count={}, total_size={}",
+            PAGE_SIZE,
+            PAGE_COUNT,
+            PAGE_COUNT * PAGE_SIZE
+        );
+        debug!("write_size={}, erase_value={:02x}", WRITE_SIZE, ERASE_VALUE);
+        debug!(
+            "sizeof(MetaHeader)={}, sizeof(DataHeader)={}, page_max_payload_size={}",
+            size_of::<MetaHeader>(),
+            size_of::<DataHeader>(),
+            PAGE_MAX_PAYLOAD_SIZE
+        );
+        debug!("skiplist_len={}, skiplist_shift={}", SKIPLIST_LEN, SKIPLIST_SHIFT);
+        debug!(
+            "branching_factor={}, level_count={}, file_count={}",
+            BRANCHING_FACTOR, LEVEL_COUNT, FILE_COUNT
+        );
+        debug!("max_key_size={}", MAX_KEY_SIZE);
+        debug!(
+            "free_page_buffer={}, free_page_buffer_commit={}",
+            FREE_PAGE_BUFFER, FREE_PAGE_BUFFER_COMMIT
+        );
+
         let mut m = FileManager::new(flash);
         m.mount()?;
 
