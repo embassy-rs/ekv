@@ -88,7 +88,7 @@ impl<F: Flash> Database<F> {
         };
 
         debug!("write_transaction: writing file {}", file_id);
-        let w = self.files.write(file_id);
+        let w = self.files.write(file_id)?;
         Ok(WriteTransaction {
             db: self,
             w,
@@ -208,7 +208,7 @@ impl<F: Flash> Database<F> {
             return Ok(());
         }
 
-        let mut w = self.files.write(dst);
+        let mut w = self.files.write(dst)?;
 
         // Open all files in level for reading.
         let mut r: [MaybeUninit<FileReader>; BRANCHING_FACTOR] = unsafe { MaybeUninit::uninit().assume_init() };

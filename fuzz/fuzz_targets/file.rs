@@ -63,7 +63,7 @@ fn fuzz(ops: Input) {
                 }
 
                 // Open file if not open already.
-                let w = w.get_or_insert_with(|| m.write(FILE_ID));
+                let w = w.get_or_insert_with(|| m.write(FILE_ID).unwrap());
 
                 let id = (records.len() * 2 + 1) as u32;
                 records.push(Record {

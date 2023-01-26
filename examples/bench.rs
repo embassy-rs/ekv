@@ -1,5 +1,3 @@
-use std::collections::{BTreeMap, HashMap};
-
 use ekv::flash::MemFlash;
 use ekv::Database;
 use plotters::prelude::*;

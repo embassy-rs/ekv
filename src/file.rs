@@ -115,7 +115,7 @@ impl<F: Flash> FileManager<F> {
         FileReader::new(self, file_id)
     }
 
-    pub fn write(&mut self, file_id: FileID) -> FileWriter {
+    pub fn write(&mut self, file_id: FileID) -> Result<FileWriter, Error> {
         FileWriter::new(self, file_id)
     }
 
@@ -1004,22 +1004,84 @@ pub struct FileWriter {
     seq: Seq,
     writer: Option<PageWriter<DataHeader>>,
 
+    // Previous last page of the file, that was copied to a new page because
+    // it was not full. Must be freed on commit.
+    rewritten_last_page_id: Option<PageID>,
+
     at_record_boundary: bool,
     record_boundary: Option<u16>,
 }
 
 impl FileWriter {
-    fn new(m: &mut FileManager<impl Flash>, file_id: FileID) -> Self {
-        let f = &m.files[file_id as usize];
+    fn new(m: &mut FileManager<impl Flash>, file_id: FileID) -> Result<Self, Error> {
+        let f = m.files[file_id as usize];
 
-        Self {
+        let mut this = Self {
             file_id,
             last_page: f.last_page,
             seq: f.last_seq,
+            rewritten_last_page_id: None,
             at_record_boundary: true,
             record_boundary: Some(0),
             writer: None,
+        };
+
+        // Ensure last page is full.
+        // This is needed to ensure progressive compaction does not actually un-compact
+        // the data, due to leaving pages not full in the middle of the file.
+        if let Some(pp) = f.last_page {
+            let (_, mut r) = m.read_page::<DataHeader>(pp.page_id)?;
+
+            // Measure total page len.
+            let mut page_len = 0;
+            loop {
+                let n = r.skip(&mut m.flash, PAGE_MAX_PAYLOAD_SIZE)?;
+                if n == 0 {
+                    break;
+                }
+                page_len += n;
+            }
+
+            if page_len != PAGE_MAX_PAYLOAD_SIZE {
+                // Page is not full.
+                // Open a new page, copy all the data over, and make that the last file page.
+                // TODO: if possible, use PageManager::write_append to avoid the copy.
+
+                // seek again to start.
+                let (_, mut r) = m.read_page::<DataHeader>(pp.page_id)?;
+
+                // open new page
+                let page_id = m.alloc.allocate();
+                trace!("writer: last page is not full. Copying it to new page {:?}", page_id);
+                let mut w = m.write_page(page_id);
+
+                let mut buf = [0; 128];
+                loop {
+                    let n = r.read(&mut m.flash, &mut buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    let mut data = &buf[..n];
+                    while !data.is_empty() {
+                        let n = w.write(&mut m.flash, data);
+                        data = &data[n..];
+
+                        // the new page can't get full, because we're not writing more
+                        // than 1 page worth of data to it.
+                        assert!(n != 0);
+                    }
+                }
+
+                this.writer = Some(w);
+                this.seq = pp.header.seq;
+                this.at_record_boundary = true;
+                this.record_boundary = (pp.header.record_boundary != u16::MAX).then(|| pp.header.record_boundary);
+                this.last_page = pp.prev(m, f.first_seq)?;
+                this.rewritten_last_page_id = Some(pp.page_id);
+            }
         }
+
+        Ok(this)
     }
 
     fn curr_seq(&mut self, m: &mut FileManager<impl Flash>) -> Seq {
@@ -1125,6 +1187,11 @@ impl FileWriter {
                 f.first_seq,
                 f.last_seq
             );
+
+            if let Some(rewritten_page_id) = self.rewritten_last_page_id {
+                trace!("freeing rewritten page {:?}", rewritten_page_id);
+                tx.m.alloc.free(rewritten_page_id);
+            }
         }
         Ok(())
     }
@@ -1264,7 +1331,7 @@ mod tests {
 
         let data = dummy_data(24);
 
-        let mut w = m.write(0);
+        let mut w = m.write(0).unwrap();
         w.write(&mut m, &data).unwrap();
         m.commit(&mut w).unwrap();
 
@@ -1291,7 +1358,7 @@ mod tests {
 
         let data = dummy_data(23456);
 
-        let mut w = m.write(0);
+        let mut w = m.write(0).unwrap();
         w.write(&mut m, &data).unwrap();
         m.commit(&mut w).unwrap();
         w.discard(&mut m);
@@ -1317,11 +1384,11 @@ mod tests {
         m.format();
         m.mount().unwrap();
 
-        let mut w = m.write(0);
+        let mut w = m.write(0).unwrap();
         w.write(&mut m, &[1, 2, 3, 4, 5]).unwrap();
         m.commit(&mut w).unwrap();
 
-        let mut w = m.write(0);
+        let mut w = m.write(0).unwrap();
         w.write(&mut m, &[6, 7, 8, 9]).unwrap();
         m.commit(&mut w).unwrap();
 
@@ -1345,7 +1412,7 @@ mod tests {
         m.format();
         m.mount().unwrap();
 
-        let mut w = m.write(0);
+        let mut w = m.write(0).unwrap();
         w.write(&mut m, &[1, 2, 3, 4, 5]).unwrap();
         m.commit(&mut w).unwrap();
 
@@ -1379,11 +1446,11 @@ mod tests {
         m.format();
         m.mount().unwrap();
 
-        let mut w = m.write(0);
+        let mut w = m.write(0).unwrap();
         w.write(&mut m, &[1, 2, 3, 4, 5]).unwrap();
         m.commit(&mut w).unwrap();
 
-        let mut w = m.write(0);
+        let mut w = m.write(0).unwrap();
         w.write(&mut m, &[6, 7, 8, 9]).unwrap();
 
         let mut tx = m.transaction();
@@ -1418,7 +1485,7 @@ mod tests {
         r.read(&mut m, &mut buf).unwrap();
         assert_eq!(buf, [9]);
 
-        let mut w = m.write(0);
+        let mut w = m.write(0).unwrap();
         w.write(&mut m, &[10, 11, 12]).unwrap();
         m.commit(&mut w).unwrap();
 
@@ -1435,7 +1502,7 @@ mod tests {
         m.format();
         m.mount().unwrap();
 
-        let mut w = m.write(0);
+        let mut w = m.write(0).unwrap();
         w.write(&mut m, &[1, 2, 3, 4, 5]).unwrap();
         m.commit(&mut w).unwrap();
 
@@ -1465,7 +1532,7 @@ mod tests {
 
         assert_eq!(m.alloc.is_used(page(1)), false);
 
-        let mut w = m.write(0);
+        let mut w = m.write(0).unwrap();
         w.write(&mut m, &[1, 2, 3, 4, 5]).unwrap();
         m.commit(&mut w).unwrap();
 
@@ -1497,7 +1564,7 @@ mod tests {
 
         let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE);
 
-        let mut w = m.write(0);
+        let mut w = m.write(0).unwrap();
         w.write(&mut m, &data).unwrap();
         w.write(&mut m, &data).unwrap();
         m.commit(&mut w).unwrap();
@@ -1532,11 +1599,11 @@ mod tests {
         m.format();
         m.mount().unwrap();
 
-        let mut w = m.write(0);
+        let mut w = m.write(0).unwrap();
         w.write(&mut m, &[1, 2, 3, 4, 5]).unwrap();
         m.commit(&mut w).unwrap();
 
-        let mut w = m.write(0);
+        let mut w = m.write(0).unwrap();
         w.write(&mut m, &[6, 7, 8, 9]).unwrap();
         w.discard(&mut m);
 
@@ -1548,7 +1615,7 @@ mod tests {
         let res = r.read(&mut m, &mut buf);
         assert!(matches!(res, Err(ReadError::Eof)));
 
-        let mut w = m.write(0);
+        let mut w = m.write(0).unwrap();
         w.write(&mut m, &[10, 11]).unwrap();
         m.commit(&mut w).unwrap();
 
@@ -1580,7 +1647,7 @@ mod tests {
 
         let data = dummy_data(1234);
 
-        let mut w = m.write(0);
+        let mut w = m.write(0).unwrap();
         w.write(&mut m, &data).unwrap();
         w.discard(&mut m); // don't commit
 
@@ -1601,7 +1668,7 @@ mod tests {
         assert_eq!(m.alloc.is_used(page(2)), false);
 
         let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE);
-        let mut w = m.write(0);
+        let mut w = m.write(0).unwrap();
 
         w.write(&mut m, &data).unwrap();
         assert_eq!(m.alloc.is_used(page(0)), true); // old meta
@@ -1641,7 +1708,7 @@ mod tests {
         assert_eq!(m.alloc.is_used(page(2)), false);
 
         let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE);
-        let mut w = m.write(0);
+        let mut w = m.write(0).unwrap();
 
         w.write(&mut m, &data).unwrap();
         assert_eq!(m.alloc.is_used(page(0)), true);
@@ -1671,7 +1738,7 @@ mod tests {
         assert_eq!(m.alloc.is_used(page(1)), false);
 
         let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE);
-        let mut w = m.write(0);
+        let mut w = m.write(0).unwrap();
 
         w.write(&mut m, &data).unwrap();
         assert_eq!(m.alloc.is_used(page(0)), true);
@@ -1711,7 +1778,7 @@ mod tests {
         assert_eq!(m.alloc.is_used(page(3)), false);
 
         let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE * 3);
-        let mut w = m.write(0);
+        let mut w = m.write(0).unwrap();
         w.write(&mut m, &data).unwrap();
         assert_eq!(m.alloc.is_used(page(0)), true);
         assert_eq!(m.alloc.is_used(page(1)), true);
@@ -1746,7 +1813,7 @@ mod tests {
         assert_eq!(m.alloc.is_used(page(1)), false);
 
         let data = dummy_data(24);
-        let mut w = m.write(0);
+        let mut w = m.write(0).unwrap();
         w.write(&mut m, &data).unwrap();
         m.commit(&mut w).unwrap();
         assert_eq!(m.alloc.is_used(page(0)), true); // old meta, appended in-place.
@@ -1754,7 +1821,7 @@ mod tests {
         assert_eq!(m.alloc.is_used(page(2)), false);
         assert_eq!(m.alloc.is_used(page(3)), false);
 
-        let mut w = m.write(0);
+        let mut w = m.write(0).unwrap();
         w.write(&mut m, &data).unwrap();
         assert_eq!(m.alloc.is_used(page(0)), true);
         assert_eq!(m.alloc.is_used(page(1)), true);
@@ -1784,10 +1851,10 @@ mod tests {
 
         let data = dummy_data(32);
 
-        let mut w1 = m.write(1);
+        let mut w1 = m.write(1).unwrap();
         w1.write(&mut m, &data).unwrap();
 
-        let mut w2 = m.write(2);
+        let mut w2 = m.write(2).unwrap();
         w2.write(&mut m, &data).unwrap();
 
         m.commit(&mut w2).unwrap();
@@ -1833,7 +1900,7 @@ mod tests {
         assert_eq!(m.file_flags(1), 0x00);
 
         // flags for nonempty files get set properly.
-        let mut w = m.write(1);
+        let mut w = m.write(1).unwrap();
         w.write(&mut m, &[0x00]).unwrap();
         let mut tx = m.transaction();
         w.commit(&mut tx).unwrap();
@@ -1842,7 +1909,7 @@ mod tests {
         assert_eq!(m.file_flags(1), 0x42);
 
         // when writing to a file, old flags are kept if we don't `.set_flags()`
-        let mut w = m.write(1);
+        let mut w = m.write(1).unwrap();
         w.write(&mut m, &[0x00]).unwrap();
         m.commit(&mut w).unwrap();
         assert_eq!(m.file_flags(1), 0x42);
@@ -1871,7 +1938,7 @@ mod tests {
         m.format();
         m.mount().unwrap();
 
-        let mut w = m.write(1);
+        let mut w = m.write(1).unwrap();
         w.write(&mut m, &[0x00]).unwrap();
         w.record_end();
         m.commit(&mut w).unwrap();
@@ -1888,7 +1955,7 @@ mod tests {
         m.format();
         m.mount().unwrap();
 
-        let mut w = m.write(1);
+        let mut w = m.write(1).unwrap();
         w.write(&mut m, &[0x00]).unwrap();
         w.record_end();
         w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE + 1]).unwrap();
@@ -1911,7 +1978,7 @@ mod tests {
         m.format();
         m.mount().unwrap();
 
-        let mut w = m.write(1);
+        let mut w = m.write(1).unwrap();
         w.write(&mut m, &[0x00]).unwrap();
         w.record_end();
         w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE + 1]).unwrap();
@@ -1936,7 +2003,7 @@ mod tests {
         m.format();
         m.mount().unwrap();
 
-        let mut w = m.write(1);
+        let mut w = m.write(1).unwrap();
         w.write(&mut m, &[0x00]).unwrap();
         w.record_end();
         w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE * 2 + 1]).unwrap();
@@ -1963,7 +2030,7 @@ mod tests {
         m.format();
         m.mount().unwrap();
 
-        let mut w = m.write(1);
+        let mut w = m.write(1).unwrap();
         w.write(&mut m, &[0x00]).unwrap();
         w.record_end();
         w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE * 2 + 1]).unwrap();
@@ -2000,7 +2067,7 @@ mod tests {
         m.format();
         m.mount().unwrap();
 
-        let mut w = m.write(1);
+        let mut w = m.write(1).unwrap();
         w.write(&mut m, &[0x00]).unwrap();
         w.record_end();
         w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE * 2 + 1]).unwrap();
@@ -2044,7 +2111,7 @@ mod tests {
         m.format();
         m.mount().unwrap();
 
-        let mut w = m.write(1);
+        let mut w = m.write(1).unwrap();
         w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE]).unwrap();
         w.record_end();
         w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE]).unwrap();
@@ -2085,7 +2152,7 @@ mod tests {
         m.format();
         m.mount().unwrap();
 
-        let mut w = m.write(1);
+        let mut w = m.write(1).unwrap();
         w.write(&mut m, &[0x00]).unwrap();
         m.commit(&mut w).unwrap();
 
@@ -2105,24 +2172,24 @@ mod tests {
         m.format();
         m.mount().unwrap();
 
+        let mut w = m.write(1).unwrap();
         for _ in 0..2 {
-            let mut w = m.write(1);
-            w.write(&mut m, &[0x00]).unwrap();
+            w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE]).unwrap();
             w.record_end();
-            m.commit(&mut w).unwrap();
         }
+        m.commit(&mut w).unwrap();
 
         let mut s = FileSearcher::new(m.read(1));
         assert_eq!(s.start(&mut m).unwrap(), true);
-        assert_eq!(s.reader().offset(&mut m), 1);
+        assert_eq!(s.reader().offset(&mut m), PAGE_MAX_PAYLOAD_SIZE);
         assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), false);
         assert_eq!(s.reader().offset(&mut m), 0);
 
         let mut s = FileSearcher::new(m.read(1));
         assert_eq!(s.start(&mut m).unwrap(), true);
-        assert_eq!(s.reader().offset(&mut m), 1);
+        assert_eq!(s.reader().offset(&mut m), PAGE_MAX_PAYLOAD_SIZE);
         assert_eq!(s.seek(&mut m, SeekDirection::Right).unwrap(), false);
-        assert_eq!(s.reader().offset(&mut m), 1);
+        assert_eq!(s.reader().offset(&mut m), PAGE_MAX_PAYLOAD_SIZE);
     }
 
     #[test]
@@ -2132,7 +2199,7 @@ mod tests {
         m.format();
         m.mount().unwrap();
 
-        let mut w = m.write(1);
+        let mut w = m.write(1).unwrap();
         w.write(&mut m, &[0x00; 238]).unwrap();
         w.record_end();
         m.commit(&mut w).unwrap();
@@ -2151,7 +2218,7 @@ mod tests {
         m.format();
         m.mount().unwrap();
 
-        let mut w = m.write(1);
+        let mut w = m.write(1).unwrap();
         w.write(&mut m, &[0x00; 4348]).unwrap();
         w.record_end();
         m.commit(&mut w).unwrap();
@@ -2170,7 +2237,7 @@ mod tests {
         m.format();
         m.mount().unwrap();
 
-        let mut w = m.write(1);
+        let mut w = m.write(1).unwrap();
         w.write(&mut m, &[0x00; 4348]).unwrap();
         w.record_end();
         w.write(&mut m, &[0x00; 4348]).unwrap();
@@ -2202,7 +2269,7 @@ mod tests {
         m.format();
         m.mount().unwrap();
 
-        let mut w = m.write(1);
+        let mut w = m.write(1).unwrap();
         w.write(&mut m, &[0x00; 4348]).unwrap();
         w.record_end();
         w.write(&mut m, &[0x00; 4348]).unwrap();
@@ -2262,7 +2329,7 @@ mod tests {
         m.mount().unwrap();
 
         const N: usize = PAGE_MAX_PAYLOAD_SIZE + 3;
-        let mut w = m.write(1);
+        let mut w = m.write(1).unwrap();
         w.write(&mut m, &[0x00; N]).unwrap();
         w.record_end();
         w.write(&mut m, &[0x00; N]).unwrap();
@@ -2312,7 +2379,7 @@ mod tests {
 
         let count = 20000 / 4;
 
-        let mut w = m.write(1);
+        let mut w = m.write(1).unwrap();
         for i in 1..=count {
             w.write(&mut m, &(i as u32).to_le_bytes()).unwrap();
             // make records not line up with page boundaries.
@@ -2403,7 +2470,7 @@ mod tests {
 
                     let data: Vec<_> = (0..n).map(|i| (seq_max + i) as u8).collect();
 
-                    let mut w = m.write(file_id);
+                    let mut w = m.write(file_id).unwrap();
                     w.write(&mut m, &data).unwrap();
                     m.commit(&mut w).unwrap();
 
