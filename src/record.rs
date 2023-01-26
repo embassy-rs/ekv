@@ -212,6 +212,7 @@ impl<F: Flash> Database<F> {
             read_key_or_empty(m, &mut r[i], &mut k[i])?;
         }
 
+        let mut progress = false;
         let done = loop {
             fn highest_bit(x: u32) -> Option<usize> {
                 match x {
@@ -242,6 +243,7 @@ impl<F: Flash> Database<F> {
             match highest_bit(bits) {
                 // All keys empty, means we've finished
                 None => break true,
+                // Copy value from the highest bit (so newest file)
                 Some(i) => {
                     let val_len = check_corrupted!(read_leb128(m, &mut r[i]));
 
@@ -266,7 +268,8 @@ impl<F: Flash> Database<F> {
 
                     trace!("do_compact: copying key from file {:?}: {:02x?}", src[i], &k[i][..]);
 
-                    // Copy value from the highest bit (so newest file)
+                    progress = true;
+
                     write_key(m, &mut w, &k[i])?;
                     write_leb128(m, &mut w, val_len)?;
                     copy(m, &mut r[i], &mut w, val_len as usize)?;
@@ -286,7 +289,11 @@ impl<F: Flash> Database<F> {
             }
         };
 
-        debug!("do_compact: stopped. done={:?}", done);
+        debug!("do_compact: stopped. done={:?} progress={:?}", done, progress);
+
+        // We should've made some progress, as long as the free page margins were respected.
+        // TODO maybe return corrupted error instead.
+        assert!(progress);
 
         let (src_flag, dst_flag) = match done {
             true => (0, 0),
