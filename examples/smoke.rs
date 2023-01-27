@@ -52,7 +52,7 @@ fn main() {
     }
 
     let mut f = MemFlash::new();
-    Database::format(&mut f);
+    Database::format(&mut f).unwrap();
     let mut db = Database::new(&mut f).unwrap();
 
     // Mirror hashmap. Should always match F
@@ -80,14 +80,12 @@ fn main() {
         wtx.commit().unwrap();
 
         // Write to mirror
-        for (key, value) in &tx {
+        for (&key, value) in &tx {
             m.insert(key.clone(), value.clone());
         }
 
         // Check everything
-        for i in 0..KEY_COUNT {
-            let key = &keys[i];
-
+        for key in &keys {
             let mut rtx = db.read_transaction().unwrap();
             let n = rtx.read(key, &mut buf).unwrap();
             let val1 = &buf[..n];
@@ -99,9 +97,7 @@ fn main() {
 
     // remount, recheck everything.
     let mut db = Database::new(&mut f).unwrap();
-    for i in 0..KEY_COUNT {
-        let key = &keys[i];
-
+    for key in &keys {
         let mut rtx = db.read_transaction().unwrap();
         let n = rtx.read(key, &mut buf).unwrap();
         let val1 = &buf[..n];

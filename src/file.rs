@@ -131,7 +131,7 @@ impl<F: Flash> FileManager<F> {
         // Erase all meta pages.
         for page_id in 0..PAGE_COUNT {
             let page_id = PageID::from_raw(page_id as _).unwrap();
-            if let Ok(h) = self.read_header::<MetaHeader>(page_id) {
+            if self.read_header::<MetaHeader>(page_id).is_ok() {
                 self.flash.erase(page_id).map_err(Error::Flash)?;
             }
         }
@@ -199,11 +199,9 @@ impl<F: Flash> FileManager<F> {
                     debug!("meta last_page_id out of range: {}", meta.file_id);
                     corrupted!();
                 }
-            } else {
-                if meta.first_seq.0 != 0 {
-                    debug!("meta last_page_id invalid, but first seq nonzero: {}", meta.file_id);
-                    corrupted!();
-                }
+            } else if meta.first_seq.0 != 0 {
+                debug!("meta last_page_id invalid, but first seq nonzero: {}", meta.file_id);
+                corrupted!();
             }
 
             files[meta.file_id as usize] = meta
@@ -494,7 +492,7 @@ impl<'a, F: Flash> Transaction<'a, F> {
 
         match res {
             Ok(()) => Ok(()),
-            Err(WriteError::Flash(e)) => return Err(Error::Flash(e)),
+            Err(WriteError::Flash(e)) => Err(Error::Flash(e)),
             Err(WriteError::Corrupted) => corrupted!(),
             Err(WriteError::Full) => {
                 // Existing meta page was full. Write a new one.
@@ -653,7 +651,7 @@ impl FileReader {
                 let (h, mut r) = m.read_page::<DataHeader>(pp.page_id).inspect_err(|e| {
                     debug!("failed read next page={:?}: {:?}", pp.page_id, e);
                 })?;
-                let n = (seq.sub(h.seq)) as usize;
+                let n = seq.sub(h.seq);
                 let got_n = r.skip(&mut m.flash, n)?;
                 let eof = r.is_at_eof(&mut m.flash)?;
                 if n != got_n || eof {
@@ -1083,7 +1081,7 @@ impl FileWriter {
                 this.writer = Some(w);
                 this.seq = pp.header.seq;
                 this.at_record_boundary = true;
-                this.record_boundary = (pp.header.record_boundary != u16::MAX).then(|| pp.header.record_boundary);
+                this.record_boundary = (pp.header.record_boundary != u16::MAX).then_some(pp.header.record_boundary);
                 this.last_page = pp.prev(m, f.first_seq)?;
                 this.rewritten_last_page_id = Some(pp.page_id);
             }
@@ -1092,7 +1090,7 @@ impl FileWriter {
         Ok(this)
     }
 
-    fn curr_seq<F: Flash>(&mut self, m: &mut FileManager<F>) -> Seq {
+    fn curr_seq<F: Flash>(&mut self, _m: &mut FileManager<F>) -> Seq {
         let n = self.writer.as_ref().map(|w| w.len()).unwrap_or(0);
         self.seq.add(n).unwrap()
     }
@@ -2168,8 +2166,6 @@ mod tests {
         w.write(&mut m, &[0x00]).unwrap();
         m.commit(&mut w).unwrap();
 
-        let mut buf = [0u8; 1];
-
         // start immediately return false, because there's nothing to bisect.
         // Only possible point to seek is start of the only page.
         let mut s = FileSearcher::new(m.read(1));
@@ -2389,11 +2385,11 @@ mod tests {
         m.format().unwrap();
         m.mount().unwrap();
 
-        let count = 20000 / 4;
+        let count: u32 = 20000 / 4;
 
         let mut w = m.write(1).unwrap();
         for i in 1..=count {
-            w.write(&mut m, &(i as u32).to_le_bytes()).unwrap();
+            w.write(&mut m, &i.to_le_bytes()).unwrap();
             // make records not line up with page boundaries.
             w.write(&mut m, &[0x00]).unwrap();
             w.record_end();

@@ -56,7 +56,7 @@ fn run(p: Params) -> f64 {
     }
 
     let mut f = MemFlash::new();
-    Database::format(&mut f);
+    Database::format(&mut f).unwrap();
     let mut db = Database::new(&mut f).unwrap();
 
     for key in &keys {
@@ -78,7 +78,7 @@ fn run(p: Params) -> f64 {
     db.flash_mut().read_bytes as f64 / baseline as f64
 }
 
-const OUT_FILE_NAME: &'static str = "area-chart.png";
+const OUT_FILE_NAME: &str = "area-chart.png";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
@@ -112,7 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     chart.configure_mesh().disable_x_mesh().disable_y_mesh().draw()?;
 
-    chart.draw_series(AreaSeries::new(data, 0.0, &RED.mix(0.2)).border_style(&RED))?;
+    chart.draw_series(AreaSeries::new(data, 0.0, RED.mix(0.2)).border_style(RED))?;
 
     root.present()?;
     Ok(())

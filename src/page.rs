@@ -38,7 +38,9 @@ impl<E> From<Error<E>> for ReadError<E> {
 
 /// Higher-layer header.
 ///
-/// Safety: must allow transmute to/from [u8;N]
+/// # Safety
+///
+/// Must allow transmute to/from [u8;N]
 pub unsafe trait Header: Sized {
     const MAGIC: u32;
 }
@@ -243,7 +245,7 @@ impl PageReader {
 
     pub fn read<F: Flash>(&mut self, flash: &mut F, data: &mut [u8]) -> Result<usize, Error<F::Error>> {
         trace!("PageReader({:?}): read({})", self.page_id, data.len());
-        if self.at_end || data.len() == 0 {
+        if self.at_end || data.is_empty() {
             trace!("read: at end or zero len");
             return Ok(0);
         }
@@ -289,10 +291,8 @@ impl PageReader {
         if self.at_end {
             return Ok(true);
         }
-        if self.chunk_pos == self.chunk_len {
-            if !self.next_chunk(flash)? {
-                return Ok(true);
-            }
+        if self.chunk_pos == self.chunk_len && !self.next_chunk(flash)? {
+            return Ok(true);
         }
         Ok(false)
     }

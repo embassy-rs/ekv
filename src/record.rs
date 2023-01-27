@@ -149,7 +149,7 @@ impl<F: Flash> Database<F> {
                         corrupted!()
                     }
 
-                    if let Err(_) = src.push(src_file) {
+                    if src.push(src_file).is_err() {
                         // at most BRANCHING_FACTOR src files
                         corrupted!()
                     }
@@ -235,7 +235,10 @@ impl<F: Flash> Database<F> {
             match read_key(m, r, buf) {
                 Ok(()) => Ok(()),
                 Err(ReadError::Flash(e)) => Err(Error::Flash(e)),
-                Err(ReadError::Eof) => Ok(buf.truncate(0)),
+                Err(ReadError::Eof) => {
+                    buf.truncate(0);
+                    Ok(())
+                }
                 Err(ReadError::Corrupted) => corrupted!(),
             }
         }
