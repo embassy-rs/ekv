@@ -17,11 +17,8 @@ None yet. This is a work in progress. Don't use it. When it's done, it will have
 
 Soon:
 
-- Support "progressive compaction": instead of compacting 2 whole files into one, do it page by page.
-- Handle storage full condition. Currently panics. It should trigger compactions, then return error if still full.
 - Add (optional) CRCs to check data integrity. Both headers and data.
 - Allow N read transactions + 1 write transaction concurrently.
-- Async
 - Free uncommitted pages on transaction drop.
 - Remove tombstone records when compacting the topmost level.
 

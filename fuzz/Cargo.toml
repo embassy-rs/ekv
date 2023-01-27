@@ -13,7 +13,7 @@ libfuzzer-sys = "0.4"
 env_logger = "0.10"
 ekv = { path = "..", features= ["std", "log", "_test"]}
 log = { version = "0.4.17" }
-
+tokio = { version = "1.24.2", default-features = false, features = ["rt"] }
 
 [[bin]]
 name = "read"

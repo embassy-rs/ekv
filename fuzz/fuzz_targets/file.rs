@@ -36,11 +36,17 @@ fn fuzz(ops: Input) {
     if logging {
         env_logger::init();
     }
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(fuzz_inner(ops, logging))
+}
 
+async fn fuzz_inner(ops: Input, logging: bool) {
     let mut f = MemFlash::new();
     let mut m = FileManager::new(&mut f);
-    m.format();
-    m.mount().unwrap();
+    m.format().await;
+    m.mount().await.unwrap();
 
     const FILE_ID: FileID = 1;
 
@@ -63,7 +69,10 @@ fn fuzz(ops: Input) {
                 }
 
                 // Open file if not open already.
-                let w = w.get_or_insert_with(|| m.write(FILE_ID).unwrap());
+                let w = match &mut w {
+                    Some(w) => w,
+                    None => w.insert(m.write(FILE_ID).await.unwrap()),
+                };
 
                 let id = (records.len() * 2 + 1) as u32;
                 records.push(Record {
@@ -72,37 +81,37 @@ fn fuzz(ops: Input) {
                     offs: write_offs,
                 });
 
-                w.write(&mut m, &id.to_le_bytes()).unwrap();
+                w.write(&mut m, &id.to_le_bytes()).await.unwrap();
                 buf[..len].fill(id as u8);
-                w.write(&mut m, &buf[..len]).unwrap();
+                w.write(&mut m, &buf[..len]).await.unwrap();
                 w.record_end();
 
                 write_offs += 4 + len;
             }
             Op::Commit => {
                 if let Some(w) = &mut w {
-                    m.commit(w).unwrap();
+                    m.commit(w).await.unwrap();
                 }
                 w = None;
             }
             Op::Search { id } => {
                 if let Some(w) = &mut w {
-                    m.commit(w).unwrap();
+                    m.commit(w).await.unwrap();
                 }
                 w = None;
 
                 if logging {
-                    m.dump();
+                    m.dump().await;
                 }
 
-                let mut s = FileSearcher::new(m.read(FILE_ID));
-                let mut ok = s.start(&mut m).unwrap();
+                let mut s = FileSearcher::new(m.read(FILE_ID).await);
+                let mut ok = s.start(&mut m).await.unwrap();
                 let mut found = false;
 
                 // Binary search.
                 while ok {
                     let mut got_id = [0u8; 4];
-                    s.reader().read(&mut m, &mut got_id).unwrap();
+                    s.reader().read(&mut m, &mut got_id).await.unwrap();
                     let got_id = u32::from_le_bytes(got_id);
                     assert!(got_id % 2 == 1);
 
@@ -116,13 +125,13 @@ fn fuzz(ops: Input) {
                     };
 
                     // Not found, do a binary search step.
-                    ok = s.seek(&mut m, dir).unwrap();
+                    ok = s.seek(&mut m, dir).await.unwrap();
                 }
 
                 // Linear search
                 loop {
                     let mut got_id = [0u8; 4];
-                    match s.reader().read(&mut m, &mut got_id) {
+                    match s.reader().read(&mut m, &mut got_id).await {
                         Ok(()) => {}
                         Err(ReadError::Corrupted) => panic!("corrupted!!"),
                         Err(ReadError::Eof) => break,
@@ -141,7 +150,7 @@ fn fuzz(ops: Input) {
                     }
 
                     let r = &records[got_id as usize / 2];
-                    s.reader().skip(&mut m, r.len).unwrap();
+                    s.reader().skip(&mut m, r.len).await.unwrap();
                 }
 
                 let i = id as usize / 2;
@@ -159,13 +168,13 @@ fn fuzz(ops: Input) {
                 }
 
                 if let Some(w) = &mut w {
-                    m.commit(w).unwrap();
+                    m.commit(w).await.unwrap();
                 }
                 w = None;
 
                 let mut tx = m.transaction();
-                tx.truncate(FILE_ID, offs - trunc_offs).unwrap();
-                tx.commit().unwrap();
+                tx.truncate(FILE_ID, offs - trunc_offs).await.unwrap();
+                tx.commit().await.unwrap();
 
                 trunc_offs = offs;
             }

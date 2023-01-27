@@ -44,7 +44,7 @@ fn print_counters(f: &mut MemFlash, baseline: usize) {
     );
 }
 
-fn run(p: Params) -> f64 {
+async fn run(p: Params) -> f64 {
     // Generate keys
     let mut keys = Vec::new();
     keys.push(b"foo".to_vec());
@@ -56,13 +56,13 @@ fn run(p: Params) -> f64 {
     }
 
     let mut f = MemFlash::new();
-    Database::format(&mut f).unwrap();
-    let mut db = Database::new(&mut f).unwrap();
+    Database::format(&mut f).await.unwrap();
+    let mut db = Database::new(&mut f).await.unwrap();
 
     for key in &keys {
-        let mut wtx = db.write_transaction().unwrap();
-        wtx.write(key, &rand_data(p.val_len)).unwrap();
-        wtx.commit().unwrap();
+        let mut wtx = db.write_transaction().await.unwrap();
+        wtx.write(key, &rand_data(p.val_len)).await.unwrap();
+        wtx.commit().await.unwrap();
     }
 
     db.flash_mut().reset_counters();
@@ -70,8 +70,8 @@ fn run(p: Params) -> f64 {
     let mut buf = [0; 1024];
 
     for key in &keys {
-        let mut rtx = db.read_transaction().unwrap();
-        rtx.read(key, &mut buf).unwrap();
+        let mut rtx = db.read_transaction().await.unwrap();
+        rtx.read(key, &mut buf).await.unwrap();
     }
 
     let baseline = p.key_count * (p.key_len + p.val_len);
@@ -80,7 +80,8 @@ fn run(p: Params) -> f64 {
 
 const OUT_FILE_NAME: &str = "area-chart.png";
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
 
     let max = 500;
@@ -91,7 +92,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             key_count: count,
             key_len: 4,
             val_len: 10,
-        });
+        })
+        .await;
         data.push((count as f64, amplification));
     }
 

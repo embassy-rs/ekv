@@ -111,12 +111,12 @@ impl<F: Flash> FileManager<F> {
         self.files[file_id as usize].last_page.is_none()
     }
 
-    pub fn read(&mut self, file_id: FileID) -> FileReader {
+    pub async fn read(&mut self, file_id: FileID) -> FileReader {
         FileReader::new(self, file_id)
     }
 
-    pub fn write(&mut self, file_id: FileID) -> Result<FileWriter, Error<F::Error>> {
-        FileWriter::new(self, file_id)
+    pub async fn write(&mut self, file_id: FileID) -> Result<FileWriter, Error<F::Error>> {
+        FileWriter::new(self, file_id).await
     }
 
     pub fn file_flags(&self, file_id: FileID) -> u8 {
@@ -127,31 +127,31 @@ impl<F: Flash> FileManager<F> {
         (0..FILE_COUNT as FileID).filter(move |&i| self.file_flags(i) & flag != 0)
     }
 
-    pub fn format(&mut self) -> Result<(), Error<F::Error>> {
+    pub async fn format(&mut self) -> Result<(), Error<F::Error>> {
         // Erase all meta pages.
         for page_id in 0..PAGE_COUNT {
             let page_id = PageID::from_raw(page_id as _).unwrap();
-            if self.read_header::<MetaHeader>(page_id).is_ok() {
-                self.flash.erase(page_id).map_err(Error::Flash)?;
+            if self.read_header::<MetaHeader>(page_id).await.is_ok() {
+                self.flash.erase(page_id).await.map_err(Error::Flash)?;
             }
         }
 
         // Write initial meta page.
         let page_id = PageID::from_raw(0).unwrap();
-        let mut w = self.write_page(page_id);
-        w.write_header(&mut self.flash, MetaHeader { seq: Seq(1) })?;
+        let mut w = self.write_page(page_id).await;
+        w.write_header(&mut self.flash, MetaHeader { seq: Seq(1) }).await?;
 
         Ok(())
     }
 
-    pub fn mount(&mut self) -> Result<(), Error<F::Error>> {
+    pub async fn mount(&mut self) -> Result<(), Error<F::Error>> {
         self.alloc.reset();
 
         let mut meta_page_id = None;
         let mut meta_seq = Seq::ZERO;
         for page_id in 0..PAGE_COUNT {
             let page_id = PageID::from_raw(page_id as _).unwrap();
-            if let Ok(h) = self.read_header::<MetaHeader>(page_id) {
+            if let Ok(h) = self.read_header::<MetaHeader>(page_id).await {
                 if h.seq > meta_seq {
                     meta_page_id = Some(page_id);
                     meta_seq = h.seq;
@@ -167,7 +167,7 @@ impl<F: Flash> FileManager<F> {
         self.meta_seq = meta_seq;
         self.alloc.mark_used(meta_page_id);
 
-        let (_, mut r) = self.read_page::<MetaHeader>(meta_page_id).inspect_err(|e| {
+        let (_, mut r) = self.read_page::<MetaHeader>(meta_page_id).await.inspect_err(|e| {
             debug!("failed read meta_page_id={:?}: {:?}", meta_page_id, e);
         })?;
 
@@ -179,7 +179,7 @@ impl<F: Flash> FileManager<F> {
         }; FILE_COUNT];
         loop {
             let mut meta = [0; FileMeta::SIZE];
-            let n = r.read(&mut self.flash, &mut meta)?;
+            let n = r.read(&mut self.flash, &mut meta).await?;
             if n == 0 {
                 break;
             }
@@ -214,10 +214,10 @@ impl<F: Flash> FileManager<F> {
                 continue;
             };
 
-            let (h, mut r) = self.read_page::<DataHeader>(last_page_id).inspect_err(|e| {
+            let (h, mut r) = self.read_page::<DataHeader>(last_page_id).await.inspect_err(|e| {
                 debug!("read last_page_id={:?} file_id={}: {:?}", last_page_id, file_id, e);
             })?;
-            let page_len = r.skip(&mut self.flash, PAGE_SIZE)?;
+            let page_len = r.skip(&mut self.flash, PAGE_SIZE).await?;
             let last_seq = h.seq.add(page_len)?;
 
             let mut p = Some(PagePointer {
@@ -248,7 +248,7 @@ impl<F: Flash> FileManager<F> {
                     corrupted!();
                 }
                 self.alloc.mark_used(pp.page_id);
-                p = pp.prev(self, meta.first_seq)?;
+                p = pp.prev(self, meta.first_seq).await?;
             }
         }
 
@@ -260,22 +260,22 @@ impl<F: Flash> FileManager<F> {
     }
 
     // convenience method
-    pub fn commit(&mut self, w: &mut FileWriter) -> Result<(), Error<F::Error>> {
+    pub async fn commit(&mut self, w: &mut FileWriter) -> Result<(), Error<F::Error>> {
         let mut tx = self.transaction();
-        w.commit(&mut tx)?;
-        tx.commit()?;
+        w.commit(&mut tx).await?;
+        tx.commit().await?;
         Ok(())
     }
 
     // convenience method
-    pub fn truncate(&mut self, file_id: FileID, bytes: usize) -> Result<(), Error<F::Error>> {
+    pub async fn truncate(&mut self, file_id: FileID, bytes: usize) -> Result<(), Error<F::Error>> {
         let mut tx = self.transaction();
-        tx.truncate(file_id, bytes)?;
-        tx.commit()?;
+        tx.truncate(file_id, bytes).await?;
+        tx.commit().await?;
         Ok(())
     }
 
-    fn get_file_page(&mut self, file_id: FileID, seq: Seq) -> Result<Option<PagePointer>, Error<F::Error>> {
+    async fn get_file_page(&mut self, file_id: FileID, seq: Seq) -> Result<Option<PagePointer>, Error<F::Error>> {
         let f = &self.files[file_id as usize];
         let Some(last) = f.last_page else {
             return Ok(None)
@@ -283,11 +283,11 @@ impl<F: Flash> FileManager<F> {
         if seq < f.first_seq || seq >= f.last_seq {
             Ok(None)
         } else {
-            Ok(Some(last.prev_seq(self, seq)?))
+            Ok(Some(last.prev_seq(self, seq).await?))
         }
     }
 
-    fn free_between(
+    async fn free_between(
         &mut self,
         mut from: Option<PagePointer>,
         to: Option<PagePointer>,
@@ -300,21 +300,21 @@ impl<F: Flash> FileManager<F> {
                 }
             }
             self.free_page(pp.page_id);
-            from = pp.prev(self, seq_limit)?;
+            from = pp.prev(self, seq_limit).await?;
         }
         Ok(())
     }
 
-    fn read_page<H: Header>(&mut self, page_id: PageID) -> Result<(H, PageReader), Error<F::Error>> {
-        self.pages.read(&mut self.flash, page_id)
+    async fn read_page<H: Header>(&mut self, page_id: PageID) -> Result<(H, PageReader), Error<F::Error>> {
+        self.pages.read(&mut self.flash, page_id).await
     }
 
-    fn read_header<H: Header>(&mut self, page_id: PageID) -> Result<H, Error<F::Error>> {
-        self.pages.read_header(&mut self.flash, page_id)
+    async fn read_header<H: Header>(&mut self, page_id: PageID) -> Result<H, Error<F::Error>> {
+        self.pages.read_header(&mut self.flash, page_id).await
     }
 
-    fn write_page<H: Header>(&mut self, page_id: PageID) -> PageWriter<H> {
-        self.pages.write(&mut self.flash, page_id)
+    async fn write_page<H: Header>(&mut self, page_id: PageID) -> PageWriter<H> {
+        self.pages.write(&mut self.flash, page_id).await
     }
 
     fn free_page(&mut self, page_id: PageID) {
@@ -325,17 +325,17 @@ impl<F: Flash> FileManager<F> {
     }
 
     #[cfg(feature = "std")]
-    pub fn dump(&mut self) {
+    pub async fn dump(&mut self) {
         for file_id in 0..FILE_COUNT {
             info!("====== FILE {} ======", file_id);
-            if let Err(e) = self.dump_file(file_id as _) {
+            if let Err(e) = self.dump_file(file_id as _).await {
                 info!("failed to dump file: {:?}", e);
             }
         }
     }
 
     #[cfg(feature = "std")]
-    pub fn dump_file(&mut self, file_id: FileID) -> Result<(), Error<F::Error>> {
+    pub async fn dump_file(&mut self, file_id: FileID) -> Result<(), Error<F::Error>> {
         let f = self.files[file_id as usize];
         info!(
             "  seq: {:?}..{:?} len {:?} last_page {:?} flags {:02x}",
@@ -350,13 +350,13 @@ impl<F: Flash> FileManager<F> {
         let mut pp = f.last_page;
         while let Some(p) = pp {
             pages.push(p);
-            pp = p.prev(self, f.first_seq)?;
+            pp = p.prev(self, f.first_seq).await?;
         }
 
         let mut buf = [0; 1024];
         for p in pages.iter().rev() {
-            let (h, mut r) = self.read_page::<DataHeader>(p.page_id)?;
-            let n = r.read(&mut self.flash, &mut buf)?;
+            let (h, mut r) = self.read_page::<DataHeader>(p.page_id).await?;
+            let n = r.read(&mut self.flash, &mut buf).await?;
             let data = &buf[..n];
 
             let rb = if h.record_boundary == u16::MAX {
@@ -402,7 +402,7 @@ impl<'a, F: Flash> Drop for Transaction<'a, F> {
 }
 
 impl<'a, F: Flash> Transaction<'a, F> {
-    pub fn set_flags(&mut self, file_id: FileID, flags: u8) -> Result<(), Error<F::Error>> {
+    pub async fn set_flags(&mut self, file_id: FileID, flags: u8) -> Result<(), Error<F::Error>> {
         let f = &mut self.m.files[file_id as usize];
         // flags only stick to nonempty files.
         if f.last_page.is_some() && f.flags != flags {
@@ -412,14 +412,14 @@ impl<'a, F: Flash> Transaction<'a, F> {
         Ok(())
     }
 
-    pub fn rename(&mut self, from: FileID, to: FileID) -> Result<(), Error<F::Error>> {
+    pub async fn rename(&mut self, from: FileID, to: FileID) -> Result<(), Error<F::Error>> {
         self.m.files.swap(from as usize, to as usize);
         self.m.files[from as usize].dirty = true;
         self.m.files[to as usize].dirty = true;
         Ok(())
     }
 
-    pub fn truncate(&mut self, file_id: FileID, bytes: usize) -> Result<(), Error<F::Error>> {
+    pub async fn truncate(&mut self, file_id: FileID, bytes: usize) -> Result<(), Error<F::Error>> {
         if bytes == 0 {
             return Ok(());
         }
@@ -434,9 +434,14 @@ impl<'a, F: Flash> Transaction<'a, F> {
         let p = if seq == f.last_seq {
             f.last_page
         } else {
-            self.m.get_file_page(file_id, seq)?.unwrap().prev(self.m, old_seq)?
+            self.m
+                .get_file_page(file_id, seq)
+                .await?
+                .unwrap()
+                .prev(self.m, old_seq)
+                .await?
         };
-        self.m.free_between(p, None, old_seq)?;
+        self.m.free_between(p, None, old_seq).await?;
 
         let f = &mut self.m.files[file_id as usize];
         if seq == f.last_seq {
@@ -462,7 +467,11 @@ impl<'a, F: Flash> Transaction<'a, F> {
         Ok(())
     }
 
-    fn write_file_meta(&mut self, w: &mut PageWriter<MetaHeader>, file_id: FileID) -> Result<(), WriteError<F::Error>> {
+    async fn write_file_meta(
+        &mut self,
+        w: &mut PageWriter<MetaHeader>,
+        file_id: FileID,
+    ) -> Result<(), WriteError<F::Error>> {
         let f = &self.m.files[file_id as usize];
         let meta = FileMeta {
             file_id,
@@ -470,7 +479,7 @@ impl<'a, F: Flash> Transaction<'a, F> {
             first_seq: f.first_seq,
             last_page_id: f.last_page.as_ref().map(|pp| pp.page_id).into(),
         };
-        let n = w.write(&mut self.m.flash, &meta.to_bytes())?;
+        let n = w.write(&mut self.m.flash, &meta.to_bytes()).await?;
         if n != FileMeta::SIZE {
             return Err(WriteError::Full);
         }
@@ -478,16 +487,20 @@ impl<'a, F: Flash> Transaction<'a, F> {
         Ok(())
     }
 
-    pub fn commit(mut self) -> Result<(), Error<F::Error>> {
+    pub async fn commit(mut self) -> Result<(), Error<F::Error>> {
         // Try appending to the existing meta page.
         let res: Result<(), WriteError<F::Error>> = try {
-            let (_, mut mw) = self.m.pages.write_append(&mut self.m.flash, self.m.meta_page_id)?;
+            let (_, mut mw) = self
+                .m
+                .pages
+                .write_append(&mut self.m.flash, self.m.meta_page_id)
+                .await?;
             for file_id in 0..FILE_COUNT {
                 if self.m.files[file_id].dirty {
-                    self.write_file_meta(&mut mw, file_id as FileID)?;
+                    self.write_file_meta(&mut mw, file_id as FileID).await?;
                 }
             }
-            mw.commit(&mut self.m.flash)?;
+            mw.commit(&mut self.m.flash).await?;
         };
 
         match res {
@@ -499,18 +512,19 @@ impl<'a, F: Flash> Transaction<'a, F> {
 
                 let page_id = self.m.alloc.allocate();
                 trace!("meta: allocated page {:?}", page_id);
-                let mut w = self.m.write_page(page_id);
+                let mut w = self.m.write_page(page_id).await;
                 for file_id in 0..FILE_COUNT as FileID {
                     // Since we're writing a new page from scratch, no need to
                     // write metas for empty files.
                     if self.m.files[file_id as usize].last_page.is_some() {
-                        self.write_file_meta(&mut w, file_id).unwrap();
+                        self.write_file_meta(&mut w, file_id).await.unwrap();
                     }
                 }
 
                 self.m.meta_seq = self.m.meta_seq.add(1)?; // TODO handle wraparound
-                w.write_header(&mut self.m.flash, MetaHeader { seq: self.m.meta_seq })?;
-                w.commit(&mut self.m.flash)?;
+                w.write_header(&mut self.m.flash, MetaHeader { seq: self.m.meta_seq })
+                    .await?;
+                w.commit(&mut self.m.flash).await?;
 
                 // free the old one.
                 self.m.free_page(self.m.meta_page_id);
@@ -530,7 +544,11 @@ struct PagePointer {
 }
 
 impl PagePointer {
-    fn prev<F: Flash>(self, m: &mut FileManager<F>, seq_limit: Seq) -> Result<Option<PagePointer>, Error<F::Error>> {
+    async fn prev<F: Flash>(
+        self,
+        m: &mut FileManager<F>,
+        seq_limit: Seq,
+    ) -> Result<Option<PagePointer>, Error<F::Error>> {
         if self.header.seq <= seq_limit {
             return Ok(None);
         }
@@ -544,7 +562,7 @@ impl PagePointer {
             corrupted!();
         }
 
-        let h2 = check_corrupted!(m.read_header::<DataHeader>(p2));
+        let h2 = check_corrupted!(m.read_header::<DataHeader>(p2).await);
 
         // Check seq always decreases. This avoids infinite loops
         // TODO we can make this check stricter: h2.seq == self.header.seq - page_len
@@ -561,7 +579,7 @@ impl PagePointer {
         }))
     }
 
-    fn prev_seq<F: Flash>(mut self, m: &mut FileManager<F>, seq: Seq) -> Result<PagePointer, Error<F::Error>> {
+    async fn prev_seq<F: Flash>(mut self, m: &mut FileManager<F>, seq: Seq) -> Result<PagePointer, Error<F::Error>> {
         while self.header.seq > seq {
             let i = skiplist_index(seq, self.header.seq);
             let Some(p2) = self.header.skiplist[i].into_option() else {
@@ -573,7 +591,7 @@ impl PagePointer {
                 corrupted!();
             }
 
-            let h2 = check_corrupted!(m.read_header::<DataHeader>(p2));
+            let h2 = check_corrupted!(m.read_header::<DataHeader>(p2).await);
 
             // Check seq always decreases. This avoids infinite loops
             if h2.seq >= self.header.seq {
@@ -629,12 +647,12 @@ impl FileReader {
             _ => None,
         }
     }
-    fn next_page<F: Flash>(&mut self, m: &mut FileManager<F>) -> Result<(), Error<F::Error>> {
+    async fn next_page<F: Flash>(&mut self, m: &mut FileManager<F>) -> Result<(), Error<F::Error>> {
         let seq = self.curr_seq(m);
 
         let prev_page_id = self.page_id();
 
-        self.seek_seq(m, seq)?;
+        self.seek_seq(m, seq).await?;
 
         let curr_page_id = self.page_id();
         if prev_page_id == curr_page_id && curr_page_id.is_some() {
@@ -645,15 +663,15 @@ impl FileReader {
         Ok(())
     }
 
-    fn seek_seq<F: Flash>(&mut self, m: &mut FileManager<F>, seq: Seq) -> Result<(), Error<F::Error>> {
-        self.state = match m.get_file_page(self.file_id, seq)? {
+    async fn seek_seq<F: Flash>(&mut self, m: &mut FileManager<F>, seq: Seq) -> Result<(), Error<F::Error>> {
+        self.state = match m.get_file_page(self.file_id, seq).await? {
             Some(pp) => {
-                let (h, mut r) = m.read_page::<DataHeader>(pp.page_id).inspect_err(|e| {
+                let (h, mut r) = m.read_page::<DataHeader>(pp.page_id).await.inspect_err(|e| {
                     debug!("failed read next page={:?}: {:?}", pp.page_id, e);
                 })?;
                 let n = seq.sub(h.seq);
-                let got_n = r.skip(&mut m.flash, n)?;
-                let eof = r.is_at_eof(&mut m.flash)?;
+                let got_n = r.skip(&mut m.flash, n).await?;
+                let eof = r.is_at_eof(&mut m.flash).await?;
                 if n != got_n || eof {
                     debug!(
                         "found seq hole in file. page={:?} h.seq={:?} seq={:?} n={} got_n={} eof={}",
@@ -668,20 +686,24 @@ impl FileReader {
         Ok(())
     }
 
-    pub fn read<F: Flash>(&mut self, m: &mut FileManager<F>, mut data: &mut [u8]) -> Result<(), ReadError<F::Error>> {
+    pub async fn read<F: Flash>(
+        &mut self,
+        m: &mut FileManager<F>,
+        mut data: &mut [u8],
+    ) -> Result<(), ReadError<F::Error>> {
         while !data.is_empty() {
             match &mut self.state {
                 ReaderState::Finished => return Err(ReadError::Eof),
                 ReaderState::Created => {
-                    self.next_page(m)?;
+                    self.next_page(m).await?;
                     continue;
                 }
                 ReaderState::Reading(s) => {
-                    let n = s.reader.read(&mut m.flash, data)?;
+                    let n = s.reader.read(&mut m.flash, data).await?;
                     data = &mut data[n..];
                     s.seq = s.seq.add(n)?;
                     if n == 0 {
-                        self.next_page(m)?;
+                        self.next_page(m).await?;
                     }
                 }
             }
@@ -689,12 +711,12 @@ impl FileReader {
         Ok(())
     }
 
-    pub fn skip<F: Flash>(&mut self, m: &mut FileManager<F>, mut len: usize) -> Result<(), ReadError<F::Error>> {
+    pub async fn skip<F: Flash>(&mut self, m: &mut FileManager<F>, mut len: usize) -> Result<(), ReadError<F::Error>> {
         // advance within the current page.
         if let ReaderState::Reading(s) = &mut self.state {
             // Only worth trying if the skip might not exhaust the current page
             if len < PAGE_MAX_PAYLOAD_SIZE {
-                let n = s.reader.skip(&mut m.flash, len)?;
+                let n = s.reader.skip(&mut m.flash, len).await?;
                 len -= n;
                 s.seq = s.seq.add(n).unwrap();
             }
@@ -713,7 +735,7 @@ impl FileReader {
                 return Err(ReadError::Eof);
             }
 
-            self.seek_seq(m, new_seq)?;
+            self.seek_seq(m, new_seq).await?;
         }
 
         Ok(())
@@ -724,14 +746,14 @@ impl FileReader {
         self.curr_seq(m).sub(first_seq)
     }
 
-    pub fn seek<F: Flash>(&mut self, m: &mut FileManager<F>, offs: usize) -> Result<(), ReadError<F::Error>> {
+    pub async fn seek<F: Flash>(&mut self, m: &mut FileManager<F>, offs: usize) -> Result<(), ReadError<F::Error>> {
         let first_seq = m.files[self.file_id as usize].first_seq;
         let new_seq = first_seq.add(offs).map_err(|_| ReadError::Eof)?;
         if new_seq > m.files[self.file_id as usize].last_seq {
             return Err(ReadError::Eof);
         }
 
-        self.seek_seq(m, new_seq)?;
+        self.seek_seq(m, new_seq).await?;
         Ok(())
     }
 }
@@ -807,7 +829,7 @@ impl FileSearcher {
         &mut self.r
     }
 
-    pub fn start<F: Flash>(&mut self, m: &mut FileManager<F>) -> Result<bool, Error<F::Error>> {
+    pub async fn start<F: Flash>(&mut self, m: &mut FileManager<F>) -> Result<bool, Error<F::Error>> {
         let f = &m.files[self.r.file_id as usize];
         self.result = f.first_seq;
         self.left = f.first_seq;
@@ -831,7 +853,7 @@ impl FileSearcher {
                     self.right,
                     self.right_skiplist
                 );
-                self.really_seek(m)
+                self.really_seek(m).await
             }
             None => {
                 trace!("search start file={:?}: empty file", self.r.file_id);
@@ -840,7 +862,7 @@ impl FileSearcher {
         }
     }
 
-    fn really_seek<F: Flash>(&mut self, m: &mut FileManager<F>) -> Result<bool, Error<F::Error>> {
+    async fn really_seek<F: Flash>(&mut self, m: &mut FileManager<F>) -> Result<bool, Error<F::Error>> {
         let left = self.left.add(1).unwrap();
         let mut i = if left >= self.right {
             0
@@ -853,7 +875,7 @@ impl FileSearcher {
                 if let Some(page_id) = self.right_skiplist[i].into_option() {
                     let seq = skiplist_seq(self.right, i);
                     if seq >= self.left {
-                        match self.seek_to_page(m, page_id, seq) {
+                        match self.seek_to_page(m, page_id, seq).await {
                             Ok(()) => return Ok(true),
                             Err(SearchSeekError::Flash(e)) => return Err(Error::Flash(e)),
                             Err(SearchSeekError::Corrupted) => corrupted!(),
@@ -869,7 +891,7 @@ impl FileSearcher {
 
             if i == 0 {
                 let seq = self.result;
-                self.reader().seek_seq(m, seq)?;
+                self.reader().seek_seq(m, seq).await?;
                 return Ok(false);
             }
 
@@ -878,7 +900,7 @@ impl FileSearcher {
         }
     }
 
-    fn seek_to_page<F: Flash>(
+    async fn seek_to_page<F: Flash>(
         &mut self,
         m: &mut FileManager<F>,
         mut page_id: PageID,
@@ -892,7 +914,7 @@ impl FileSearcher {
             if page_id.index() >= PAGE_COUNT {
                 corrupted!()
             }
-            let (h, r) = m.read_page::<DataHeader>(page_id).inspect_err(|e| {
+            let (h, r) = m.read_page::<DataHeader>(page_id).await.inspect_err(|e| {
                 debug!("failed read next page={:?}: {:?}", page_id, e);
             })?;
 
@@ -948,7 +970,7 @@ impl FileSearcher {
             return Err(SearchSeekError::TooMuchLeft);
         }
 
-        let n = r.skip(&mut m.flash, b)?;
+        let n = r.skip(&mut m.flash, b).await?;
         if n != b {
             corrupted!()
         }
@@ -986,7 +1008,11 @@ impl FileSearcher {
         Ok(())
     }
 
-    pub fn seek<F: Flash>(&mut self, m: &mut FileManager<F>, dir: SeekDirection) -> Result<bool, Error<F::Error>> {
+    pub async fn seek<F: Flash>(
+        &mut self,
+        m: &mut FileManager<F>,
+        dir: SeekDirection,
+    ) -> Result<bool, Error<F::Error>> {
         match dir {
             SeekDirection::Left => {
                 trace!("search seek left");
@@ -1000,7 +1026,7 @@ impl FileSearcher {
             }
         }
 
-        self.really_seek(m)
+        self.really_seek(m).await
     }
 }
 
@@ -1019,7 +1045,7 @@ pub struct FileWriter {
 }
 
 impl FileWriter {
-    fn new<F: Flash>(m: &mut FileManager<F>, file_id: FileID) -> Result<Self, Error<F::Error>> {
+    async fn new<F: Flash>(m: &mut FileManager<F>, file_id: FileID) -> Result<Self, Error<F::Error>> {
         let f = m.files[file_id as usize];
 
         let mut this = Self {
@@ -1036,12 +1062,12 @@ impl FileWriter {
         // This is needed to ensure progressive compaction does not actually un-compact
         // the data, due to leaving pages not full in the middle of the file.
         if let Some(pp) = f.last_page {
-            let (_, mut r) = m.read_page::<DataHeader>(pp.page_id)?;
+            let (_, mut r) = m.read_page::<DataHeader>(pp.page_id).await?;
 
             // Measure total page len.
             let mut page_len = 0;
             loop {
-                let n = r.skip(&mut m.flash, PAGE_MAX_PAYLOAD_SIZE)?;
+                let n = r.skip(&mut m.flash, PAGE_MAX_PAYLOAD_SIZE).await?;
                 if n == 0 {
                     break;
                 }
@@ -1054,22 +1080,22 @@ impl FileWriter {
                 // TODO: if possible, use PageManager::write_append to avoid the copy.
 
                 // seek again to start.
-                let (_, mut r) = m.read_page::<DataHeader>(pp.page_id)?;
+                let (_, mut r) = m.read_page::<DataHeader>(pp.page_id).await?;
 
                 // open new page
                 let page_id = m.alloc.allocate();
                 trace!("writer: last page is not full. Copying it to new page {:?}", page_id);
-                let mut w = m.write_page(page_id);
+                let mut w = m.write_page(page_id).await;
 
                 let mut buf = [0; 128];
                 loop {
-                    let n = r.read(&mut m.flash, &mut buf)?;
+                    let n = r.read(&mut m.flash, &mut buf).await?;
                     if n == 0 {
                         break;
                     }
                     let mut data = &buf[..n];
                     while !data.is_empty() {
-                        let n = w.write(&mut m.flash, data)?;
+                        let n = w.write(&mut m.flash, data).await?;
                         data = &data[n..];
 
                         // the new page can't get full, because we're not writing more
@@ -1082,7 +1108,7 @@ impl FileWriter {
                 this.seq = pp.header.seq;
                 this.at_record_boundary = true;
                 this.record_boundary = (pp.header.record_boundary != u16::MAX).then_some(pp.header.record_boundary);
-                this.last_page = pp.prev(m, f.first_seq)?;
+                this.last_page = pp.prev(m, f.first_seq).await?;
                 this.rewritten_last_page_id = Some(pp.page_id);
             }
         }
@@ -1100,7 +1126,7 @@ impl FileWriter {
         self.curr_seq(m).sub(first_seq)
     }
 
-    fn flush_header<F: Flash>(
+    async fn flush_header<F: Flash>(
         &mut self,
         m: &mut FileManager<F>,
         mut w: PageWriter<DataHeader>,
@@ -1126,8 +1152,8 @@ impl FileWriter {
             skiplist,
             record_boundary,
         };
-        w.write_header(&mut m.flash, header)?;
-        w.commit(&mut m.flash)?;
+        w.write_header(&mut m.flash, header).await?;
+        w.commit(&mut m.flash).await?;
 
         trace!(
             "flush_header: page={:?} h={:?} record_boundary={:?}",
@@ -1147,29 +1173,29 @@ impl FileWriter {
         Ok(())
     }
 
-    fn next_page<F: Flash>(&mut self, m: &mut FileManager<F>) -> Result<(), Error<F::Error>> {
+    async fn next_page<F: Flash>(&mut self, m: &mut FileManager<F>) -> Result<(), Error<F::Error>> {
         if let Some(w) = mem::replace(&mut self.writer, None) {
-            self.flush_header(m, w)?;
+            self.flush_header(m, w).await?;
         }
 
         let page_id = m.alloc.allocate();
         trace!("writer: allocated page {:?}", page_id);
-        self.writer = Some(m.write_page(page_id));
+        self.writer = Some(m.write_page(page_id).await);
         Ok(())
     }
 
-    pub fn write<F: Flash>(&mut self, m: &mut FileManager<F>, mut data: &[u8]) -> Result<(), Error<F::Error>> {
+    pub async fn write<F: Flash>(&mut self, m: &mut FileManager<F>, mut data: &[u8]) -> Result<(), Error<F::Error>> {
         while !data.is_empty() {
             match &mut self.writer {
                 None => {
-                    self.next_page(m)?;
+                    self.next_page(m).await?;
                     continue;
                 }
                 Some(w) => {
-                    let n = w.write(&mut m.flash, data)?;
+                    let n = w.write(&mut m.flash, data).await?;
                     data = &data[n..];
                     if n == 0 {
-                        self.next_page(m)?;
+                        self.next_page(m).await?;
                     }
 
                     // Wrote some data, we're no longer at a boundary.
@@ -1180,9 +1206,9 @@ impl FileWriter {
         Ok(())
     }
 
-    pub fn commit<F: Flash>(&mut self, tx: &mut Transaction<'_, F>) -> Result<(), Error<F::Error>> {
+    pub async fn commit<F: Flash>(&mut self, tx: &mut Transaction<'_, F>) -> Result<(), Error<F::Error>> {
         if let Some(w) = mem::replace(&mut self.writer, None) {
-            self.flush_header(tx.m, w)?;
+            self.flush_header(tx.m, w).await?;
             let f = &mut tx.m.files[self.file_id as usize];
             let old_f = *f;
             f.last_page = self.last_page;
@@ -1206,7 +1232,7 @@ impl FileWriter {
         Ok(())
     }
 
-    pub fn discard<F: Flash>(&mut self, m: &mut FileManager<F>) {
+    pub async fn discard<F: Flash>(&mut self, m: &mut FileManager<F>) -> Result<(), Error<F::Error>> {
         if let Some(w) = &self.writer {
             // Free the page we're writing now (not yet committed)
             let page_id = w.page_id();
@@ -1214,8 +1240,9 @@ impl FileWriter {
 
             // Free previous pages, if any
             let f = &m.files[self.file_id as usize];
-            m.free_between(self.last_page, f.last_page, Seq::ZERO).unwrap();
+            m.free_between(self.last_page, f.last_page, Seq::ZERO).await?;
         };
+        Ok(())
     }
 
     pub fn record_end(&mut self) {
@@ -1322,7 +1349,6 @@ fn skiplist_seq(curr: Seq, index: usize) -> Seq {
 #[cfg(test)]
 mod tests {
     use rand::Rng;
-    use test_log::test;
 
     use super::*;
     use crate::flash::MemFlash;
@@ -1332,455 +1358,455 @@ mod tests {
         PageID::from_raw(p).unwrap()
     }
 
-    #[test]
-    fn test_read_write() {
+    #[test_log::test(tokio::test)]
+    async fn test_read_write() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format().unwrap();
-        m.mount().unwrap();
+        m.format().await.unwrap();
+        m.mount().await.unwrap();
 
         let data = dummy_data(24);
 
-        let mut w = m.write(0).unwrap();
-        w.write(&mut m, &data).unwrap();
-        m.commit(&mut w).unwrap();
+        let mut w = m.write(0).await.unwrap();
+        w.write(&mut m, &data).await.unwrap();
+        m.commit(&mut w).await.unwrap();
 
-        let mut r = m.read(0);
+        let mut r = m.read(0).await;
         let mut buf = vec![0; data.len()];
-        r.read(&mut m, &mut buf).unwrap();
+        r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(data, buf);
 
         // Remount
-        m.mount().unwrap();
+        m.mount().await.unwrap();
 
-        let mut r = m.read(0);
+        let mut r = m.read(0).await;
         let mut buf = vec![0; data.len()];
-        r.read(&mut m, &mut buf).unwrap();
+        r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(data, buf);
     }
 
-    #[test]
-    fn test_read_write_long() {
+    #[test_log::test(tokio::test)]
+    async fn test_read_write_long() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format().unwrap();
-        m.mount().unwrap();
+        m.format().await.unwrap();
+        m.mount().await.unwrap();
 
         let data = dummy_data(23456);
 
-        let mut w = m.write(0).unwrap();
-        w.write(&mut m, &data).unwrap();
-        m.commit(&mut w).unwrap();
-        w.discard(&mut m);
+        let mut w = m.write(0).await.unwrap();
+        w.write(&mut m, &data).await.unwrap();
+        m.commit(&mut w).await.unwrap();
+        w.discard(&mut m).await.unwrap();
 
-        let mut r = m.read(0);
+        let mut r = m.read(0).await;
         let mut buf = vec![0; data.len()];
-        r.read(&mut m, &mut buf).unwrap();
+        r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(data, buf);
 
         // Remount
-        m.mount().unwrap();
+        m.mount().await.unwrap();
 
-        let mut r = m.read(0);
+        let mut r = m.read(0).await;
         let mut buf = vec![0; data.len()];
-        r.read(&mut m, &mut buf).unwrap();
+        r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(data, buf);
     }
 
-    #[test]
-    fn test_append() {
+    #[test_log::test(tokio::test)]
+    async fn test_append() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format().unwrap();
-        m.mount().unwrap();
+        m.format().await.unwrap();
+        m.mount().await.unwrap();
 
-        let mut w = m.write(0).unwrap();
-        w.write(&mut m, &[1, 2, 3, 4, 5]).unwrap();
-        m.commit(&mut w).unwrap();
+        let mut w = m.write(0).await.unwrap();
+        w.write(&mut m, &[1, 2, 3, 4, 5]).await.unwrap();
+        m.commit(&mut w).await.unwrap();
 
-        let mut w = m.write(0).unwrap();
-        w.write(&mut m, &[6, 7, 8, 9]).unwrap();
-        m.commit(&mut w).unwrap();
+        let mut w = m.write(0).await.unwrap();
+        w.write(&mut m, &[6, 7, 8, 9]).await.unwrap();
+        m.commit(&mut w).await.unwrap();
 
-        let mut r = m.read(0);
+        let mut r = m.read(0).await;
         let mut buf = vec![0; 9];
-        r.read(&mut m, &mut buf).unwrap();
+        r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(buf, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
 
         // Remount
-        m.mount().unwrap();
+        m.mount().await.unwrap();
 
-        let mut r = m.read(0);
-        r.read(&mut m, &mut buf).unwrap();
+        let mut r = m.read(0).await;
+        r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(buf, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
     }
 
-    #[test]
-    fn test_truncate() {
+    #[test_log::test(tokio::test)]
+    async fn test_truncate() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format().unwrap();
-        m.mount().unwrap();
+        m.format().await.unwrap();
+        m.mount().await.unwrap();
 
-        let mut w = m.write(0).unwrap();
-        w.write(&mut m, &[1, 2, 3, 4, 5]).unwrap();
-        m.commit(&mut w).unwrap();
+        let mut w = m.write(0).await.unwrap();
+        w.write(&mut m, &[1, 2, 3, 4, 5]).await.unwrap();
+        m.commit(&mut w).await.unwrap();
 
-        m.truncate(0, 2).unwrap();
+        m.truncate(0, 2).await.unwrap();
 
-        let mut r = m.read(0);
+        let mut r = m.read(0).await;
         let mut buf = [0; 3];
-        r.read(&mut m, &mut buf).unwrap();
+        r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(buf, [3, 4, 5]);
 
-        m.truncate(0, 1).unwrap();
+        m.truncate(0, 1).await.unwrap();
 
-        let mut r = m.read(0);
+        let mut r = m.read(0).await;
         let mut buf = [0; 2];
-        r.read(&mut m, &mut buf).unwrap();
+        r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(buf, [4, 5]);
 
         // Remount
-        m.mount().unwrap();
+        m.mount().await.unwrap();
 
-        let mut r = m.read(0);
+        let mut r = m.read(0).await;
         let mut buf = [0; 2];
-        r.read(&mut m, &mut buf).unwrap();
+        r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(buf, [4, 5]);
     }
 
-    #[test]
-    fn test_append_truncate() {
+    #[test_log::test(tokio::test)]
+    async fn test_append_truncate() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format().unwrap();
-        m.mount().unwrap();
+        m.format().await.unwrap();
+        m.mount().await.unwrap();
 
-        let mut w = m.write(0).unwrap();
-        w.write(&mut m, &[1, 2, 3, 4, 5]).unwrap();
-        m.commit(&mut w).unwrap();
+        let mut w = m.write(0).await.unwrap();
+        w.write(&mut m, &[1, 2, 3, 4, 5]).await.unwrap();
+        m.commit(&mut w).await.unwrap();
 
-        let mut w = m.write(0).unwrap();
-        w.write(&mut m, &[6, 7, 8, 9]).unwrap();
+        let mut w = m.write(0).await.unwrap();
+        w.write(&mut m, &[6, 7, 8, 9]).await.unwrap();
 
         let mut tx = m.transaction();
-        w.commit(&mut tx).unwrap();
-        tx.truncate(0, 2).unwrap();
-        tx.commit().unwrap();
+        w.commit(&mut tx).await.unwrap();
+        tx.truncate(0, 2).await.unwrap();
+        tx.commit().await.unwrap();
 
-        let mut r = m.read(0);
+        let mut r = m.read(0).await;
         let mut buf = [0; 7];
-        r.read(&mut m, &mut buf).unwrap();
+        r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(buf, [3, 4, 5, 6, 7, 8, 9]);
 
-        m.truncate(0, 1).unwrap();
+        m.truncate(0, 1).await.unwrap();
 
-        let mut r = m.read(0);
+        let mut r = m.read(0).await;
         let mut buf = [0; 6];
-        r.read(&mut m, &mut buf).unwrap();
+        r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(buf, [4, 5, 6, 7, 8, 9]);
 
-        m.truncate(0, 5).unwrap();
+        m.truncate(0, 5).await.unwrap();
 
-        let mut r = m.read(0);
+        let mut r = m.read(0).await;
         let mut buf = [0; 1];
-        r.read(&mut m, &mut buf).unwrap();
+        r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(buf, [9]);
 
         // Remount
-        m.mount().unwrap();
+        m.mount().await.unwrap();
 
-        let mut r = m.read(0);
+        let mut r = m.read(0).await;
         let mut buf = [0; 1];
-        r.read(&mut m, &mut buf).unwrap();
+        r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(buf, [9]);
 
-        let mut w = m.write(0).unwrap();
-        w.write(&mut m, &[10, 11, 12]).unwrap();
-        m.commit(&mut w).unwrap();
+        let mut w = m.write(0).await.unwrap();
+        w.write(&mut m, &[10, 11, 12]).await.unwrap();
+        m.commit(&mut w).await.unwrap();
 
-        let mut r = m.read(0);
+        let mut r = m.read(0).await;
         let mut buf = [0; 4];
-        r.read(&mut m, &mut buf).unwrap();
+        r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(buf, [9, 10, 11, 12]);
     }
 
-    #[test]
-    fn test_delete() {
+    #[test_log::test(tokio::test)]
+    async fn test_delete() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format().unwrap();
-        m.mount().unwrap();
+        m.format().await.unwrap();
+        m.mount().await.unwrap();
 
-        let mut w = m.write(0).unwrap();
-        w.write(&mut m, &[1, 2, 3, 4, 5]).unwrap();
-        m.commit(&mut w).unwrap();
+        let mut w = m.write(0).await.unwrap();
+        w.write(&mut m, &[1, 2, 3, 4, 5]).await.unwrap();
+        m.commit(&mut w).await.unwrap();
 
         assert_eq!(m.alloc.is_used(page(1)), true);
 
-        m.truncate(0, 5).unwrap();
+        m.truncate(0, 5).await.unwrap();
 
         assert_eq!(m.alloc.is_used(page(1)), false);
 
         // Remount
-        m.mount().unwrap();
+        m.mount().await.unwrap();
 
         assert_eq!(m.alloc.is_used(page(1)), false);
 
-        let mut r = m.read(0);
+        let mut r = m.read(0).await;
         let mut buf = [0; 1];
-        let res = r.read(&mut m, &mut buf);
+        let res = r.read(&mut m, &mut buf).await;
         assert!(matches!(res, Err(ReadError::Eof)));
     }
 
-    #[test]
-    fn test_truncate_alloc() {
+    #[test_log::test(tokio::test)]
+    async fn test_truncate_alloc() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format().unwrap();
-        m.mount().unwrap();
+        m.format().await.unwrap();
+        m.mount().await.unwrap();
 
         assert_eq!(m.alloc.is_used(page(1)), false);
 
-        let mut w = m.write(0).unwrap();
-        w.write(&mut m, &[1, 2, 3, 4, 5]).unwrap();
-        m.commit(&mut w).unwrap();
+        let mut w = m.write(0).await.unwrap();
+        w.write(&mut m, &[1, 2, 3, 4, 5]).await.unwrap();
+        m.commit(&mut w).await.unwrap();
 
         assert_eq!(m.alloc.is_used(page(1)), true);
 
-        m.truncate(0, 5).unwrap();
+        m.truncate(0, 5).await.unwrap();
 
         assert_eq!(m.alloc.is_used(page(1)), false);
 
         // Remount
-        m.mount().unwrap();
+        m.mount().await.unwrap();
 
         assert_eq!(m.alloc.is_used(page(1)), false);
 
-        let mut r = m.read(0);
+        let mut r = m.read(0).await;
         let mut buf = [0; 1];
-        let res = r.read(&mut m, &mut buf);
+        let res = r.read(&mut m, &mut buf).await;
         assert!(matches!(res, Err(ReadError::Eof)));
     }
 
-    #[test]
-    fn test_truncate_alloc_2() {
+    #[test_log::test(tokio::test)]
+    async fn test_truncate_alloc_2() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format().unwrap();
-        m.mount().unwrap();
+        m.format().await.unwrap();
+        m.mount().await.unwrap();
 
         assert_eq!(m.alloc.is_used(page(1)), false);
 
         let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE);
 
-        let mut w = m.write(0).unwrap();
-        w.write(&mut m, &data).unwrap();
-        w.write(&mut m, &data).unwrap();
-        m.commit(&mut w).unwrap();
+        let mut w = m.write(0).await.unwrap();
+        w.write(&mut m, &data).await.unwrap();
+        w.write(&mut m, &data).await.unwrap();
+        m.commit(&mut w).await.unwrap();
 
         assert_eq!(m.alloc.is_used(page(1)), true);
         assert_eq!(m.alloc.is_used(page(2)), true);
 
-        m.truncate(0, PAGE_MAX_PAYLOAD_SIZE).unwrap();
+        m.truncate(0, PAGE_MAX_PAYLOAD_SIZE).await.unwrap();
         assert_eq!(m.alloc.is_used(page(1)), false);
         assert_eq!(m.alloc.is_used(page(2)), true);
 
-        m.truncate(0, PAGE_MAX_PAYLOAD_SIZE).unwrap();
+        m.truncate(0, PAGE_MAX_PAYLOAD_SIZE).await.unwrap();
         assert_eq!(m.alloc.is_used(page(1)), false);
         assert_eq!(m.alloc.is_used(page(2)), false);
 
         // Remount
-        m.mount().unwrap();
+        m.mount().await.unwrap();
 
         assert_eq!(m.alloc.is_used(page(1)), false);
         assert_eq!(m.alloc.is_used(page(2)), false);
 
-        let mut r = m.read(0);
+        let mut r = m.read(0).await;
         let mut buf = [0; 1];
-        let res = r.read(&mut m, &mut buf);
+        let res = r.read(&mut m, &mut buf).await;
         assert!(matches!(res, Err(ReadError::Eof)));
     }
 
-    #[test]
-    fn test_append_no_commit() {
+    #[test_log::test(tokio::test)]
+    async fn test_append_no_commit() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format().unwrap();
-        m.mount().unwrap();
+        m.format().await.unwrap();
+        m.mount().await.unwrap();
 
-        let mut w = m.write(0).unwrap();
-        w.write(&mut m, &[1, 2, 3, 4, 5]).unwrap();
-        m.commit(&mut w).unwrap();
+        let mut w = m.write(0).await.unwrap();
+        w.write(&mut m, &[1, 2, 3, 4, 5]).await.unwrap();
+        m.commit(&mut w).await.unwrap();
 
-        let mut w = m.write(0).unwrap();
-        w.write(&mut m, &[6, 7, 8, 9]).unwrap();
-        w.discard(&mut m);
+        let mut w = m.write(0).await.unwrap();
+        w.write(&mut m, &[6, 7, 8, 9]).await.unwrap();
+        w.discard(&mut m).await.unwrap();
 
-        let mut r = m.read(0);
+        let mut r = m.read(0).await;
         let mut buf = [0; 5];
-        r.read(&mut m, &mut buf).unwrap();
+        r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(buf, [1, 2, 3, 4, 5]);
         let mut buf = [0; 1];
-        let res = r.read(&mut m, &mut buf);
+        let res = r.read(&mut m, &mut buf).await;
         assert!(matches!(res, Err(ReadError::Eof)));
 
-        let mut w = m.write(0).unwrap();
-        w.write(&mut m, &[10, 11]).unwrap();
-        m.commit(&mut w).unwrap();
+        let mut w = m.write(0).await.unwrap();
+        w.write(&mut m, &[10, 11]).await.unwrap();
+        m.commit(&mut w).await.unwrap();
 
-        let mut r = m.read(0);
+        let mut r = m.read(0).await;
         let mut buf = [0; 7];
-        r.read(&mut m, &mut buf).unwrap();
+        r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(buf, [1, 2, 3, 4, 5, 10, 11]);
     }
 
-    #[test]
-    fn test_read_unwritten() {
+    #[test_log::test(tokio::test)]
+    async fn test_read_unwritten() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format().unwrap();
-        m.mount().unwrap();
+        m.format().await.unwrap();
+        m.mount().await.unwrap();
 
-        let mut r = m.read(0);
+        let mut r = m.read(0).await;
         let mut buf = vec![0; 1024];
-        let res = r.read(&mut m, &mut buf);
+        let res = r.read(&mut m, &mut buf).await;
         assert!(matches!(res, Err(ReadError::Eof)));
     }
 
-    #[test]
-    fn test_read_uncommitted() {
+    #[test_log::test(tokio::test)]
+    async fn test_read_uncommitted() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format().unwrap();
-        m.mount().unwrap();
+        m.format().await.unwrap();
+        m.mount().await.unwrap();
 
         let data = dummy_data(1234);
 
-        let mut w = m.write(0).unwrap();
-        w.write(&mut m, &data).unwrap();
-        w.discard(&mut m); // don't commit
+        let mut w = m.write(0).await.unwrap();
+        w.write(&mut m, &data).await.unwrap();
+        w.discard(&mut m).await.unwrap(); // don't commit
 
-        let mut r = m.read(0);
+        let mut r = m.read(0).await;
         let mut buf = vec![0; 1024];
-        let res = r.read(&mut m, &mut buf);
+        let res = r.read(&mut m, &mut buf).await;
         assert!(matches!(res, Err(ReadError::Eof)));
     }
 
-    #[test]
-    fn test_alloc_commit() {
+    #[test_log::test(tokio::test)]
+    async fn test_alloc_commit() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format().unwrap();
-        m.mount().unwrap();
+        m.format().await.unwrap();
+        m.mount().await.unwrap();
 
         assert_eq!(m.alloc.is_used(page(1)), false);
         assert_eq!(m.alloc.is_used(page(2)), false);
 
         let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE);
-        let mut w = m.write(0).unwrap();
+        let mut w = m.write(0).await.unwrap();
 
-        w.write(&mut m, &data).unwrap();
+        w.write(&mut m, &data).await.unwrap();
         assert_eq!(m.alloc.is_used(page(0)), true); // old meta
         assert_eq!(m.alloc.is_used(page(1)), true);
         assert_eq!(m.alloc.is_used(page(2)), false);
         assert_eq!(m.alloc.is_used(page(3)), false);
 
-        w.write(&mut m, &data).unwrap();
+        w.write(&mut m, &data).await.unwrap();
         assert_eq!(m.alloc.is_used(page(0)), true); // old meta
         assert_eq!(m.alloc.is_used(page(1)), true);
         assert_eq!(m.alloc.is_used(page(2)), true);
         assert_eq!(m.alloc.is_used(page(3)), false);
 
-        m.commit(&mut w).unwrap();
+        m.commit(&mut w).await.unwrap();
         assert_eq!(m.alloc.is_used(page(0)), true); // old meta, appended in-place.
         assert_eq!(m.alloc.is_used(page(1)), true);
         assert_eq!(m.alloc.is_used(page(2)), true);
         assert_eq!(m.alloc.is_used(page(3)), false);
 
         // Remount
-        m.mount().unwrap();
+        m.mount().await.unwrap();
         assert_eq!(m.alloc.is_used(page(0)), true); // old meta, appended in-place.
         assert_eq!(m.alloc.is_used(page(1)), true);
         assert_eq!(m.alloc.is_used(page(2)), true);
         assert_eq!(m.alloc.is_used(page(3)), false);
     }
 
-    #[test]
-    fn test_alloc_discard_1page() {
+    #[test_log::test(tokio::test)]
+    async fn test_alloc_discard_1page() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format().unwrap();
-        m.mount().unwrap();
+        m.format().await.unwrap();
+        m.mount().await.unwrap();
 
         assert_eq!(m.alloc.is_used(page(0)), true);
         assert_eq!(m.alloc.is_used(page(1)), false);
         assert_eq!(m.alloc.is_used(page(2)), false);
 
         let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE);
-        let mut w = m.write(0).unwrap();
+        let mut w = m.write(0).await.unwrap();
 
-        w.write(&mut m, &data).unwrap();
+        w.write(&mut m, &data).await.unwrap();
         assert_eq!(m.alloc.is_used(page(0)), true);
         assert_eq!(m.alloc.is_used(page(1)), true);
         assert_eq!(m.alloc.is_used(page(2)), false);
 
-        w.discard(&mut m);
+        w.discard(&mut m).await.unwrap();
         assert_eq!(m.alloc.is_used(page(0)), true);
         assert_eq!(m.alloc.is_used(page(1)), false);
         assert_eq!(m.alloc.is_used(page(2)), false);
 
         // Remount
-        m.mount().unwrap();
+        m.mount().await.unwrap();
         assert_eq!(m.alloc.is_used(page(0)), true);
         assert_eq!(m.alloc.is_used(page(1)), false);
         assert_eq!(m.alloc.is_used(page(2)), false);
     }
 
-    #[test]
-    fn test_alloc_discard_2page() {
+    #[test_log::test(tokio::test)]
+    async fn test_alloc_discard_2page() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format().unwrap();
-        m.mount().unwrap();
+        m.format().await.unwrap();
+        m.mount().await.unwrap();
 
         assert_eq!(m.alloc.is_used(page(0)), true);
         assert_eq!(m.alloc.is_used(page(1)), false);
 
         let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE);
-        let mut w = m.write(0).unwrap();
+        let mut w = m.write(0).await.unwrap();
 
-        w.write(&mut m, &data).unwrap();
+        w.write(&mut m, &data).await.unwrap();
         assert_eq!(m.alloc.is_used(page(0)), true);
         assert_eq!(m.alloc.is_used(page(1)), true);
         assert_eq!(m.alloc.is_used(page(2)), false);
 
-        w.write(&mut m, &data).unwrap();
+        w.write(&mut m, &data).await.unwrap();
         assert_eq!(m.alloc.is_used(page(0)), true);
         assert_eq!(m.alloc.is_used(page(1)), true);
         assert_eq!(m.alloc.is_used(page(2)), true);
         assert_eq!(m.alloc.is_used(page(3)), false);
 
-        w.discard(&mut m);
+        w.discard(&mut m).await.unwrap();
         assert_eq!(m.alloc.is_used(page(0)), true);
         assert_eq!(m.alloc.is_used(page(1)), false);
         assert_eq!(m.alloc.is_used(page(2)), false);
         assert_eq!(m.alloc.is_used(page(3)), false);
 
         // Remount
-        m.mount().unwrap();
+        m.mount().await.unwrap();
         assert_eq!(m.alloc.is_used(page(0)), true);
         assert_eq!(m.alloc.is_used(page(1)), false);
         assert_eq!(m.alloc.is_used(page(2)), false);
         assert_eq!(m.alloc.is_used(page(3)), false);
     }
 
-    #[test]
-    fn test_alloc_discard_3page() {
+    #[test_log::test(tokio::test)]
+    async fn test_alloc_discard_3page() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format().unwrap();
-        m.mount().unwrap();
+        m.format().await.unwrap();
+        m.mount().await.unwrap();
 
         assert_eq!(m.alloc.is_used(page(0)), true);
         assert_eq!(m.alloc.is_used(page(1)), false);
@@ -1788,15 +1814,15 @@ mod tests {
         assert_eq!(m.alloc.is_used(page(3)), false);
 
         let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE * 3);
-        let mut w = m.write(0).unwrap();
-        w.write(&mut m, &data).unwrap();
+        let mut w = m.write(0).await.unwrap();
+        w.write(&mut m, &data).await.unwrap();
         assert_eq!(m.alloc.is_used(page(0)), true);
         assert_eq!(m.alloc.is_used(page(1)), true);
         assert_eq!(m.alloc.is_used(page(2)), true);
         assert_eq!(m.alloc.is_used(page(3)), true);
         assert_eq!(m.alloc.is_used(page(4)), false);
 
-        w.discard(&mut m);
+        w.discard(&mut m).await.unwrap();
         assert_eq!(m.alloc.is_used(page(0)), true);
         assert_eq!(m.alloc.is_used(page(1)), false);
         assert_eq!(m.alloc.is_used(page(2)), false);
@@ -1804,7 +1830,7 @@ mod tests {
         assert_eq!(m.alloc.is_used(page(4)), false);
 
         // Remount
-        m.mount().unwrap();
+        m.mount().await.unwrap();
         assert_eq!(m.alloc.is_used(page(0)), true);
         assert_eq!(m.alloc.is_used(page(1)), false);
         assert_eq!(m.alloc.is_used(page(2)), false);
@@ -1812,599 +1838,599 @@ mod tests {
         assert_eq!(m.alloc.is_used(page(4)), false);
     }
 
-    #[test]
-    fn test_append_alloc_discard() {
+    #[test_log::test(tokio::test)]
+    async fn test_append_alloc_discard() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format().unwrap();
-        m.mount().unwrap();
+        m.format().await.unwrap();
+        m.mount().await.unwrap();
 
         assert_eq!(m.alloc.is_used(page(0)), true);
         assert_eq!(m.alloc.is_used(page(1)), false);
 
         let data = dummy_data(24);
-        let mut w = m.write(0).unwrap();
-        w.write(&mut m, &data).unwrap();
-        m.commit(&mut w).unwrap();
+        let mut w = m.write(0).await.unwrap();
+        w.write(&mut m, &data).await.unwrap();
+        m.commit(&mut w).await.unwrap();
         assert_eq!(m.alloc.is_used(page(0)), true); // old meta, appended in-place.
         assert_eq!(m.alloc.is_used(page(1)), true);
         assert_eq!(m.alloc.is_used(page(2)), false);
         assert_eq!(m.alloc.is_used(page(3)), false);
 
-        let mut w = m.write(0).unwrap();
-        w.write(&mut m, &data).unwrap();
+        let mut w = m.write(0).await.unwrap();
+        w.write(&mut m, &data).await.unwrap();
         assert_eq!(m.alloc.is_used(page(0)), true);
         assert_eq!(m.alloc.is_used(page(1)), true);
         assert_eq!(m.alloc.is_used(page(2)), true);
         assert_eq!(m.alloc.is_used(page(3)), false);
 
-        w.discard(&mut m);
+        w.discard(&mut m).await.unwrap();
         assert_eq!(m.alloc.is_used(page(0)), true);
         assert_eq!(m.alloc.is_used(page(1)), true);
         assert_eq!(m.alloc.is_used(page(2)), false);
         assert_eq!(m.alloc.is_used(page(3)), false);
 
         // Remount
-        m.mount().unwrap();
+        m.mount().await.unwrap();
         assert_eq!(m.alloc.is_used(page(0)), true);
         assert_eq!(m.alloc.is_used(page(1)), true);
         assert_eq!(m.alloc.is_used(page(2)), false);
         assert_eq!(m.alloc.is_used(page(3)), false);
     }
 
-    #[test]
-    fn test_write_2_files() {
+    #[test_log::test(tokio::test)]
+    async fn test_write_2_files() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format().unwrap();
-        m.mount().unwrap();
+        m.format().await.unwrap();
+        m.mount().await.unwrap();
 
         let data = dummy_data(32);
 
-        let mut w1 = m.write(1).unwrap();
-        w1.write(&mut m, &data).unwrap();
+        let mut w1 = m.write(1).await.unwrap();
+        w1.write(&mut m, &data).await.unwrap();
 
-        let mut w2 = m.write(2).unwrap();
-        w2.write(&mut m, &data).unwrap();
+        let mut w2 = m.write(2).await.unwrap();
+        w2.write(&mut m, &data).await.unwrap();
 
-        m.commit(&mut w2).unwrap();
-        m.commit(&mut w1).unwrap();
+        m.commit(&mut w2).await.unwrap();
+        m.commit(&mut w1).await.unwrap();
 
-        let mut r = m.read(1);
+        let mut r = m.read(1).await;
         let mut buf = [0; 32];
-        r.read(&mut m, &mut buf).unwrap();
+        r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(buf[..], data[..]);
 
-        let mut r = m.read(2);
+        let mut r = m.read(2).await;
         let mut buf = [0; 32];
-        r.read(&mut m, &mut buf).unwrap();
+        r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(buf[..], data[..]);
 
         // Remount
-        m.mount().unwrap();
+        m.mount().await.unwrap();
 
-        let mut r = m.read(1);
+        let mut r = m.read(1).await;
         let mut buf = [0; 32];
-        r.read(&mut m, &mut buf).unwrap();
+        r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(buf[..], data[..]);
 
-        let mut r = m.read(2);
+        let mut r = m.read(2).await;
         let mut buf = [0; 32];
-        r.read(&mut m, &mut buf).unwrap();
+        r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(buf[..], data[..]);
     }
 
-    #[test]
-    fn test_flags() {
+    #[test_log::test(tokio::test)]
+    async fn test_flags() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format().unwrap();
-        m.mount().unwrap();
+        m.format().await.unwrap();
+        m.mount().await.unwrap();
 
         assert_eq!(m.file_flags(1), 0x00);
 
         // flags for empty files stay at 0.
         let mut tx = m.transaction();
-        tx.set_flags(1, 0x42).unwrap();
-        tx.commit().unwrap();
+        tx.set_flags(1, 0x42).await.unwrap();
+        tx.commit().await.unwrap();
         assert_eq!(m.file_flags(1), 0x00);
 
         // flags for nonempty files get set properly.
-        let mut w = m.write(1).unwrap();
-        w.write(&mut m, &[0x00]).unwrap();
+        let mut w = m.write(1).await.unwrap();
+        w.write(&mut m, &[0x00]).await.unwrap();
         let mut tx = m.transaction();
-        w.commit(&mut tx).unwrap();
-        tx.set_flags(1, 0x42).unwrap();
-        tx.commit().unwrap();
+        w.commit(&mut tx).await.unwrap();
+        tx.set_flags(1, 0x42).await.unwrap();
+        tx.commit().await.unwrap();
         assert_eq!(m.file_flags(1), 0x42);
 
         // when writing to a file, old flags are kept if we don't `.set_flags()`
-        let mut w = m.write(1).unwrap();
-        w.write(&mut m, &[0x00]).unwrap();
-        m.commit(&mut w).unwrap();
+        let mut w = m.write(1).await.unwrap();
+        w.write(&mut m, &[0x00]).await.unwrap();
+        m.commit(&mut w).await.unwrap();
         assert_eq!(m.file_flags(1), 0x42);
 
         // flags are kept across remounts.
-        m.mount().unwrap();
+        m.mount().await.unwrap();
         assert_eq!(m.file_flags(1), 0x42);
 
         // when truncating the file, flags are kept.
-        m.truncate(1, 1).unwrap();
+        m.truncate(1, 1).await.unwrap();
         assert_eq!(m.file_flags(1), 0x42);
 
         // when deleting the file, flags are gone.
-        m.truncate(1, 1).unwrap();
+        m.truncate(1, 1).await.unwrap();
         assert_eq!(m.file_flags(1), 0x00);
 
         // Remount
-        m.mount().unwrap();
+        m.mount().await.unwrap();
         assert_eq!(m.file_flags(1), 0x00);
     }
 
-    #[test]
-    fn test_record_boundary_one() {
+    #[test_log::test(tokio::test)]
+    async fn test_record_boundary_one() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format().unwrap();
-        m.mount().unwrap();
+        m.format().await.unwrap();
+        m.mount().await.unwrap();
 
-        let mut w = m.write(1).unwrap();
-        w.write(&mut m, &[0x00]).unwrap();
+        let mut w = m.write(1).await.unwrap();
+        w.write(&mut m, &[0x00]).await.unwrap();
         w.record_end();
-        m.commit(&mut w).unwrap();
+        m.commit(&mut w).await.unwrap();
 
-        let h = m.read_header::<DataHeader>(page(1)).unwrap();
+        let h = m.read_header::<DataHeader>(page(1)).await.unwrap();
         assert_eq!(h.seq, Seq(0));
         assert_eq!(h.record_boundary, 0);
     }
 
-    #[test]
-    fn test_record_boundary_two() {
+    #[test_log::test(tokio::test)]
+    async fn test_record_boundary_two() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format().unwrap();
-        m.mount().unwrap();
+        m.format().await.unwrap();
+        m.mount().await.unwrap();
 
-        let mut w = m.write(1).unwrap();
-        w.write(&mut m, &[0x00]).unwrap();
+        let mut w = m.write(1).await.unwrap();
+        w.write(&mut m, &[0x00]).await.unwrap();
         w.record_end();
-        w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE + 1]).unwrap();
+        w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE + 1]).await.unwrap();
         w.record_end();
-        m.commit(&mut w).unwrap();
+        m.commit(&mut w).await.unwrap();
 
-        let h = m.read_header::<DataHeader>(page(1)).unwrap();
+        let h = m.read_header::<DataHeader>(page(1)).await.unwrap();
         assert_eq!(h.seq, Seq(0));
         assert_eq!(h.record_boundary, 0);
 
-        let h = m.read_header::<DataHeader>(page(2)).unwrap();
+        let h = m.read_header::<DataHeader>(page(2)).await.unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32));
         assert_eq!(h.record_boundary, u16::MAX);
     }
 
-    #[test]
-    fn test_record_boundary_three() {
+    #[test_log::test(tokio::test)]
+    async fn test_record_boundary_three() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format().unwrap();
-        m.mount().unwrap();
+        m.format().await.unwrap();
+        m.mount().await.unwrap();
 
-        let mut w = m.write(1).unwrap();
-        w.write(&mut m, &[0x00]).unwrap();
+        let mut w = m.write(1).await.unwrap();
+        w.write(&mut m, &[0x00]).await.unwrap();
         w.record_end();
-        w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE + 1]).unwrap();
+        w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE + 1]).await.unwrap();
         w.record_end();
-        w.write(&mut m, &[0x00]).unwrap();
+        w.write(&mut m, &[0x00]).await.unwrap();
         w.record_end();
-        m.commit(&mut w).unwrap();
+        m.commit(&mut w).await.unwrap();
 
-        let h = m.read_header::<DataHeader>(page(1)).unwrap();
+        let h = m.read_header::<DataHeader>(page(1)).await.unwrap();
         assert_eq!(h.seq, Seq(0));
         assert_eq!(h.record_boundary, 0);
 
-        let h = m.read_header::<DataHeader>(page(2)).unwrap();
+        let h = m.read_header::<DataHeader>(page(2)).await.unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32));
         assert_eq!(h.record_boundary, 2);
     }
 
-    #[test]
-    fn test_record_boundary_overlong() {
+    #[test_log::test(tokio::test)]
+    async fn test_record_boundary_overlong() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format().unwrap();
-        m.mount().unwrap();
+        m.format().await.unwrap();
+        m.mount().await.unwrap();
 
-        let mut w = m.write(1).unwrap();
-        w.write(&mut m, &[0x00]).unwrap();
+        let mut w = m.write(1).await.unwrap();
+        w.write(&mut m, &[0x00]).await.unwrap();
         w.record_end();
-        w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE * 2 + 1]).unwrap();
+        w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE * 2 + 1]).await.unwrap();
         w.record_end();
-        m.commit(&mut w).unwrap();
+        m.commit(&mut w).await.unwrap();
 
-        let h = m.read_header::<DataHeader>(page(1)).unwrap();
+        let h = m.read_header::<DataHeader>(page(1)).await.unwrap();
         assert_eq!(h.seq, Seq(0));
         assert_eq!(h.record_boundary, 0);
 
-        let h = m.read_header::<DataHeader>(page(2)).unwrap();
+        let h = m.read_header::<DataHeader>(page(2)).await.unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32));
         assert_eq!(h.record_boundary, u16::MAX);
 
-        let h = m.read_header::<DataHeader>(page(3)).unwrap();
+        let h = m.read_header::<DataHeader>(page(3)).await.unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32 * 2));
         assert_eq!(h.record_boundary, u16::MAX);
     }
 
-    #[test]
-    fn test_record_boundary_overlong_2() {
+    #[test_log::test(tokio::test)]
+    async fn test_record_boundary_overlong_2() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format().unwrap();
-        m.mount().unwrap();
+        m.format().await.unwrap();
+        m.mount().await.unwrap();
 
-        let mut w = m.write(1).unwrap();
-        w.write(&mut m, &[0x00]).unwrap();
+        let mut w = m.write(1).await.unwrap();
+        w.write(&mut m, &[0x00]).await.unwrap();
         w.record_end();
-        w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE * 2 + 1]).unwrap();
+        w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE * 2 + 1]).await.unwrap();
         w.record_end();
-        w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE * 2 + 1]).unwrap();
+        w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE * 2 + 1]).await.unwrap();
         w.record_end();
-        m.commit(&mut w).unwrap();
+        m.commit(&mut w).await.unwrap();
 
-        let h = m.read_header::<DataHeader>(page(1)).unwrap();
+        let h = m.read_header::<DataHeader>(page(1)).await.unwrap();
         assert_eq!(h.seq, Seq(0));
         assert_eq!(h.record_boundary, 0);
 
-        let h = m.read_header::<DataHeader>(page(2)).unwrap();
+        let h = m.read_header::<DataHeader>(page(2)).await.unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32));
         assert_eq!(h.record_boundary, u16::MAX);
 
-        let h = m.read_header::<DataHeader>(page(3)).unwrap();
+        let h = m.read_header::<DataHeader>(page(3)).await.unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32 * 2));
         assert_eq!(h.record_boundary, 2);
 
-        let h = m.read_header::<DataHeader>(page(4)).unwrap();
+        let h = m.read_header::<DataHeader>(page(4)).await.unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32 * 3));
         assert_eq!(h.record_boundary, u16::MAX);
 
-        let h = m.read_header::<DataHeader>(page(5)).unwrap();
+        let h = m.read_header::<DataHeader>(page(5)).await.unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32 * 4));
         assert_eq!(h.record_boundary, u16::MAX);
     }
 
-    #[test]
-    fn test_record_boundary_overlong_3() {
+    #[test_log::test(tokio::test)]
+    async fn test_record_boundary_overlong_3() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format().unwrap();
-        m.mount().unwrap();
+        m.format().await.unwrap();
+        m.mount().await.unwrap();
 
-        let mut w = m.write(1).unwrap();
-        w.write(&mut m, &[0x00]).unwrap();
+        let mut w = m.write(1).await.unwrap();
+        w.write(&mut m, &[0x00]).await.unwrap();
         w.record_end();
-        w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE * 2 + 1]).unwrap();
+        w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE * 2 + 1]).await.unwrap();
         w.record_end();
-        w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE * 2 + 1]).unwrap();
+        w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE * 2 + 1]).await.unwrap();
         w.record_end();
-        w.write(&mut m, &[0x00]).unwrap();
+        w.write(&mut m, &[0x00]).await.unwrap();
         w.record_end();
-        w.write(&mut m, &[0x00]).unwrap();
+        w.write(&mut m, &[0x00]).await.unwrap();
         w.record_end();
-        w.write(&mut m, &[0x00]).unwrap();
+        w.write(&mut m, &[0x00]).await.unwrap();
         w.record_end();
 
-        m.commit(&mut w).unwrap();
+        m.commit(&mut w).await.unwrap();
 
-        let h = m.read_header::<DataHeader>(page(1)).unwrap();
+        let h = m.read_header::<DataHeader>(page(1)).await.unwrap();
         assert_eq!(h.seq, Seq(0));
         assert_eq!(h.record_boundary, 0);
 
-        let h = m.read_header::<DataHeader>(page(2)).unwrap();
+        let h = m.read_header::<DataHeader>(page(2)).await.unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32));
         assert_eq!(h.record_boundary, u16::MAX);
 
-        let h = m.read_header::<DataHeader>(page(3)).unwrap();
+        let h = m.read_header::<DataHeader>(page(3)).await.unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32 * 2));
         assert_eq!(h.record_boundary, 2);
 
-        let h = m.read_header::<DataHeader>(page(4)).unwrap();
+        let h = m.read_header::<DataHeader>(page(4)).await.unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32 * 3));
         assert_eq!(h.record_boundary, u16::MAX);
 
-        let h = m.read_header::<DataHeader>(page(5)).unwrap();
+        let h = m.read_header::<DataHeader>(page(5)).await.unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32 * 4));
         assert_eq!(h.record_boundary, 3);
     }
 
-    #[test]
-    fn test_record_boundary_exact_page() {
+    #[test_log::test(tokio::test)]
+    async fn test_record_boundary_exact_page() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format().unwrap();
-        m.mount().unwrap();
+        m.format().await.unwrap();
+        m.mount().await.unwrap();
 
-        let mut w = m.write(1).unwrap();
-        w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE]).unwrap();
+        let mut w = m.write(1).await.unwrap();
+        w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE]).await.unwrap();
         w.record_end();
-        w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE]).unwrap();
+        w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE]).await.unwrap();
         w.record_end();
-        w.write(&mut m, &[0x00]).unwrap();
+        w.write(&mut m, &[0x00]).await.unwrap();
         w.record_end();
-        m.commit(&mut w).unwrap();
+        m.commit(&mut w).await.unwrap();
 
-        let h = m.read_header::<DataHeader>(page(1)).unwrap();
+        let h = m.read_header::<DataHeader>(page(1)).await.unwrap();
         assert_eq!(h.seq, Seq(0));
         assert_eq!(h.record_boundary, 0);
 
-        let h = m.read_header::<DataHeader>(page(2)).unwrap();
+        let h = m.read_header::<DataHeader>(page(2)).await.unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32));
         assert_eq!(h.record_boundary, 0);
 
-        let h = m.read_header::<DataHeader>(page(3)).unwrap();
+        let h = m.read_header::<DataHeader>(page(3)).await.unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32 * 2));
         assert_eq!(h.record_boundary, 0);
     }
 
-    #[test]
-    fn test_search_empty() {
+    #[test_log::test(tokio::test)]
+    async fn test_search_empty() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format().unwrap();
-        m.mount().unwrap();
+        m.format().await.unwrap();
+        m.mount().await.unwrap();
 
-        let mut s = FileSearcher::new(m.read(1));
-        assert_eq!(s.start(&mut m).unwrap(), false);
+        let mut s = FileSearcher::new(m.read(1).await);
+        assert_eq!(s.start(&mut m).await.unwrap(), false);
         assert_eq!(s.reader().offset(&mut m), 0);
     }
 
-    #[test]
-    fn test_search_one_page() {
+    #[test_log::test(tokio::test)]
+    async fn test_search_one_page() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format().unwrap();
-        m.mount().unwrap();
+        m.format().await.unwrap();
+        m.mount().await.unwrap();
 
-        let mut w = m.write(1).unwrap();
-        w.write(&mut m, &[0x00]).unwrap();
-        m.commit(&mut w).unwrap();
+        let mut w = m.write(1).await.unwrap();
+        w.write(&mut m, &[0x00]).await.unwrap();
+        m.commit(&mut w).await.unwrap();
 
         // start immediately return false, because there's nothing to bisect.
         // Only possible point to seek is start of the only page.
-        let mut s = FileSearcher::new(m.read(1));
-        assert_eq!(s.start(&mut m).unwrap(), false);
+        let mut s = FileSearcher::new(m.read(1).await);
+        assert_eq!(s.start(&mut m).await.unwrap(), false);
         assert_eq!(s.reader().offset(&mut m), 0);
     }
 
-    #[test]
-    fn test_search_two_pages() {
+    #[test_log::test(tokio::test)]
+    async fn test_search_two_pages() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format().unwrap();
-        m.mount().unwrap();
+        m.format().await.unwrap();
+        m.mount().await.unwrap();
 
-        let mut w = m.write(1).unwrap();
+        let mut w = m.write(1).await.unwrap();
         for _ in 0..2 {
-            w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE]).unwrap();
+            w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE]).await.unwrap();
             w.record_end();
         }
-        m.commit(&mut w).unwrap();
+        m.commit(&mut w).await.unwrap();
 
-        let mut s = FileSearcher::new(m.read(1));
-        assert_eq!(s.start(&mut m).unwrap(), true);
+        let mut s = FileSearcher::new(m.read(1).await);
+        assert_eq!(s.start(&mut m).await.unwrap(), true);
         assert_eq!(s.reader().offset(&mut m), PAGE_MAX_PAYLOAD_SIZE);
-        assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), false);
+        assert_eq!(s.seek(&mut m, SeekDirection::Left).await.unwrap(), false);
         assert_eq!(s.reader().offset(&mut m), 0);
 
-        let mut s = FileSearcher::new(m.read(1));
-        assert_eq!(s.start(&mut m).unwrap(), true);
+        let mut s = FileSearcher::new(m.read(1).await);
+        assert_eq!(s.start(&mut m).await.unwrap(), true);
         assert_eq!(s.reader().offset(&mut m), PAGE_MAX_PAYLOAD_SIZE);
-        assert_eq!(s.seek(&mut m, SeekDirection::Right).unwrap(), false);
+        assert_eq!(s.seek(&mut m, SeekDirection::Right).await.unwrap(), false);
         assert_eq!(s.reader().offset(&mut m), PAGE_MAX_PAYLOAD_SIZE);
     }
 
-    #[test]
-    fn test_search_no_boundary_on_second_page() {
+    #[test_log::test(tokio::test)]
+    async fn test_search_no_boundary_on_second_page() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format().unwrap();
-        m.mount().unwrap();
+        m.format().await.unwrap();
+        m.mount().await.unwrap();
 
-        let mut w = m.write(1).unwrap();
-        w.write(&mut m, &[0x00; 238]).unwrap();
+        let mut w = m.write(1).await.unwrap();
+        w.write(&mut m, &[0x00; 238]).await.unwrap();
         w.record_end();
-        m.commit(&mut w).unwrap();
+        m.commit(&mut w).await.unwrap();
 
         // start immediately return false, because there's nothing to bisect.
         // Only possible point to seek is start of the only page.
-        let mut s = FileSearcher::new(m.read(1));
-        assert_eq!(s.start(&mut m).unwrap(), false);
+        let mut s = FileSearcher::new(m.read(1).await);
+        assert_eq!(s.start(&mut m).await.unwrap(), false);
         assert_eq!(s.reader().offset(&mut m), 0);
     }
 
-    #[test]
-    fn test_search_no_boundary_more_pages() {
+    #[test_log::test(tokio::test)]
+    async fn test_search_no_boundary_more_pages() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format().unwrap();
-        m.mount().unwrap();
+        m.format().await.unwrap();
+        m.mount().await.unwrap();
 
-        let mut w = m.write(1).unwrap();
-        w.write(&mut m, &[0x00; 4348]).unwrap();
+        let mut w = m.write(1).await.unwrap();
+        w.write(&mut m, &[0x00; 4348]).await.unwrap();
         w.record_end();
-        m.commit(&mut w).unwrap();
+        m.commit(&mut w).await.unwrap();
 
         // start immediately return false, because there's nothing to bisect.
         // Only possible point to seek is start of the only page.
-        let mut s = FileSearcher::new(m.read(1));
-        assert_eq!(s.start(&mut m).unwrap(), false);
+        let mut s = FileSearcher::new(m.read(1).await);
+        assert_eq!(s.start(&mut m).await.unwrap(), false);
         assert_eq!(s.reader().offset(&mut m), 0);
     }
 
-    #[test]
-    fn test_search_no_boundary_more_pages_two() {
+    #[test_log::test(tokio::test)]
+    async fn test_search_no_boundary_more_pages_two() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format().unwrap();
-        m.mount().unwrap();
+        m.format().await.unwrap();
+        m.mount().await.unwrap();
 
-        let mut w = m.write(1).unwrap();
-        w.write(&mut m, &[0x00; 4348]).unwrap();
+        let mut w = m.write(1).await.unwrap();
+        w.write(&mut m, &[0x00; 4348]).await.unwrap();
         w.record_end();
-        w.write(&mut m, &[0x00; 4348]).unwrap();
+        w.write(&mut m, &[0x00; 4348]).await.unwrap();
         w.record_end();
-        m.commit(&mut w).unwrap();
+        m.commit(&mut w).await.unwrap();
 
         let mut buf = [0u8; 1];
         // Seek left
-        let mut s = FileSearcher::new(m.read(1));
-        assert_eq!(s.start(&mut m).unwrap(), true);
+        let mut s = FileSearcher::new(m.read(1).await);
+        assert_eq!(s.start(&mut m).await.unwrap(), true);
         assert_eq!(s.reader().offset(&mut m), 4348);
-        s.reader().read(&mut m, &mut buf).unwrap();
-        assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), false);
+        s.reader().read(&mut m, &mut buf).await.unwrap();
+        assert_eq!(s.seek(&mut m, SeekDirection::Left).await.unwrap(), false);
         assert_eq!(s.reader().offset(&mut m), 0);
 
         // Seek right
-        let mut s = FileSearcher::new(m.read(1));
-        assert_eq!(s.start(&mut m).unwrap(), true);
+        let mut s = FileSearcher::new(m.read(1).await);
+        assert_eq!(s.start(&mut m).await.unwrap(), true);
         assert_eq!(s.reader().offset(&mut m), 4348);
-        s.reader().read(&mut m, &mut buf).unwrap();
-        assert_eq!(s.seek(&mut m, SeekDirection::Right).unwrap(), false);
+        s.reader().read(&mut m, &mut buf).await.unwrap();
+        assert_eq!(s.seek(&mut m, SeekDirection::Right).await.unwrap(), false);
         assert_eq!(s.reader().offset(&mut m), 4348);
     }
 
-    #[test]
-    fn test_search_no_boundary_more_pages_three() {
+    #[test_log::test(tokio::test)]
+    async fn test_search_no_boundary_more_pages_three() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format().unwrap();
-        m.mount().unwrap();
+        m.format().await.unwrap();
+        m.mount().await.unwrap();
 
-        let mut w = m.write(1).unwrap();
-        w.write(&mut m, &[0x00; 4348]).unwrap();
+        let mut w = m.write(1).await.unwrap();
+        w.write(&mut m, &[0x00; 4348]).await.unwrap();
         w.record_end();
-        w.write(&mut m, &[0x00; 4348]).unwrap();
+        w.write(&mut m, &[0x00; 4348]).await.unwrap();
         w.record_end();
-        w.write(&mut m, &[0x00; 4348]).unwrap();
+        w.write(&mut m, &[0x00; 4348]).await.unwrap();
         w.record_end();
-        m.commit(&mut w).unwrap();
+        m.commit(&mut w).await.unwrap();
 
         let mut buf = [0u8; 1];
         // Seek left
-        let mut s = FileSearcher::new(m.read(1));
-        assert_eq!(s.start(&mut m).unwrap(), true);
+        let mut s = FileSearcher::new(m.read(1).await);
+        assert_eq!(s.start(&mut m).await.unwrap(), true);
         assert_eq!(s.reader().offset(&mut m), 8696);
-        s.reader().read(&mut m, &mut buf).unwrap();
-        assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), true);
+        s.reader().read(&mut m, &mut buf).await.unwrap();
+        assert_eq!(s.seek(&mut m, SeekDirection::Left).await.unwrap(), true);
         assert_eq!(s.reader().offset(&mut m), 4348);
-        s.reader().read(&mut m, &mut buf).unwrap();
-        assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), false);
+        s.reader().read(&mut m, &mut buf).await.unwrap();
+        assert_eq!(s.seek(&mut m, SeekDirection::Left).await.unwrap(), false);
         assert_eq!(s.reader().offset(&mut m), 0);
 
         // Seek less left
-        let mut s = FileSearcher::new(m.read(1));
-        assert_eq!(s.start(&mut m).unwrap(), true);
+        let mut s = FileSearcher::new(m.read(1).await);
+        assert_eq!(s.start(&mut m).await.unwrap(), true);
         assert_eq!(s.reader().offset(&mut m), 8696);
-        s.reader().read(&mut m, &mut buf).unwrap();
-        assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), true);
+        s.reader().read(&mut m, &mut buf).await.unwrap();
+        assert_eq!(s.seek(&mut m, SeekDirection::Left).await.unwrap(), true);
         assert_eq!(s.reader().offset(&mut m), 4348);
-        s.reader().read(&mut m, &mut buf).unwrap();
-        assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), false);
+        s.reader().read(&mut m, &mut buf).await.unwrap();
+        assert_eq!(s.seek(&mut m, SeekDirection::Left).await.unwrap(), false);
         assert_eq!(s.reader().offset(&mut m), 0);
 
         // Seek middle
-        let mut s = FileSearcher::new(m.read(1));
-        assert_eq!(s.start(&mut m).unwrap(), true);
+        let mut s = FileSearcher::new(m.read(1).await);
+        assert_eq!(s.start(&mut m).await.unwrap(), true);
         assert_eq!(s.reader().offset(&mut m), 8696);
-        s.reader().read(&mut m, &mut buf).unwrap();
-        assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), true);
+        s.reader().read(&mut m, &mut buf).await.unwrap();
+        assert_eq!(s.seek(&mut m, SeekDirection::Left).await.unwrap(), true);
         assert_eq!(s.reader().offset(&mut m), 4348);
-        s.reader().read(&mut m, &mut buf).unwrap();
-        assert_eq!(s.seek(&mut m, SeekDirection::Right).unwrap(), false);
+        s.reader().read(&mut m, &mut buf).await.unwrap();
+        assert_eq!(s.seek(&mut m, SeekDirection::Right).await.unwrap(), false);
         assert_eq!(s.reader().offset(&mut m), 4348);
 
         // Seek right
-        let mut s = FileSearcher::new(m.read(1));
-        assert_eq!(s.start(&mut m).unwrap(), true);
+        let mut s = FileSearcher::new(m.read(1).await);
+        assert_eq!(s.start(&mut m).await.unwrap(), true);
         assert_eq!(s.reader().offset(&mut m), 8696);
-        s.reader().read(&mut m, &mut buf).unwrap();
-        assert_eq!(s.seek(&mut m, SeekDirection::Right).unwrap(), false);
+        s.reader().read(&mut m, &mut buf).await.unwrap();
+        assert_eq!(s.seek(&mut m, SeekDirection::Right).await.unwrap(), false);
         assert_eq!(s.reader().offset(&mut m), 8696);
     }
 
-    #[test]
-    fn test_search_truncate() {
+    #[test_log::test(tokio::test)]
+    async fn test_search_truncate() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format().unwrap();
-        m.mount().unwrap();
+        m.format().await.unwrap();
+        m.mount().await.unwrap();
 
         const N: usize = PAGE_MAX_PAYLOAD_SIZE + 3;
-        let mut w = m.write(1).unwrap();
-        w.write(&mut m, &[0x00; N]).unwrap();
+        let mut w = m.write(1).await.unwrap();
+        w.write(&mut m, &[0x00; N]).await.unwrap();
         w.record_end();
-        w.write(&mut m, &[0x00; N]).unwrap();
+        w.write(&mut m, &[0x00; N]).await.unwrap();
         w.record_end();
-        w.write(&mut m, &[0x00; N]).unwrap();
+        w.write(&mut m, &[0x00; N]).await.unwrap();
         w.record_end();
-        w.write(&mut m, &[0x00; N]).unwrap();
+        w.write(&mut m, &[0x00; N]).await.unwrap();
         w.record_end();
-        m.commit(&mut w).unwrap();
+        m.commit(&mut w).await.unwrap();
 
         let mut buf = [0u8; 1];
         // Seek left
-        let mut s = FileSearcher::new(m.read(1));
-        assert_eq!(s.start(&mut m).unwrap(), true);
+        let mut s = FileSearcher::new(m.read(1).await);
+        assert_eq!(s.start(&mut m).await.unwrap(), true);
         assert_eq!(s.reader().offset(&mut m), N * 2);
-        s.reader().read(&mut m, &mut buf).unwrap();
-        assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), true);
+        s.reader().read(&mut m, &mut buf).await.unwrap();
+        assert_eq!(s.seek(&mut m, SeekDirection::Left).await.unwrap(), true);
         assert_eq!(s.reader().offset(&mut m), N);
-        s.reader().read(&mut m, &mut buf).unwrap();
-        assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), false);
+        s.reader().read(&mut m, &mut buf).await.unwrap();
+        assert_eq!(s.seek(&mut m, SeekDirection::Left).await.unwrap(), false);
         assert_eq!(s.reader().offset(&mut m), 0);
 
-        m.truncate(1, N * 2).unwrap();
+        m.truncate(1, N * 2).await.unwrap();
 
         // Seek left
-        let mut s = FileSearcher::new(m.read(1));
-        assert_eq!(s.start(&mut m).unwrap(), true);
+        let mut s = FileSearcher::new(m.read(1).await);
+        assert_eq!(s.start(&mut m).await.unwrap(), true);
         assert_eq!(s.reader().offset(&mut m), N);
-        s.reader().read(&mut m, &mut buf).unwrap();
-        assert_eq!(s.seek(&mut m, SeekDirection::Left).unwrap(), false);
+        s.reader().read(&mut m, &mut buf).await.unwrap();
+        assert_eq!(s.seek(&mut m, SeekDirection::Left).await.unwrap(), false);
         assert_eq!(s.reader().offset(&mut m), 0);
 
-        m.truncate(1, N).unwrap();
+        m.truncate(1, N).await.unwrap();
 
         // Seek left
-        let mut s = FileSearcher::new(m.read(1));
-        assert_eq!(s.start(&mut m).unwrap(), false);
+        let mut s = FileSearcher::new(m.read(1).await);
+        assert_eq!(s.start(&mut m).await.unwrap(), false);
         assert_eq!(s.reader().offset(&mut m), 0);
     }
 
-    #[test]
-    fn test_search_long() {
+    #[test_log::test(tokio::test)]
+    async fn test_search_long() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format().unwrap();
-        m.mount().unwrap();
+        m.format().await.unwrap();
+        m.mount().await.unwrap();
 
         let count: u32 = 20000 / 4;
 
-        let mut w = m.write(1).unwrap();
+        let mut w = m.write(1).await.unwrap();
         for i in 1..=count {
-            w.write(&mut m, &i.to_le_bytes()).unwrap();
+            w.write(&mut m, &i.to_le_bytes()).await.unwrap();
             // make records not line up with page boundaries.
-            w.write(&mut m, &[0x00]).unwrap();
+            w.write(&mut m, &[0x00]).await.unwrap();
             w.record_end();
         }
-        m.commit(&mut w).unwrap();
+        m.commit(&mut w).await.unwrap();
 
         for want in 0..count + 1 {
             debug!("searching for {}", want);
 
-            let mut s = FileSearcher::new(m.read(1));
-            assert_eq!(s.start(&mut m).unwrap(), true);
+            let mut s = FileSearcher::new(m.read(1).await);
+            assert_eq!(s.start(&mut m).await.unwrap(), true);
 
             loop {
                 let mut record = [0; 4];
-                s.reader().read(&mut m, &mut record).unwrap();
+                s.reader().read(&mut m, &mut record).await.unwrap();
                 let record = u32::from_le_bytes(record);
 
                 let dir = if record >= want {
@@ -2412,14 +2438,14 @@ mod tests {
                 } else {
                     SeekDirection::Right
                 };
-                let ok = s.seek(&mut m, dir).unwrap();
+                let ok = s.seek(&mut m, dir).await.unwrap();
                 if !ok {
                     break;
                 }
             }
 
             let mut record = [0; 4];
-            s.reader().read(&mut m, &mut record).unwrap();
+            s.reader().read(&mut m, &mut record).await.unwrap();
             let record = u32::from_le_bytes(record);
 
             if want != 0 {
@@ -2445,12 +2471,12 @@ mod tests {
         rand::thread_rng().gen_range(from..=to)
     }
 
-    #[test]
-    fn test_smoke() {
+    #[test_log::test(tokio::test)]
+    async fn test_smoke() {
         let mut f = MemFlash::new();
         let mut m = FileManager::new(&mut f);
-        m.format().unwrap();
-        m.mount().unwrap();
+        m.format().await.unwrap();
+        m.mount().await.unwrap();
 
         let mut seq_min = 0;
         let mut seq_max = 0;
@@ -2464,7 +2490,7 @@ mod tests {
                 0 => {
                     let s = rand_between(0, seq_max - seq_min);
                     debug!("{} {}, truncate {}", seq_min, seq_max, s);
-                    m.truncate(file_id, s).unwrap();
+                    m.truncate(file_id, s).await.unwrap();
                     seq_min += s;
                 }
                 // append
@@ -2478,9 +2504,9 @@ mod tests {
 
                     let data: Vec<_> = (0..n).map(|i| (seq_max + i) as u8).collect();
 
-                    let mut w = m.write(file_id).unwrap();
-                    w.write(&mut m, &data).unwrap();
-                    m.commit(&mut w).unwrap();
+                    let mut w = m.write(file_id).await.unwrap();
+                    w.write(&mut m, &data).await.unwrap();
+                    m.commit(&mut w).await.unwrap();
 
                     seq_max += n;
                 }
@@ -2489,41 +2515,41 @@ mod tests {
             // ============ Check read all
             debug!("{} {}, read_all", seq_min, seq_max);
 
-            let mut r = m.read(file_id);
+            let mut r = m.read(file_id).await;
             let mut data = vec![0; seq_max - seq_min];
-            r.read(&mut m, &mut data).unwrap();
+            r.read(&mut m, &mut data).await.unwrap();
             let want_data: Vec<_> = (0..seq_max - seq_min).map(|i| (seq_min + i) as u8).collect();
             assert_eq!(data, want_data);
 
             // Check we're at EOF
             let mut buf = [0; 1];
-            assert_eq!(r.read(&mut m, &mut buf), Err(ReadError::Eof));
+            assert_eq!(r.read(&mut m, &mut buf).await, Err(ReadError::Eof));
 
             // ============ Check read seek
             let s = rand_between(0, seq_max - seq_min);
             debug!("{} {}, read_seek {}", seq_min, seq_max, s);
 
-            let mut r = m.read(file_id);
-            r.seek(&mut m, s).unwrap();
+            let mut r = m.read(file_id).await;
+            r.seek(&mut m, s).await.unwrap();
             let mut data = vec![0; seq_max - seq_min - s];
-            r.read(&mut m, &mut data).unwrap();
+            r.read(&mut m, &mut data).await.unwrap();
             let want_data: Vec<_> = (0..seq_max - seq_min - s).map(|i| (seq_min + s + i) as u8).collect();
             assert_eq!(data, want_data);
 
             // Check we're at EOF
             let mut buf = [0; 1];
-            assert_eq!(r.read(&mut m, &mut buf), Err(ReadError::Eof));
+            assert_eq!(r.read(&mut m, &mut buf).await, Err(ReadError::Eof));
 
             // ============ Check read skip
             let s1 = rand_between(0, seq_max - seq_min);
             let s2 = rand_between(0, seq_max - seq_min - s1);
             debug!("{} {}, read_skip {} {}", seq_min, seq_max, s1, s2);
 
-            let mut r = m.read(file_id);
-            r.skip(&mut m, s1).unwrap();
-            r.skip(&mut m, s2).unwrap();
+            let mut r = m.read(file_id).await;
+            r.skip(&mut m, s1).await.unwrap();
+            r.skip(&mut m, s2).await.unwrap();
             let mut data = vec![0; seq_max - seq_min - s1 - s2];
-            r.read(&mut m, &mut data).unwrap();
+            r.read(&mut m, &mut data).await.unwrap();
             let want_data: Vec<_> = (0..seq_max - seq_min - s1 - s2)
                 .map(|i| (seq_min + s1 + s2 + i) as u8)
                 .collect();
@@ -2531,12 +2557,12 @@ mod tests {
 
             // Check we're at EOF
             let mut buf = [0; 1];
-            assert_eq!(r.read(&mut m, &mut buf), Err(ReadError::Eof));
+            assert_eq!(r.read(&mut m, &mut buf).await, Err(ReadError::Eof));
         }
     }
 
-    #[test]
-    fn test_max_trailing_zeros_between() {
+    #[test_log::test(tokio::test)]
+    async fn test_max_trailing_zeros_between() {
         fn slow(a: u32, b: u32) -> u32 {
             assert!(a < b);
             (a..b).map(|x| x.trailing_zeros()).max().unwrap()

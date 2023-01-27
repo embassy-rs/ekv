@@ -33,9 +33,16 @@ fn fuzz(ops: Input) {
         env_logger::init();
     }
 
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(fuzz_inner(ops))
+}
+
+async fn fuzz_inner(ops: Input) {
     let mut f = MemFlash::new();
-    Database::format(&mut f);
-    let mut db = Database::new(&mut f).unwrap();
+    Database::format(&mut f).await;
+    let mut db = Database::new(&mut f).await.unwrap();
 
     // Mirror hashmap. Should always match F
     let mut m = HashMap::new();
@@ -57,14 +64,14 @@ fn fuzz(ops: Input) {
                 val[..n].copy_from_slice(&val_num[..n]);
 
                 // Write to DB
-                let mut wtx = db.write_transaction().unwrap();
-                match wtx.write(&key, &val) {
+                let mut wtx = db.write_transaction().await.unwrap();
+                match wtx.write(&key, &val).await {
                     Ok(()) => {}
                     Err(WriteKeyError::Full) => continue,
                     Err(WriteKeyError::Corrupted) => panic!("corrupted"),
                     Err(WriteKeyError::Flash(e)) => match e {},
                 }
-                wtx.commit().unwrap();
+                wtx.commit().await.unwrap();
 
                 // Write to mirror
                 m.insert(key.to_vec(), val);
@@ -75,8 +82,8 @@ fn fuzz(ops: Input) {
 
         // Check everything
         for (key, val) in &m {
-            let mut rtx = db.read_transaction().unwrap();
-            let n = rtx.read(key, &mut buf).unwrap();
+            let mut rtx = db.read_transaction().await.unwrap();
+            let n = rtx.read(key, &mut buf).await.unwrap();
             let got_val = &buf[..n];
 
             if val != got_val {

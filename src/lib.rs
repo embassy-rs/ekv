@@ -2,6 +2,9 @@
 #![deny(unused_must_use)]
 #![feature(result_option_inspect)]
 #![feature(try_blocks)]
+#![feature(async_fn_in_trait)]
+#![feature(impl_trait_projections)]
+#![allow(incomplete_features)]
 
 // MUST go first.
 mod fmt;
