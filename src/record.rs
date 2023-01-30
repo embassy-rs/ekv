@@ -62,8 +62,6 @@ enum WriteTxState {
 }
 
 // We allow N read transactions XOR 1 write transaction.
-#[derive(Debug)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 struct State {
     read_tx_count: usize,
     write_tx: WriteTxState,
@@ -624,7 +622,7 @@ impl<F: Flash> Inner<F> {
     }
 
     async fn do_compact(&mut self, src: Vec<FileID, BRANCHING_FACTOR>, dst: FileID) -> Result<(), Error<F::Error>> {
-        debug!("do_compact {:?} -> {}", src, dst);
+        debug!("do_compact {:?} -> {}", &src[..], dst);
 
         assert!(!src.is_empty());
 
@@ -725,6 +723,9 @@ impl<F: Flash> Inner<F> {
                         break false;
                     }
 
+                    #[cfg(feature = "defmt")]
+                    trace!("do_compact: copying key from file {:?}: {:02x}", src[i], &k[i][..]);
+                    #[cfg(not(feature = "defmt"))]
                     trace!("do_compact: copying key from file {:?}: {:02x?}", src[i], &k[i][..]);
 
                     progress = true;

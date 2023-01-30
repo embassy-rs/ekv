@@ -2,6 +2,7 @@ use crate::config::*;
 use crate::types::{PageID, RawPageID};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum PageState {
     Free,
     Used,

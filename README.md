@@ -22,6 +22,7 @@ Soon:
 - Free uncommitted pages on transaction drop.
 - Remove tombstone records when compacting the topmost level.
 - Allow the empty key `[]` (compaction assumes they're nonempty)
+- Add a way to configure settings (page size, etc) at compile time.
 
 Later:
 

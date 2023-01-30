@@ -29,6 +29,7 @@ unsafe impl page::Header for MetaHeader {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[repr(C)]
 pub struct DataHeader {
     seq: Seq,
@@ -175,7 +176,7 @@ impl<F: Flash> FileManager<F> {
         self.alloc.mark_used(meta_page_id);
 
         let (_, mut r) = self.read_page::<MetaHeader>(meta_page_id).await.inspect_err(|e| {
-            debug!("failed read meta_page_id={:?}: {:?}", meta_page_id, e);
+            debug!("failed read meta_page_id={:?}", meta_page_id);
         })?;
 
         let mut files = [FileMeta {
@@ -222,7 +223,7 @@ impl<F: Flash> FileManager<F> {
             };
 
             let (h, mut r) = self.read_page::<DataHeader>(last_page_id).await.inspect_err(|e| {
-                debug!("read last_page_id={:?} file_id={}: {:?}", last_page_id, file_id, e);
+                debug!("read_page failed: last_page_id={:?} file_id={}", last_page_id, file_id);
             })?;
             let page_len = r.skip(&mut self.flash, PAGE_SIZE).await?;
             let last_seq = h.seq.add(page_len)?;
@@ -675,7 +676,7 @@ impl FileReader {
         self.state = match m.get_file_page(self.file_id, seq).await? {
             Some(pp) => {
                 let (h, mut r) = m.read_page::<DataHeader>(pp.page_id).await.inspect_err(|e| {
-                    debug!("failed read next page={:?}: {:?}", pp.page_id, e);
+                    debug!("failed read next page={:?}", pp.page_id);
                 })?;
                 let n = seq.sub(h.seq);
                 let got_n = r.skip(&mut m.flash, n).await?;
@@ -923,7 +924,7 @@ impl FileSearcher {
                 corrupted!()
             }
             let (h, r) = m.read_page::<DataHeader>(page_id).await.inspect_err(|e| {
-                debug!("failed read next page={:?}: {:?}", page_id, e);
+                debug!("failed read next page={:?}", page_id);
             })?;
 
             if h.seq >= right_limit || h.seq > target_seq {

@@ -30,6 +30,13 @@ impl fmt::Debug for PageID {
     }
 }
 
+#[cfg(feature = "defmt")]
+impl defmt::Format for PageID {
+    fn format(&self, fmt: defmt::Formatter) {
+        defmt::write!(fmt, "{=u16}", self.raw)
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
 pub struct OptionPageID {
@@ -94,5 +101,12 @@ impl From<OptionPageID> for Option<PageID> {
 impl fmt::Debug for OptionPageID {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:?}", self.into_option())
+    }
+}
+
+#[cfg(feature = "defmt")]
+impl defmt::Format for OptionPageID {
+    fn format(&self, fmt: defmt::Formatter) {
+        defmt::write!(fmt, "{:?}", self.into_option())
     }
 }
