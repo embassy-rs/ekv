@@ -31,6 +31,7 @@ _test = []
 defmt = { version = "0.3.2", optional = true }
 log = { version = "0.4.17", optional = true }
 heapless = "0.7.16"
+embassy-sync = "0.1.0"
 
 [dev-dependencies]
 ekv = { path = ".", features = ["std", "log"]}
@@ -39,6 +40,7 @@ plotters = "0.3.4"
 test-log = "0.2.11"
 rand = "0.8.5"
 tokio = { version = "1.24.2", default-features = false, features = ["macros", "rt"] }
+critical-section = { version = "1", features = ["std"] }
 
 # Do asserts and overflow checks when doing `cargo test --release`
 # Release makes smoke tests faster, but we still want the full checking.

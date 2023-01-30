@@ -1,6 +1,6 @@
 #![no_main]
 use ekv::flash::MemFlash;
-use ekv::Database;
+use ekv::{Config, Database, FormatConfig};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| { fuzz(data) });
@@ -22,22 +22,26 @@ async fn fuzz_inner(data: &[u8], logging: bool) {
     let n = f.data.len().min(data.len());
     f.data[..n].copy_from_slice(&data[..n]);
 
-    let Ok(mut db) = Database::new(&mut f).await else { return };
+    let mut config = Config::default();
+    config.format = FormatConfig::Never;
+    let Ok(db) = Database::new(&mut f, config).await else { return };
 
     if logging {
         db.dump().await;
     }
 
     let mut buf = [0; 64];
-    let Ok(mut rtx) = db.read_transaction().await else { return };
+    let mut rtx = db.read_transaction().await;
     _ = rtx.read(b"foo", &mut buf).await;
+    drop(rtx);
 
     for _ in 0..100 {
-        let Ok(mut wtx) = db.write_transaction().await else { return };
+        let mut wtx = db.write_transaction().await;
         _ = wtx.write(b"foo", b"blah").await;
         _ = wtx.commit().await;
     }
 
-    let Ok(mut rtx) = db.read_transaction().await else { return };
+    let mut rtx = db.read_transaction().await;
     _ = rtx.read(b"foo", &mut buf).await;
+    drop(rtx);
 }

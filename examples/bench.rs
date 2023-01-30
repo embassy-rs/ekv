@@ -1,5 +1,5 @@
 use ekv::flash::MemFlash;
-use ekv::Database;
+use ekv::{Config, Database, FormatConfig};
 use plotters::prelude::*;
 use rand::Rng;
 
@@ -56,26 +56,28 @@ async fn run(p: Params) -> f64 {
     }
 
     let mut f = MemFlash::new();
-    Database::format(&mut f).await.unwrap();
-    let mut db = Database::new(&mut f).await.unwrap();
+    let mut config = Config::default();
+    config.format = FormatConfig::Format;
+    let mut db = Database::new(&mut f, config).await.unwrap();
 
     for key in &keys {
-        let mut wtx = db.write_transaction().await.unwrap();
+        let mut wtx = db.write_transaction().await;
         wtx.write(key, &rand_data(p.val_len)).await.unwrap();
         wtx.commit().await.unwrap();
     }
 
-    db.flash_mut().reset_counters();
+    db.lock_flash().await.reset_counters();
 
     let mut buf = [0; 1024];
 
     for key in &keys {
-        let mut rtx = db.read_transaction().await.unwrap();
+        let mut rtx = db.read_transaction().await;
         rtx.read(key, &mut buf).await.unwrap();
     }
 
     let baseline = p.key_count * (p.key_len + p.val_len);
-    db.flash_mut().read_bytes as f64 / baseline as f64
+    let read_bytes = db.lock_flash().await.read_bytes;
+    read_bytes as f64 / baseline as f64
 }
 
 const OUT_FILE_NAME: &str = "area-chart.png";

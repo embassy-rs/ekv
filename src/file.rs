@@ -3,11 +3,12 @@ use core::{fmt, mem};
 
 use crate::alloc::Allocator;
 use crate::config::*;
+use crate::errors::*;
 use crate::flash::Flash;
+use crate::page;
 pub use crate::page::ReadError;
 use crate::page::{ChunkHeader, Header, PageHeader, PageManager, PageReader, PageWriter};
 use crate::types::{OptionPageID, PageID};
-use crate::{page, CorruptedError, Error};
 
 pub const PAGE_MAX_PAYLOAD_SIZE: usize = PAGE_SIZE - PageHeader::SIZE - size_of::<DataHeader>() - ChunkHeader::SIZE;
 
@@ -103,6 +104,10 @@ impl<F: Flash> FileManager<F> {
         PAGE_COUNT - self.alloc.used()
     }
 
+    pub fn flash(&self) -> &F {
+        &self.flash
+    }
+
     pub fn flash_mut(&mut self) -> &mut F {
         &mut self.flash
     }
@@ -127,19 +132,21 @@ impl<F: Flash> FileManager<F> {
         (0..FILE_COUNT as FileID).filter(move |&i| self.file_flags(i) & flag != 0)
     }
 
-    pub async fn format(&mut self) -> Result<(), Error<F::Error>> {
+    pub async fn format(&mut self) -> Result<(), FormatError<F::Error>> {
         // Erase all meta pages.
         for page_id in 0..PAGE_COUNT {
             let page_id = PageID::from_raw(page_id as _).unwrap();
             if self.read_header::<MetaHeader>(page_id).await.is_ok() {
-                self.flash.erase(page_id).await.map_err(Error::Flash)?;
+                self.flash.erase(page_id).await.map_err(FormatError::Flash)?;
             }
         }
 
         // Write initial meta page.
         let page_id = PageID::from_raw(0).unwrap();
         let mut w = self.write_page(page_id).await;
-        w.write_header(&mut self.flash, MetaHeader { seq: Seq(1) }).await?;
+        w.write_header(&mut self.flash, MetaHeader { seq: Seq(1) })
+            .await
+            .map_err(FormatError::Flash)?;
 
         Ok(())
     }
@@ -523,7 +530,8 @@ impl<'a, F: Flash> Transaction<'a, F> {
 
                 self.m.meta_seq = self.m.meta_seq.add(1)?; // TODO handle wraparound
                 w.write_header(&mut self.m.flash, MetaHeader { seq: self.m.meta_seq })
-                    .await?;
+                    .await
+                    .map_err(Error::Flash)?;
                 w.commit(&mut self.m.flash).await?;
 
                 // free the old one.
@@ -1152,7 +1160,7 @@ impl FileWriter {
             skiplist,
             record_boundary,
         };
-        w.write_header(&mut m.flash, header).await?;
+        w.write_header(&mut m.flash, header).await.map_err(Error::Flash)?;
         w.commit(&mut m.flash).await?;
 
         trace!(

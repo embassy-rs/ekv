@@ -1,6 +1,5 @@
 #![macro_use]
 
-#[macro_export]
 macro_rules! impl_bytes {
     ($t:ident) => {
         impl $t {
@@ -25,7 +24,7 @@ macro_rules! impl_bytes {
 #[cfg(not(feature = "_panic-on-corrupted"))]
 macro_rules! corrupted {
     () => {
-        return Err(crate::CorruptedError.into())
+        return Err(crate::errors::CorruptedError.into())
     };
 }
 

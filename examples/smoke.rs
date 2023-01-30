@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use ekv::config::{PAGE_COUNT, PAGE_SIZE};
 use ekv::flash::MemFlash;
-use ekv::Database;
+use ekv::{Config, Database, FormatConfig};
 use rand::Rng;
 
 const KEY_COUNT: usize = 1000;
@@ -53,8 +53,9 @@ async fn main() {
     }
 
     let mut f = MemFlash::new();
-    Database::format(&mut f).await.unwrap();
-    let mut db = Database::new(&mut f).await.unwrap();
+    let mut config = Config::default();
+    config.format = FormatConfig::Format;
+    let db = Database::new(&mut f, config).await.unwrap();
 
     // Mirror hashmap. Should always match F
     let mut m = HashMap::new();
@@ -74,7 +75,7 @@ async fn main() {
         //println!("write {:?} = {:?}", key, value);
 
         // Write to DB
-        let mut wtx = db.write_transaction().await.unwrap();
+        let mut wtx = db.write_transaction().await;
         for (key, value) in &tx {
             wtx.write(key, value).await.unwrap();
         }
@@ -87,7 +88,7 @@ async fn main() {
 
         // Check everything
         for key in &keys {
-            let mut rtx = db.read_transaction().await.unwrap();
+            let mut rtx = db.read_transaction().await;
             let n = rtx.read(key, &mut buf).await.unwrap();
             let val1 = &buf[..n];
             let val2 = m.get(key).map(|v| &v[..]).unwrap_or(&[]);
@@ -97,9 +98,12 @@ async fn main() {
     }
 
     // remount, recheck everything.
-    let mut db = Database::new(&mut f).await.unwrap();
+    let mut config = Config::default();
+    config.format = FormatConfig::Format;
+    let db = Database::new(&mut f, config).await.unwrap();
+
     for key in &keys {
-        let mut rtx = db.read_transaction().await.unwrap();
+        let mut rtx = db.read_transaction().await;
         let n = rtx.read(key, &mut buf).await.unwrap();
         let val1 = &buf[..n];
         let val2 = m.get(key).map(|v| &v[..]).unwrap_or(&[]);

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use ekv::flash::MemFlash;
-use ekv::{Database, WriteKeyError};
+use ekv::{Config, Database, FormatConfig, WriteError};
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
@@ -41,8 +41,9 @@ fn fuzz(ops: Input) {
 
 async fn fuzz_inner(ops: Input) {
     let mut f = MemFlash::new();
-    Database::format(&mut f).await;
-    let mut db = Database::new(&mut f).await.unwrap();
+    let mut config = Config::default();
+    config.format = FormatConfig::Format;
+    let db = Database::new(&mut f, config).await.unwrap();
 
     // Mirror hashmap. Should always match F
     let mut m = HashMap::new();
@@ -64,12 +65,11 @@ async fn fuzz_inner(ops: Input) {
                 val[..n].copy_from_slice(&val_num[..n]);
 
                 // Write to DB
-                let mut wtx = db.write_transaction().await.unwrap();
+                let mut wtx = db.write_transaction().await;
                 match wtx.write(&key, &val).await {
                     Ok(()) => {}
-                    Err(WriteKeyError::Full) => continue,
-                    Err(WriteKeyError::Corrupted) => panic!("corrupted"),
-                    Err(WriteKeyError::Flash(e)) => match e {},
+                    Err(WriteError::Full) => continue,
+                    Err(e) => panic!("write error: {:?}", e),
                 }
                 wtx.commit().await.unwrap();
 
@@ -78,11 +78,11 @@ async fn fuzz_inner(ops: Input) {
             }
         }
 
-        db.dump();
+        db.dump().await;
 
         // Check everything
         for (key, val) in &m {
-            let mut rtx = db.read_transaction().await.unwrap();
+            let mut rtx = db.read_transaction().await;
             let n = rtx.read(key, &mut buf).await.unwrap();
             let got_val = &buf[..n];
 

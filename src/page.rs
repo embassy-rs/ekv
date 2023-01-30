@@ -2,9 +2,9 @@ use core::marker::PhantomData;
 use core::mem::size_of;
 
 use crate::config::*;
+use crate::errors::Error;
 use crate::flash::Flash;
 use crate::types::PageID;
-use crate::Error;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(C)]
@@ -56,7 +56,7 @@ impl<F: Flash> PageManager<F> {
         Self { _phantom: PhantomData }
     }
 
-    async fn write_header<H: Header>(flash: &mut F, page_id: PageID, header: H) -> Result<(), Error<F::Error>> {
+    async fn write_header<H: Header>(flash: &mut F, page_id: PageID, header: H) -> Result<(), F::Error> {
         assert!(size_of::<H>() <= MAX_HEADER_SIZE);
         let mut buf = [0u8; PageHeader::SIZE + MAX_HEADER_SIZE];
         let buf = &mut buf[..PageHeader::SIZE + size_of::<H>()];
@@ -70,7 +70,7 @@ impl<F: Flash> PageManager<F> {
                 .write_unaligned(header)
         };
 
-        flash.write(page_id as _, 0, buf).await.map_err(Error::Flash)?;
+        flash.write(page_id as _, 0, buf).await?;
         Ok(())
     }
 
@@ -341,7 +341,7 @@ impl<H: Header> PageWriter<H> {
         }
         let mut data = &data[..total_n];
 
-        self.erase_if_needed(flash).await?;
+        self.erase_if_needed(flash).await.map_err(Error::Flash)?;
 
         let align_offs = self.chunk_pos % WRITE_SIZE;
         if align_offs != 0 {
@@ -389,15 +389,15 @@ impl<H: Header> PageWriter<H> {
         Ok(total_n)
     }
 
-    async fn erase_if_needed<F: Flash>(&mut self, flash: &mut F) -> Result<(), Error<F::Error>> {
+    async fn erase_if_needed<F: Flash>(&mut self, flash: &mut F) -> Result<(), F::Error> {
         if self.needs_erase {
-            flash.erase(self.page_id as _).await.map_err(Error::Flash)?;
+            flash.erase(self.page_id as _).await?;
             self.needs_erase = false;
         }
         Ok(())
     }
 
-    pub async fn write_header<F: Flash>(&mut self, flash: &mut F, header: H) -> Result<(), Error<F::Error>> {
+    pub async fn write_header<F: Flash>(&mut self, flash: &mut F, header: H) -> Result<(), F::Error> {
         self.erase_if_needed(flash).await?;
 
         PageManager::write_header(flash, self.page_id, header).await?;
@@ -411,7 +411,7 @@ impl<H: Header> PageWriter<H> {
             return Ok(());
         }
 
-        self.erase_if_needed(flash).await?;
+        self.erase_if_needed(flash).await.map_err(Error::Flash)?;
 
         // flush align buf.
         let align_offs = self.chunk_pos % WRITE_SIZE;

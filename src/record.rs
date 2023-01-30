@@ -1,32 +1,327 @@
+use core::cell::RefCell;
 use core::cmp::Ordering;
+use core::future::poll_fn;
 use core::mem::{size_of, MaybeUninit};
+use core::ops::{Deref, DerefMut};
 use core::slice;
+use core::task::Poll;
 
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::mutex::Mutex;
+use embassy_sync::waitqueue::WakerRegistration;
 use heapless::Vec;
 
 use crate::config::*;
+use crate::errors::{CorruptedError, Error, ReadError, WriteError};
 use crate::file::{
     DataHeader, FileManager, FileReader, FileSearcher, FileWriter, MetaHeader, SeekDirection, PAGE_MAX_PAYLOAD_SIZE,
 };
 use crate::flash::Flash;
-use crate::page::ReadError;
-use crate::{CorruptedError, Error, ReadKeyError, WriteKeyError};
+use crate::page::ReadError as PageReadError;
+use crate::{CommitError, FormatError};
 
 const FILE_FLAG_COMPACT_DEST: u8 = 0x01;
 const FILE_FLAG_COMPACT_SRC: u8 = 0x02;
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
+pub enum FormatConfig {
+    Never,
+    IfNotFormatted,
+    Format,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
+pub struct Config {
+    pub format: FormatConfig,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self::default()
+    }
+}
+
+impl Config {
+    const fn default() -> Self {
+        Self {
+            format: FormatConfig::Never,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+enum WriteTxState {
+    Idle,
+    Created,
+    Committing,
+}
+
+// We allow N read transactions XOR 1 write transaction.
+#[derive(Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+struct State {
+    read_tx_count: usize,
+    write_tx: WriteTxState,
+    waker: WakerRegistration,
+}
+
 pub struct Database<F: Flash> {
-    files: FileManager<F>,
+    state: RefCell<State>,
+
+    inner: Mutex<NoopRawMutex, Inner<F>>,
 }
 
 impl<F: Flash> Database<F> {
-    pub async fn format(flash: F) -> Result<(), Error<F::Error>> {
-        let mut m = FileManager::new(flash);
-        m.format().await?;
+    pub async fn new(flash: F, config: Config) -> Result<Self, Error<F::Error>> {
+        let mut inner = Inner::new(flash).await;
+
+        match config.format {
+            FormatConfig::Format => {
+                inner.format().await?;
+                inner.mount().await?;
+            }
+            FormatConfig::IfNotFormatted => match inner.mount().await {
+                Ok(()) => {}
+                Err(Error::Corrupted) => {
+                    inner.format().await?;
+                    inner.mount().await?;
+                }
+                Err(e) => return Err(e),
+            },
+            FormatConfig::Never => {
+                inner.mount().await?;
+            }
+        }
+
+        Ok(Self {
+            inner: Mutex::new(inner),
+            state: RefCell::new(State {
+                read_tx_count: 0,
+                write_tx: WriteTxState::Idle,
+                waker: WakerRegistration::new(),
+            }),
+        })
+    }
+
+    pub async fn lock_flash(&self) -> impl Deref<Target = F> + DerefMut + '_ {
+        FlashLockGuard(self.inner.lock().await)
+    }
+
+    pub async fn format(&self) -> Result<(), FormatError<F::Error>> {
+        todo!()
+    }
+
+    #[cfg(feature = "std")]
+    pub async fn dump(&self) {
+        self.inner.lock().await.dump().await
+    }
+
+    pub async fn read_transaction(&self) -> ReadTransaction<'_, F> {
+        poll_fn(|cx| {
+            let s = &mut *self.state.borrow_mut();
+
+            // If there's a write transaction either
+            // - committing, or
+            // - trying to commit, waiting for other read transactions to end,
+            // then we don't let new read transactions start.
+            //
+            // The latter is needed to avoid a commit to get stuck forever if other
+            // tasks are constantly doing reads.
+            if s.write_tx == WriteTxState::Committing {
+                s.waker.register(cx.waker());
+                return Poll::Pending;
+            }
+
+            // NOTE(unwrap): we'll panic if there's 2^32 concurrent read txs, that's fine.
+            s.read_tx_count = s.read_tx_count.checked_add(1).unwrap();
+            Poll::Ready(())
+        })
+        .await;
+
+        ReadTransaction { db: self }
+    }
+
+    pub async fn write_transaction(&self) -> WriteTransaction<'_, F> {
+        poll_fn(|cx| {
+            let s = &mut *self.state.borrow_mut();
+            if s.write_tx != WriteTxState::Idle {
+                s.waker.register(cx.waker());
+                return Poll::Pending;
+            }
+            s.write_tx = WriteTxState::Created;
+            Poll::Ready(())
+        })
+        .await;
+
+        WriteTransaction {
+            db: self,
+            state: WriteTransactionState::Created,
+        }
+    }
+}
+
+struct FlashLockGuard<G, F>(G)
+where
+    G: Deref<Target = Inner<F>> + DerefMut,
+    F: Flash;
+
+impl<G, F> DerefMut for FlashLockGuard<G, F>
+where
+    G: Deref<Target = Inner<F>> + DerefMut,
+    F: Flash,
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0.files.flash_mut()
+    }
+}
+
+impl<G, F> Deref for FlashLockGuard<G, F>
+where
+    G: Deref<Target = Inner<F>> + DerefMut,
+    F: Flash,
+{
+    type Target = F;
+    fn deref(&self) -> &Self::Target {
+        self.0.files.flash()
+    }
+}
+
+pub struct ReadTransaction<'a, F: Flash + 'a> {
+    db: &'a Database<F>,
+}
+
+impl<'a, F: Flash + 'a> Drop for ReadTransaction<'a, F> {
+    fn drop(&mut self) {
+        let s = &mut *self.db.state.borrow_mut();
+
+        // NOTE(unwrap): It's impossible that read_tx_count==0, because at least one
+        // read transaction was in progress: the one we're dropping now.
+        s.read_tx_count = s.read_tx_count.checked_sub(1).unwrap();
+        if s.read_tx_count == 0 {
+            s.waker.wake();
+        }
+    }
+}
+
+impl<'a, F: Flash + 'a> ReadTransaction<'a, F> {
+    pub async fn read(&mut self, key: &[u8], value: &mut [u8]) -> Result<usize, ReadError<F::Error>> {
+        if key.is_empty() {
+            panic!("key cannot be empty.")
+        }
+
+        if key.len() > MAX_KEY_SIZE {
+            return Err(ReadError::KeyTooBig);
+        }
+
+        self.db.inner.lock().await.read(key, value).await
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+enum WriteTransactionState {
+    Created,
+    InProgress,
+    Canceled,
+}
+
+pub struct WriteTransaction<'a, F: Flash + 'a> {
+    db: &'a Database<F>,
+    state: WriteTransactionState,
+}
+
+impl<'a, F: Flash + 'a> Drop for WriteTransaction<'a, F> {
+    fn drop(&mut self) {
+        let s = &mut *self.db.state.borrow_mut();
+
+        assert!(s.write_tx != WriteTxState::Idle);
+        s.write_tx = WriteTxState::Idle;
+        s.waker.wake();
+    }
+}
+
+impl<'a, F: Flash + 'a> WriteTransaction<'a, F> {
+    pub async fn write(&mut self, key: &[u8], value: &[u8]) -> Result<(), WriteError<F::Error>> {
+        if key.is_empty() {
+            panic!("key cannot be empty.")
+        }
+
+        let is_first_write = match self.state {
+            WriteTransactionState::Canceled => return Err(WriteError::TransactionCanceled),
+            WriteTransactionState::Created => true,
+            WriteTransactionState::InProgress => false,
+        };
+
+        if key.len() > MAX_KEY_SIZE {
+            return Err(WriteError::KeyTooBig);
+        }
+        if value.len() > MAX_VALUE_SIZE {
+            return Err(WriteError::ValueTooBig);
+        }
+
+        // Canceling a call to `write()` (dropping its `Future` before it's done) can leave
+        // the transaction in an undefined state, so we cancel it entirely.
+        self.state = WriteTransactionState::Canceled;
+
+        // If inner `write` fails, we also cancel the transaction.
+        let mut db = self.db.inner.lock().await;
+        if is_first_write {
+            db.rollback_if_any().await?;
+        }
+        db.write(key, value).await?;
+
+        self.state = WriteTransactionState::InProgress;
+
         Ok(())
     }
 
-    pub async fn new(flash: F) -> Result<Self, Error<F::Error>> {
+    pub async fn commit(self) -> Result<(), CommitError<F::Error>> {
+        match self.state {
+            WriteTransactionState::Canceled => return Err(CommitError::TransactionCanceled),
+            WriteTransactionState::Created => return Ok(()),
+            WriteTransactionState::InProgress => {}
+        }
+
+        // First switch to Committing, so that no new read txs can start.
+        {
+            let s = &mut *self.db.state.borrow_mut();
+            assert!(s.write_tx == WriteTxState::Created);
+            s.write_tx = WriteTxState::Committing;
+        }
+
+        // Then wait for the existing read txs to finish.
+        poll_fn(|cx| {
+            let s = &mut *self.db.state.borrow_mut();
+            if s.read_tx_count != 0 {
+                s.waker.register(cx.waker());
+                return Poll::Pending;
+            }
+            Poll::Ready(())
+        })
+        .await;
+
+        // do commit
+        self.db.inner.lock().await.commit().await?;
+
+        // Here self gets dropped, which unlocks the write in `Database`, to let
+        // read transactions proceed again.
+
+        Ok(())
+    }
+}
+
+struct Inner<F: Flash> {
+    files: FileManager<F>,
+    write_tx: Option<WriteTransactionInner>,
+}
+
+impl<F: Flash> Inner<F> {
+    async fn new(flash: F) -> Self {
         debug!("creating database!");
         debug!(
             "page_size={}, page_count={}, total_size={}",
@@ -59,26 +354,87 @@ impl<F: Flash> Database<F> {
             FREE_PAGE_BUFFER, FREE_PAGE_BUFFER_COMMIT
         );
 
-        let mut m = FileManager::new(flash);
-        m.mount().await?;
+        Self {
+            files: FileManager::new(flash),
+            write_tx: None,
+        }
+    }
 
-        // TODO recover from this
-        if !m.is_empty(0) {
-            corrupted!();
+    async fn format(&mut self) -> Result<(), FormatError<F::Error>> {
+        assert!(self.write_tx.is_none());
+        self.files.format().await
+    }
+
+    async fn mount(&mut self) -> Result<(), Error<F::Error>> {
+        assert!(self.write_tx.is_none());
+        self.files.mount().await
+    }
+
+    async fn read(&mut self, key: &[u8], value: &mut [u8]) -> Result<usize, ReadError<F::Error>> {
+        for file_id in (0..FILE_COUNT).rev() {
+            if let Some(res) = self.read_in_file(file_id as _, key, value).await? {
+                return Ok(res);
+            }
+        }
+        Ok(0)
+    }
+
+    async fn read_in_file(
+        &mut self,
+        file_id: FileID,
+        key: &[u8],
+        value: &mut [u8],
+    ) -> Result<Option<usize>, ReadError<F::Error>> {
+        let r = self.files.read(file_id).await;
+        let m = &mut self.files;
+        let mut s = FileSearcher::new(r);
+
+        let mut key_buf = Vec::new();
+
+        // Binary search
+        let mut ok = s.start(m).await?;
+        while ok {
+            match read_key(m, s.reader(), &mut key_buf).await {
+                Err(PageReadError::Eof) => return Ok(None), // key not present.
+                x => x?,
+            };
+
+            // Found?
+            let dir = match key_buf[..].cmp(key) {
+                Ordering::Equal => return Ok(Some(read_value(m, s.reader(), value).await?)),
+                Ordering::Less => SeekDirection::Right,
+                Ordering::Greater => SeekDirection::Left,
+            };
+
+            // Not found, do a binary search step.
+            ok = s.seek(m, dir).await?;
         }
 
-        Ok(Self { files: m })
+        let r = s.reader();
+
+        // Linear search
+        loop {
+            match read_key(m, r, &mut key_buf).await {
+                Err(PageReadError::Eof) => return Ok(None), // key not present.
+                x => x?,
+            }
+
+            // Found?
+            match key_buf[..].cmp(key) {
+                Ordering::Equal => return Ok(Some(read_value(m, r, value).await?)),
+                Ordering::Less => {}                  // keep going
+                Ordering::Greater => return Ok(None), // not present.
+            }
+
+            skip_value(m, r).await?;
+        }
     }
 
-    pub fn flash_mut(&mut self) -> &mut F {
-        self.files.flash_mut()
-    }
+    async fn ensure_write_transaction_started(&mut self) -> Result<(), Error<F::Error>> {
+        if self.write_tx.is_some() {
+            return Ok(());
+        }
 
-    pub async fn read_transaction(&mut self) -> Result<ReadTransaction<'_, F>, Error<F::Error>> {
-        Ok(ReadTransaction { db: self })
-    }
-
-    pub async fn write_transaction(&mut self) -> Result<WriteTransaction<'_, F>, Error<F::Error>> {
         debug!("write_transaction: start");
 
         let file_id = loop {
@@ -97,11 +453,75 @@ impl<F: Flash> Database<F> {
 
         debug!("write_transaction: writing file {}", file_id);
         let w = self.files.write(file_id).await?;
-        Ok(WriteTransaction {
-            db: self,
+
+        self.write_tx = Some(WriteTransactionInner {
             w,
             last_key: Vec::new(),
-        })
+        });
+
+        Ok(())
+    }
+
+    async fn write(&mut self, key: &[u8], value: &[u8]) -> Result<(), WriteError<F::Error>> {
+        self.ensure_write_transaction_started().await?;
+        let tx = self.write_tx.as_mut().unwrap();
+
+        if key <= &tx.last_key {
+            panic!("writes within a transaction must be sorted.");
+        }
+        tx.last_key = Vec::from_slice(key).unwrap();
+
+        loop {
+            let tx = self.write_tx.as_mut().unwrap();
+
+            let record_size = record_size(key.len(), value.len());
+            let need_size = record_size + FREE_PAGE_BUFFER * PAGE_MAX_PAYLOAD_SIZE;
+            let available_size = tx.w.space_left_on_current_page() + self.files.free_pages() * PAGE_MAX_PAYLOAD_SIZE;
+            if need_size <= available_size {
+                break;
+            }
+
+            debug!("free pages less than buffer, compacting.");
+            let did_something = self.compact().await?;
+            if !did_something {
+                debug!("storage full");
+                return Err(WriteError::Full);
+            }
+        }
+
+        let tx = self.write_tx.as_mut().unwrap();
+        write_record(&mut self.files, &mut tx.w, key, value).await?;
+
+        Ok(())
+    }
+
+    async fn commit(&mut self) -> Result<(), Error<F::Error>> {
+        debug!("write_transaction: commit");
+
+        let tx = self.write_tx.as_mut().unwrap();
+        self.files.commit(&mut tx.w).await?;
+
+        self.write_tx = None;
+
+        Ok(())
+    }
+
+    async fn rollback(&mut self) -> Result<(), Error<F::Error>> {
+        debug!("write_transaction: rollback");
+
+        let _tx = self.write_tx.as_mut().unwrap();
+        // TODO: free pages.
+
+        self.write_tx = None;
+
+        Ok(())
+    }
+
+    async fn rollback_if_any(&mut self) -> Result<(), Error<F::Error>> {
+        if self.write_tx.is_some() {
+            self.rollback().await?
+        }
+        Ok(())
     }
 
     fn file_id(level: usize, index: usize) -> FileID {
@@ -234,12 +654,12 @@ impl<F: Flash> Database<F> {
         ) -> Result<(), Error<F::Error>> {
             match read_key(m, r, buf).await {
                 Ok(()) => Ok(()),
-                Err(ReadError::Flash(e)) => Err(Error::Flash(e)),
-                Err(ReadError::Eof) => {
+                Err(PageReadError::Flash(e)) => Err(Error::Flash(e)),
+                Err(PageReadError::Eof) => {
                     buf.truncate(0);
                     Ok(())
                 }
-                Err(ReadError::Corrupted) => corrupted!(),
+                Err(PageReadError::Corrupted) => corrupted!(),
             }
         }
 
@@ -387,9 +807,9 @@ impl<F: Flash> Database<F> {
             let seq = r.curr_seq(&mut self.files);
             match read_key(&mut self.files, &mut r, &mut key).await {
                 Ok(()) => {}
-                Err(ReadError::Flash(e)) => return Err(Error::Flash(e)),
-                Err(ReadError::Eof) => break,
-                Err(ReadError::Corrupted) => corrupted!(),
+                Err(PageReadError::Flash(e)) => return Err(Error::Flash(e)),
+                Err(PageReadError::Eof) => break,
+                Err(PageReadError::Corrupted) => corrupted!(),
             }
             let n = check_corrupted!(read_value(&mut self.files, &mut r, &mut value).await);
             let value = &value[..n];
@@ -407,117 +827,9 @@ impl<F: Flash> Database<F> {
     }
 }
 
-pub struct ReadTransaction<'a, F: Flash + 'a> {
-    db: &'a mut Database<F>,
-}
-
-impl<'a, F: Flash + 'a> ReadTransaction<'a, F> {
-    pub async fn read(&mut self, key: &[u8], value: &mut [u8]) -> Result<usize, ReadKeyError<F::Error>> {
-        for file_id in (0..FILE_COUNT).rev() {
-            if let Some(res) = self.read_in_file(file_id as _, key, value).await? {
-                return Ok(res);
-            }
-        }
-        Ok(0)
-    }
-
-    async fn read_in_file(
-        &mut self,
-        file_id: FileID,
-        key: &[u8],
-        value: &mut [u8],
-    ) -> Result<Option<usize>, ReadKeyError<F::Error>> {
-        let r = self.db.files.read(file_id).await;
-        let m = &mut self.db.files;
-        let mut s = FileSearcher::new(r);
-
-        let mut key_buf = Vec::new();
-
-        // Binary search
-        let mut ok = s.start(m).await?;
-        while ok {
-            match read_key(m, s.reader(), &mut key_buf).await {
-                Err(ReadError::Eof) => return Ok(None), // key not present.
-                x => x?,
-            };
-
-            // Found?
-            let dir = match key_buf[..].cmp(key) {
-                Ordering::Equal => return Ok(Some(read_value(m, s.reader(), value).await?)),
-                Ordering::Less => SeekDirection::Right,
-                Ordering::Greater => SeekDirection::Left,
-            };
-
-            // Not found, do a binary search step.
-            ok = s.seek(m, dir).await?;
-        }
-
-        let r = s.reader();
-
-        // Linear search
-        loop {
-            match read_key(m, r, &mut key_buf).await {
-                Err(ReadError::Eof) => return Ok(None), // key not present.
-                x => x?,
-            }
-
-            // Found?
-            match key_buf[..].cmp(key) {
-                Ordering::Equal => return Ok(Some(read_value(m, r, value).await?)),
-                Ordering::Less => {}                  // keep going
-                Ordering::Greater => return Ok(None), // not present.
-            }
-
-            skip_value(m, r).await?;
-        }
-    }
-}
-
-pub struct WriteTransaction<'a, F: Flash + 'a> {
-    db: &'a mut Database<F>,
+pub struct WriteTransactionInner {
     w: FileWriter,
     last_key: Vec<u8, MAX_KEY_SIZE>,
-}
-
-impl<'a, F: Flash + 'a> WriteTransaction<'a, F> {
-    pub async fn write(&mut self, key: &[u8], value: &[u8]) -> Result<(), WriteKeyError<F::Error>> {
-        if key.is_empty() {
-            panic!("key cannot be empty.")
-        }
-        if key.len() > MAX_KEY_SIZE {
-            panic!("key too long.")
-        }
-
-        if key <= &self.last_key {
-            panic!("writes within a transaction must be sorted.");
-        }
-        self.last_key = Vec::from_slice(key).unwrap();
-
-        loop {
-            let record_size = record_size(key.len(), value.len());
-            let need_size = record_size + FREE_PAGE_BUFFER * PAGE_MAX_PAYLOAD_SIZE;
-            let available_size =
-                self.w.space_left_on_current_page() + self.db.files.free_pages() * PAGE_MAX_PAYLOAD_SIZE;
-            if need_size <= available_size {
-                break;
-            }
-
-            debug!("free pages less than buffer, compacting.");
-            let did_something = self.db.compact().await?;
-            if !did_something {
-                debug!("storage full");
-                return Err(WriteKeyError::Full);
-            }
-        }
-
-        write_record(&mut self.db.files, &mut self.w, key, value).await?;
-
-        Ok(())
-    }
-
-    pub async fn commit(mut self) -> Result<(), Error<F::Error>> {
-        self.db.files.commit(&mut self.w).await
-    }
 }
 
 async fn write_record<F: Flash>(
@@ -612,7 +924,7 @@ async fn read_key<F: Flash>(
     m: &mut FileManager<F>,
     r: &mut FileReader,
     buf: &mut Vec<u8, MAX_KEY_SIZE>,
-) -> Result<(), ReadError<F::Error>> {
+) -> Result<(), PageReadError<F::Error>> {
     let len = read_leb128(m, r).await? as usize;
     if len > MAX_KEY_SIZE {
         info!("key too long: {}", len);
@@ -626,28 +938,28 @@ async fn read_value<F: Flash>(
     m: &mut FileManager<F>,
     r: &mut FileReader,
     value: &mut [u8],
-) -> Result<usize, ReadKeyError<F::Error>> {
+) -> Result<usize, ReadError<F::Error>> {
     let len = check_corrupted!(read_leb128(m, r).await) as usize;
     if len > value.len() {
-        return Err(ReadKeyError::BufferTooSmall);
+        return Err(ReadError::BufferTooSmall);
     }
     r.read(m, &mut value[..len]).await?;
     Ok(len)
 }
 
-async fn skip_value<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader) -> Result<(), ReadError<F::Error>> {
+async fn skip_value<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader) -> Result<(), PageReadError<F::Error>> {
     let len = read_leb128(m, r).await? as usize;
     r.skip(m, len).await?;
     Ok(())
 }
 
-async fn read_u8<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader) -> Result<u8, ReadError<F::Error>> {
+async fn read_u8<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader) -> Result<u8, PageReadError<F::Error>> {
     let mut buf = [0u8; 1];
     r.read(m, &mut buf).await?;
     Ok(buf[0])
 }
 
-async fn read_leb128<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader) -> Result<u32, ReadError<F::Error>> {
+async fn read_leb128<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader) -> Result<u32, PageReadError<F::Error>> {
     let mut res = 0;
     let mut shift = 0;
     loop {
@@ -696,47 +1008,58 @@ mod tests {
     use super::*;
     use crate::flash::MemFlash;
 
+    const FORMAT: Config = {
+        let mut config = Config::default();
+        config.format = FormatConfig::Format;
+        config
+    };
+    const NO_FORMAT: Config = {
+        let mut config = Config::default();
+        config.format = FormatConfig::Never;
+        config
+    };
+
     #[test_log::test(tokio::test)]
     async fn test() {
         let mut f = MemFlash::new();
-        Database::format(&mut f).await.unwrap();
-
-        let mut db = Database::new(&mut f).await.unwrap();
+        let db = Database::new(&mut f, FORMAT).await.unwrap();
 
         let mut buf = [0u8; 1024];
 
-        let mut wtx = db.write_transaction().await.unwrap();
+        let mut wtx = db.write_transaction().await;
         wtx.write(b"bar", b"4321").await.unwrap();
         wtx.write(b"foo", b"1234").await.unwrap();
         wtx.commit().await.unwrap();
 
-        let mut rtx = db.read_transaction().await.unwrap();
+        let mut rtx = db.read_transaction().await;
         let n = rtx.read(b"foo", &mut buf).await.unwrap();
         assert_eq!(&buf[..n], b"1234");
         let n = rtx.read(b"bar", &mut buf).await.unwrap();
         assert_eq!(&buf[..n], b"4321");
         let n = rtx.read(b"baz", &mut buf).await.unwrap();
         assert_eq!(&buf[..n], b"");
+        drop(rtx);
 
-        let mut wtx = db.write_transaction().await.unwrap();
+        let mut wtx = db.write_transaction().await;
         wtx.write(b"bar", b"8765").await.unwrap();
         wtx.write(b"baz", b"4242").await.unwrap();
         wtx.write(b"foo", b"5678").await.unwrap();
         wtx.commit().await.unwrap();
 
-        let mut rtx = db.read_transaction().await.unwrap();
+        let mut rtx = db.read_transaction().await;
         let n = rtx.read(b"foo", &mut buf).await.unwrap();
         assert_eq!(&buf[..n], b"5678");
         let n = rtx.read(b"bar", &mut buf).await.unwrap();
         assert_eq!(&buf[..n], b"8765");
         let n = rtx.read(b"baz", &mut buf).await.unwrap();
         assert_eq!(&buf[..n], b"4242");
+        drop(rtx);
 
-        let mut wtx = db.write_transaction().await.unwrap();
+        let mut wtx = db.write_transaction().await;
         wtx.write(b"lol", b"9999").await.unwrap();
         wtx.commit().await.unwrap();
 
-        let mut rtx = db.read_transaction().await.unwrap();
+        let mut rtx = db.read_transaction().await;
         let n = rtx.read(b"foo", &mut buf).await.unwrap();
         assert_eq!(&buf[..n], b"5678");
         let n = rtx.read(b"bar", &mut buf).await.unwrap();
@@ -745,82 +1068,90 @@ mod tests {
         assert_eq!(&buf[..n], b"4242");
         let n = rtx.read(b"lol", &mut buf).await.unwrap();
         assert_eq!(&buf[..n], b"9999");
+        drop(rtx);
     }
 
     #[test_log::test(tokio::test)]
     async fn test_buf_too_small() {
         let mut f = MemFlash::new();
-        Database::format(&mut f).await.unwrap();
+        let db = Database::new(&mut f, FORMAT).await.unwrap();
 
-        let mut db = Database::new(&mut f).await.unwrap();
-
-        let mut wtx = db.write_transaction().await.unwrap();
+        let mut wtx = db.write_transaction().await;
         wtx.write(b"foo", b"1234").await.unwrap();
         wtx.commit().await.unwrap();
 
-        let mut rtx = db.read_transaction().await.unwrap();
+        let mut rtx = db.read_transaction().await;
         let mut buf = [0u8; 1];
         let r = rtx.read(b"foo", &mut buf).await;
-        assert!(matches!(r, Err(ReadKeyError::BufferTooSmall)));
+        assert!(matches!(r, Err(ReadError::BufferTooSmall)));
     }
 
     #[test_log::test(tokio::test)]
     async fn test_remount() {
         let mut f = MemFlash::new();
-        Database::format(&mut f).await.unwrap();
-
-        let mut db = Database::new(&mut f).await.unwrap();
-
         let mut buf = [0u8; 1024];
 
-        let mut wtx = db.write_transaction().await.unwrap();
-        wtx.write(b"bar", b"4321").await.unwrap();
-        wtx.write(b"foo", b"1234").await.unwrap();
-        wtx.commit().await.unwrap();
+        {
+            let db = Database::new(&mut f, FORMAT).await.unwrap();
 
-        // remount
-        let mut db = Database::new(&mut f).await.unwrap();
+            let mut wtx = db.write_transaction().await;
+            wtx.write(b"bar", b"4321").await.unwrap();
+            wtx.write(b"foo", b"1234").await.unwrap();
+            wtx.commit().await.unwrap();
+        }
 
-        let mut rtx = db.read_transaction().await.unwrap();
-        let n = rtx.read(b"foo", &mut buf).await.unwrap();
-        assert_eq!(&buf[..n], b"1234");
-        let n = rtx.read(b"bar", &mut buf).await.unwrap();
-        assert_eq!(&buf[..n], b"4321");
-        let n = rtx.read(b"baz", &mut buf).await.unwrap();
-        assert_eq!(&buf[..n], b"");
+        {
+            // remount
+            let db = Database::new(&mut f, NO_FORMAT).await.unwrap();
 
-        let mut wtx = db.write_transaction().await.unwrap();
-        wtx.write(b"bar", b"8765").await.unwrap();
-        wtx.write(b"baz", b"4242").await.unwrap();
-        wtx.write(b"foo", b"5678").await.unwrap();
-        wtx.commit().await.unwrap();
+            let mut rtx = db.read_transaction().await;
+            let n = rtx.read(b"foo", &mut buf).await.unwrap();
+            assert_eq!(&buf[..n], b"1234");
+            let n = rtx.read(b"bar", &mut buf).await.unwrap();
+            assert_eq!(&buf[..n], b"4321");
+            let n = rtx.read(b"baz", &mut buf).await.unwrap();
+            assert_eq!(&buf[..n], b"");
+            drop(rtx);
 
-        // remount
-        let mut db = Database::new(&mut f).await.unwrap();
+            let mut wtx = db.write_transaction().await;
+            wtx.write(b"bar", b"8765").await.unwrap();
+            wtx.write(b"baz", b"4242").await.unwrap();
+            wtx.write(b"foo", b"5678").await.unwrap();
+            wtx.commit().await.unwrap();
+        }
 
-        let mut rtx = db.read_transaction().await.unwrap();
-        let n = rtx.read(b"foo", &mut buf).await.unwrap();
-        assert_eq!(&buf[..n], b"5678");
-        let n = rtx.read(b"bar", &mut buf).await.unwrap();
-        assert_eq!(&buf[..n], b"8765");
-        let n = rtx.read(b"baz", &mut buf).await.unwrap();
-        assert_eq!(&buf[..n], b"4242");
+        {
+            // remount
+            let db = Database::new(&mut f, NO_FORMAT).await.unwrap();
 
-        let mut wtx = db.write_transaction().await.unwrap();
-        wtx.write(b"lol", b"9999").await.unwrap();
-        wtx.commit().await.unwrap();
+            let mut rtx = db.read_transaction().await;
+            let n = rtx.read(b"foo", &mut buf).await.unwrap();
+            assert_eq!(&buf[..n], b"5678");
+            let n = rtx.read(b"bar", &mut buf).await.unwrap();
+            assert_eq!(&buf[..n], b"8765");
+            let n = rtx.read(b"baz", &mut buf).await.unwrap();
+            assert_eq!(&buf[..n], b"4242");
+            drop(rtx);
 
-        // remount
-        let mut db = Database::new(&mut f).await.unwrap();
+            let mut wtx = db.write_transaction().await;
+            wtx.write(b"lol", b"9999").await.unwrap();
+            wtx.commit().await.unwrap();
+        }
 
-        let mut rtx = db.read_transaction().await.unwrap();
-        let n = rtx.read(b"foo", &mut buf).await.unwrap();
-        assert_eq!(&buf[..n], b"5678");
-        let n = rtx.read(b"bar", &mut buf).await.unwrap();
-        assert_eq!(&buf[..n], b"8765");
-        let n = rtx.read(b"baz", &mut buf).await.unwrap();
-        assert_eq!(&buf[..n], b"4242");
-        let n = rtx.read(b"lol", &mut buf).await.unwrap();
-        assert_eq!(&buf[..n], b"9999");
+        {
+            // remount
+            let db = Database::new(&mut f, NO_FORMAT).await.unwrap();
+
+            let mut rtx = db.read_transaction().await;
+            let n = rtx.read(b"foo", &mut buf).await.unwrap();
+            assert_eq!(&buf[..n], b"5678");
+            let n = rtx.read(b"bar", &mut buf).await.unwrap();
+            assert_eq!(&buf[..n], b"8765");
+            let n = rtx.read(b"baz", &mut buf).await.unwrap();
+            assert_eq!(&buf[..n], b"4242");
+            let n = rtx.read(b"lol", &mut buf).await.unwrap();
+            assert_eq!(&buf[..n], b"9999");
+            drop(rtx);
+        }
     }
 }

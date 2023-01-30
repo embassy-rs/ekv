@@ -12,15 +12,16 @@ None yet. This is a work in progress. Don't use it. When it's done, it will have
 - Transaction support:
   - Atomic writes: Start a write transaction, write multiple keys, commit. If power fails midway, either all or no writes are committed.
   - Consistent reads: Read transactions see a consistent snapshot of the database, unaffected by concurrent writes.
+  - Unlimited read transactions and one write transaction are allowed concurrently.
 
 ## TODO
 
 Soon:
 
 - Add (optional) CRCs to check data integrity. Both headers and data.
-- Allow N read transactions + 1 write transaction concurrently.
 - Free uncommitted pages on transaction drop.
 - Remove tombstone records when compacting the topmost level.
+- Allow the empty key `[]` (compaction assumes they're nonempty)
 
 Later:
 
