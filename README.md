@@ -19,9 +19,9 @@ None yet. This is a work in progress. Don't use it. When it's done, it will have
 Soon:
 
 - Add (optional) CRCs to check data integrity. Both headers and data.
+- Transaction tests
 - Free uncommitted pages on transaction drop.
 - Remove tombstone records when compacting the topmost level.
-- Allow the empty key `[]` (compaction assumes they're nonempty)
 - Add a way to configure settings (page size, etc) at compile time.
 
 Later:

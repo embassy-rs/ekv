@@ -208,10 +208,6 @@ impl<'a, F: Flash + 'a> Drop for ReadTransaction<'a, F> {
 
 impl<'a, F: Flash + 'a> ReadTransaction<'a, F> {
     pub async fn read(&mut self, key: &[u8], value: &mut [u8]) -> Result<usize, ReadError<F::Error>> {
-        if key.is_empty() {
-            panic!("key cannot be empty.")
-        }
-
         if key.len() > MAX_KEY_SIZE {
             return Err(ReadError::KeyTooBig);
         }
@@ -245,10 +241,6 @@ impl<'a, F: Flash + 'a> Drop for WriteTransaction<'a, F> {
 
 impl<'a, F: Flash + 'a> WriteTransaction<'a, F> {
     pub async fn write(&mut self, key: &[u8], value: &[u8]) -> Result<(), WriteError<F::Error>> {
-        if key.is_empty() {
-            panic!("key cannot be empty.")
-        }
-
         let is_first_write = match self.state {
             WriteTransactionState::Canceled => return Err(WriteError::TransactionCanceled),
             WriteTransactionState::Created => true,
@@ -452,10 +444,7 @@ impl<F: Flash> Inner<F> {
         debug!("write_transaction: writing file {}", file_id);
         let w = self.files.write(file_id).await?;
 
-        self.write_tx = Some(WriteTransactionInner {
-            w,
-            last_key: Vec::new(),
-        });
+        self.write_tx = Some(WriteTransactionInner { w, last_key: None });
 
         Ok(())
     }
@@ -464,10 +453,12 @@ impl<F: Flash> Inner<F> {
         self.ensure_write_transaction_started().await?;
         let tx = self.write_tx.as_mut().unwrap();
 
-        if key <= &tx.last_key {
-            panic!("writes within a transaction must be sorted.");
+        if let Some(last_key) = &tx.last_key {
+            if key <= last_key {
+                panic!("writes within a transaction must be sorted.");
+            }
         }
-        tx.last_key = Vec::from_slice(key).unwrap();
+        tx.last_key = Some(Vec::from_slice(key).unwrap());
 
         loop {
             let tx = self.write_tx.as_mut().unwrap();
@@ -645,28 +636,39 @@ impl<F: Flash> Inner<F> {
 
         let m = &mut self.files;
 
-        async fn read_key_or_empty<F: Flash>(
+        struct KeySlot {
+            valid: bool,
+            key: Vec<u8, MAX_KEY_SIZE>,
+        }
+
+        async fn read_key_slot<F: Flash>(
             m: &mut FileManager<F>,
             r: &mut FileReader,
-            buf: &mut Vec<u8, MAX_KEY_SIZE>,
+            buf: &mut KeySlot,
         ) -> Result<(), Error<F::Error>> {
-            match read_key(m, r, buf).await {
-                Ok(()) => Ok(()),
+            match read_key(m, r, &mut buf.key).await {
+                Ok(()) => {
+                    buf.valid = true;
+                    Ok(())
+                }
                 Err(PageReadError::Flash(e)) => Err(Error::Flash(e)),
                 Err(PageReadError::Eof) => {
-                    buf.truncate(0);
+                    buf.valid = false;
                     Ok(())
                 }
                 Err(PageReadError::Corrupted) => corrupted!(),
             }
         }
 
-        const NEW_VEC: Vec<u8, MAX_KEY_SIZE> = Vec::new();
-        let mut k = [NEW_VEC; BRANCHING_FACTOR];
+        const NEW_SLOT: KeySlot = KeySlot {
+            key: Vec::new(),
+            valid: false,
+        };
+        let mut k = [NEW_SLOT; BRANCHING_FACTOR];
         let mut trunc = [0; BRANCHING_FACTOR];
 
         for i in 0..src.len() {
-            read_key_or_empty(m, &mut r[i], &mut k[i]).await?;
+            read_key_slot(m, &mut r[i], &mut k[i]).await?;
         }
 
         let mut progress = false;
@@ -681,14 +683,14 @@ impl<F: Flash> Inner<F> {
             let mut bits: u32 = 0;
             for i in 0..src.len() {
                 // Ignore files that have already reached the end.
-                if k[i].is_empty() {
+                if !k[i].valid {
                     continue;
                 }
 
                 match highest_bit(bits) {
                     // If we haven't found any nonempty key yet, take the current one.
                     None => bits = 1 << i,
-                    Some(j) => match k[j].cmp(&k[i]) {
+                    Some(j) => match k[j].key.cmp(&k[i].key) {
                         Ordering::Greater => bits = 1 << i,
                         Ordering::Equal => bits |= 1 << i,
                         Ordering::Less => {}
@@ -704,13 +706,13 @@ impl<F: Flash> Inner<F> {
                 Some(i) => {
                     let val_len = check_corrupted!(read_leb128(m, &mut r[i]).await);
 
-                    let record_size = record_size(k[i].len(), val_len as usize);
+                    let record_size = record_size(k[i].key.len(), val_len as usize);
                     let need_size = record_size + FREE_PAGE_BUFFER_COMMIT * PAGE_MAX_PAYLOAD_SIZE;
                     let available_size = w.space_left_on_current_page() + m.free_pages() * PAGE_MAX_PAYLOAD_SIZE;
 
                     trace!(
                         "do_compact: key_len={} val_len={} space_left={} free_pages={} size={} available_size={}",
-                        k[i].len(),
+                        k[i].key.len(),
                         val_len,
                         w.space_left_on_current_page(),
                         m.free_pages(),
@@ -724,13 +726,13 @@ impl<F: Flash> Inner<F> {
                     }
 
                     #[cfg(feature = "defmt")]
-                    trace!("do_compact: copying key from file {:?}: {:02x}", src[i], &k[i][..]);
+                    trace!("do_compact: copying key from file {:?}: {:02x}", src[i], &k[i].key[..]);
                     #[cfg(not(feature = "defmt"))]
-                    trace!("do_compact: copying key from file {:?}: {:02x?}", src[i], &k[i][..]);
+                    trace!("do_compact: copying key from file {:?}: {:02x?}", src[i], &k[i].key[..]);
 
                     progress = true;
 
-                    write_key(m, &mut w, &k[i]).await?;
+                    write_key(m, &mut w, &k[i].key).await?;
                     write_leb128(m, &mut w, val_len).await?;
                     copy(m, &mut r[i], &mut w, val_len as usize).await?;
                     w.record_end();
@@ -742,7 +744,7 @@ impl<F: Flash> Inner<F> {
                                 check_corrupted!(skip_value(m, &mut r[j]).await);
                             }
                             trunc[j] = r[j].offset(m);
-                            read_key_or_empty(m, &mut r[j], &mut k[j]).await?;
+                            read_key_slot(m, &mut r[j], &mut k[j]).await?;
                         }
                     }
                 }
@@ -830,7 +832,7 @@ impl<F: Flash> Inner<F> {
 
 pub struct WriteTransactionInner {
     w: FileWriter,
-    last_key: Vec<u8, MAX_KEY_SIZE>,
+    last_key: Option<Vec<u8, MAX_KEY_SIZE>>,
 }
 
 async fn write_record<F: Flash>(
@@ -1069,6 +1071,35 @@ mod tests {
         assert_eq!(&buf[..n], b"4242");
         let n = rtx.read(b"lol", &mut buf).await.unwrap();
         assert_eq!(&buf[..n], b"9999");
+        drop(rtx);
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_empty_key() {
+        let mut f = MemFlash::new();
+        let db = Database::new(&mut f, FORMAT).await.unwrap();
+
+        let mut buf = [0u8; 1024];
+
+        let mut wtx = db.write_transaction().await;
+        wtx.write(b"", b"aaaa").await.unwrap();
+        wtx.write(b"foo", b"4321").await.unwrap();
+        wtx.commit().await.unwrap();
+
+        let mut wtx = db.write_transaction().await;
+        wtx.write(b"", b"bbbb").await.unwrap();
+        wtx.write(b"foo", b"1234").await.unwrap();
+        wtx.commit().await.unwrap();
+
+        assert_eq!(db.inner.lock().await.compact().await.unwrap(), true);
+
+        let mut rtx = db.read_transaction().await;
+        let n = rtx.read(b"", &mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"bbbb");
+        let n = rtx.read(b"foo", &mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"1234");
+        let n = rtx.read(b"baz", &mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"");
         drop(rtx);
     }
 
