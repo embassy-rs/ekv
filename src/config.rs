@@ -3,7 +3,7 @@ use core::mem::size_of;
 use crate::file::{DataHeader, MetaHeader};
 
 // ======== Flash parameters -- TODO unhardcode
-pub const WRITE_SIZE: usize = 4;
+pub const ALIGN: usize = 4;
 pub const PAGE_SIZE: usize = 256;
 pub const MAX_PAGE_COUNT: usize = 128;
 pub const ERASE_VALUE: u8 = 0xFF;

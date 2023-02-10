@@ -118,7 +118,7 @@ impl<F: Flash> PageManager<F> {
             _phantom: PhantomData,
             page_id,
             needs_erase: true,
-            align_buf: [0; WRITE_SIZE],
+            align_buf: [0; ALIGN],
             total_pos: 0,
             chunk_offset: PageHeader::SIZE + size_of::<H>(),
             chunk_pos: 0,
@@ -165,7 +165,7 @@ impl<F: Flash> PageManager<F> {
             _phantom: PhantomData,
             page_id,
             needs_erase: false,
-            align_buf: [0; WRITE_SIZE],
+            align_buf: [0; ALIGN],
             total_pos: r.prev_chunks_len,
             chunk_offset: r.chunk_offset,
             chunk_pos: 0,
@@ -313,7 +313,7 @@ pub struct PageWriter<H: Header> {
     page_id: PageID,
     needs_erase: bool,
 
-    align_buf: [u8; WRITE_SIZE],
+    align_buf: [u8; ALIGN],
 
     /// Total data bytes in page (all chunks)
     total_pos: usize,
@@ -343,9 +343,9 @@ impl<H: Header> PageWriter<H> {
 
         self.erase_if_needed(flash).await.map_err(Error::Flash)?;
 
-        let align_offs = self.chunk_pos % WRITE_SIZE;
+        let align_offs = self.chunk_pos % ALIGN;
         if align_offs != 0 {
-            let left = WRITE_SIZE - align_offs;
+            let left = ALIGN - align_offs;
             let n = left.min(data.len());
 
             self.align_buf[align_offs..][..n].copy_from_slice(&data[..n]);
@@ -357,7 +357,7 @@ impl<H: Header> PageWriter<H> {
                 flash
                     .write(
                         self.page_id as _,
-                        self.chunk_offset + ChunkHeader::SIZE + self.chunk_pos - WRITE_SIZE,
+                        self.chunk_offset + ChunkHeader::SIZE + self.chunk_pos - ALIGN,
                         &self.align_buf,
                     )
                     .await
@@ -365,7 +365,7 @@ impl<H: Header> PageWriter<H> {
             }
         }
 
-        let n = data.len() - (data.len() % WRITE_SIZE);
+        let n = data.len() - (data.len() % ALIGN);
         if n != 0 {
             flash
                 .write(
@@ -381,7 +381,7 @@ impl<H: Header> PageWriter<H> {
         }
 
         let n = data.len();
-        assert!(n < WRITE_SIZE);
+        assert!(n < ALIGN);
         self.align_buf[..n].copy_from_slice(data);
         self.total_pos += n;
         self.chunk_pos += n;
@@ -414,7 +414,7 @@ impl<H: Header> PageWriter<H> {
         self.erase_if_needed(flash).await.map_err(Error::Flash)?;
 
         // flush align buf.
-        let align_offs = self.chunk_pos % WRITE_SIZE;
+        let align_offs = self.chunk_pos % ALIGN;
         if align_offs != 0 {
             flash
                 .write(
@@ -443,8 +443,8 @@ impl<H: Header> PageWriter<H> {
 }
 
 fn align_up(n: usize) -> usize {
-    if n % WRITE_SIZE != 0 {
-        n + WRITE_SIZE - n % WRITE_SIZE
+    if n % ALIGN != 0 {
+        n + ALIGN - n % ALIGN
     } else {
         n
     }

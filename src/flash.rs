@@ -91,8 +91,8 @@ impl Flash for MemFlash {
         assert!(page_id < self.page_count());
         assert!(offset <= PAGE_SIZE);
         assert!(offset + data.len() <= PAGE_SIZE);
-        assert!(offset % WRITE_SIZE == 0);
-        assert!(data.len() % WRITE_SIZE == 0);
+        assert!(offset % ALIGN == 0);
+        assert!(data.len() % ALIGN == 0);
 
         let mem = &self.data[page_id * PAGE_SIZE + offset..][..data.len()];
         data.copy_from_slice(mem);
@@ -108,8 +108,8 @@ impl Flash for MemFlash {
         assert!(page_id < self.page_count());
         assert!(offset <= PAGE_SIZE);
         assert!(offset + data.len() <= PAGE_SIZE);
-        assert!(offset % WRITE_SIZE == 0);
-        assert!(data.len() % WRITE_SIZE == 0);
+        assert!(offset % ALIGN == 0);
+        assert!(data.len() % ALIGN == 0);
 
         let mem = &mut self.data[page_id * PAGE_SIZE + offset..][..data.len()];
         assert!(mem.iter().all(|x| *x == ERASE_VALUE));

@@ -321,7 +321,7 @@ impl<F: Flash> Inner<F> {
             MAX_PAGE_COUNT,
             MAX_PAGE_COUNT * PAGE_SIZE,
         );
-        debug!("write_size={}, erase_value={:02x}", WRITE_SIZE, ERASE_VALUE);
+        debug!("align={}, erase_value={:02x}", ALIGN, ERASE_VALUE);
         debug!(
             "sizeof(MetaHeader)={}, sizeof(DataHeader)={}, page_max_payload_size={}",
             size_of::<MetaHeader>(),
