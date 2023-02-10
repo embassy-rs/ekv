@@ -461,7 +461,7 @@ impl<F: Flash> Inner<F> {
 
         if let Some(last_key) = &tx.last_key {
             if key <= last_key {
-                panic!("writes within a transaction must be sorted.");
+                return Err(WriteError::NotSorted);
             }
         }
         tx.last_key = Some(Vec::from_slice(key).unwrap());
@@ -1426,5 +1426,16 @@ mod tests {
 
         let dbi = db.inner.lock().await;
         assert!((0..FILE_COUNT).into_iter().all(|i| dbi.files.is_empty(i as _)));
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_write_not_sorted() {
+        let mut f = MemFlash::new();
+        let db = Database::new(&mut f, FORMAT).await.unwrap();
+
+        // Write the key
+        let mut wtx = db.write_transaction().await;
+        wtx.write(b"foo", b"4321").await.unwrap();
+        assert_eq!(wtx.write(b"bar", b"4321").await, Err(WriteError::NotSorted));
     }
 }
