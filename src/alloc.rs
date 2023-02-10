@@ -106,3 +106,97 @@ impl Allocator {
         self.page_count
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn page(p: RawPageID) -> PageID {
+        PageID::from_raw(p).unwrap()
+    }
+
+    #[test_log::test]
+    fn test_alloc() {
+        let mut a = Allocator::new(5);
+        assert_eq!(a.try_allocate(), Some(page(0)));
+        assert_eq!(a.try_allocate(), Some(page(1)));
+        assert_eq!(a.try_allocate(), Some(page(2)));
+        assert_eq!(a.try_allocate(), Some(page(3)));
+        assert_eq!(a.try_allocate(), Some(page(4)));
+        assert_eq!(a.try_allocate(), None);
+    }
+
+    #[test_log::test]
+    fn test_alloc_wraparound() {
+        let mut a = Allocator::new(5);
+        assert_eq!(a.try_allocate(), Some(page(0)));
+        assert_eq!(a.try_allocate(), Some(page(1)));
+        assert_eq!(a.try_allocate(), Some(page(2)));
+        a.free(page(2));
+        a.free(page(1));
+        assert_eq!(a.try_allocate(), Some(page(3)));
+        assert_eq!(a.try_allocate(), Some(page(4)));
+        assert_eq!(a.try_allocate(), Some(page(1)));
+        assert_eq!(a.try_allocate(), Some(page(2)));
+        assert_eq!(a.try_allocate(), None);
+    }
+
+    #[test_log::test]
+    #[should_panic]
+    fn test_double_free() {
+        let mut a = Allocator::new(5);
+        a.free(page(2));
+    }
+
+    #[test_log::test]
+    fn test_mark_used() {
+        let mut a = Allocator::new(5);
+        a.mark_used(page(2));
+        a.free(page(2));
+        a.mark_used(page(2));
+        a.mark_used(page(3));
+        assert_eq!(a.try_allocate(), Some(page(0)));
+        assert_eq!(a.try_allocate(), Some(page(1)));
+        assert_eq!(a.try_allocate(), Some(page(4)));
+        assert_eq!(a.try_allocate(), None);
+    }
+
+    #[test_log::test]
+    fn test_is_used() {
+        let mut a = Allocator::new(5);
+        assert_eq!(a.is_used(page(2)), false);
+        a.mark_used(page(2));
+        assert_eq!(a.is_used(page(2)), true);
+        a.free(page(2));
+        assert_eq!(a.is_used(page(2)), false);
+    }
+
+    #[test_log::test]
+    #[should_panic(expected = "double mark_used")]
+    fn test_mark_used_double() {
+        let mut a = Allocator::new(5);
+        a.mark_used(page(2));
+        a.mark_used(page(2));
+    }
+
+    #[test_log::test]
+    #[should_panic(expected = "out of bounds")]
+    fn test_is_used_out_of_bounds() {
+        let a = Allocator::new(5);
+        a.is_used(page(10));
+    }
+
+    #[test_log::test]
+    #[should_panic(expected = "out of bounds")]
+    fn test_mark_used_out_of_bounds() {
+        let mut a = Allocator::new(5);
+        a.mark_used(page(10));
+    }
+
+    #[test_log::test]
+    #[should_panic(expected = "out of bounds")]
+    fn test_free_out_of_bounds() {
+        let mut a = Allocator::new(5);
+        a.free(page(10));
+    }
+}
