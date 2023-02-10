@@ -1057,8 +1057,6 @@ mod tests {
         let mut f = MemFlash::new();
         let db = Database::new(&mut f, FORMAT).await.unwrap();
 
-        let mut buf = [0u8; 1024];
-
         let mut wtx = db.write_transaction().await;
         wtx.write(b"bar", b"4321").await.unwrap();
         wtx.write(b"foo", b"1234").await.unwrap();
@@ -1353,7 +1351,6 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_remount() {
         let mut f = MemFlash::new();
-        let mut buf = [0u8; 1024];
 
         {
             let db = Database::new(&mut f, FORMAT).await.unwrap();

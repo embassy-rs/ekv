@@ -191,7 +191,7 @@ impl<F: Flash> FileManager<F> {
         self.meta_seq = meta_seq;
         self.alloc.mark_used(meta_page_id);
 
-        let (_, mut r) = self.read_page::<MetaHeader>(meta_page_id).await.inspect_err(|e| {
+        let (_, mut r) = self.read_page::<MetaHeader>(meta_page_id).await.inspect_err(|_| {
             debug!("failed read meta_page_id={:?}", meta_page_id);
         })?;
 
@@ -238,7 +238,7 @@ impl<F: Flash> FileManager<F> {
                 continue;
             };
 
-            let (h, mut r) = self.read_page::<DataHeader>(last_page_id).await.inspect_err(|e| {
+            let (h, mut r) = self.read_page::<DataHeader>(last_page_id).await.inspect_err(|_| {
                 debug!("read_page failed: last_page_id={:?} file_id={}", last_page_id, file_id);
             })?;
             let page_len = r.skip(&mut self.flash, PAGE_SIZE).await?;
@@ -706,7 +706,7 @@ impl FileReader {
     async fn seek_seq<F: Flash>(&mut self, m: &mut FileManager<F>, seq: Seq) -> Result<(), Error<F::Error>> {
         self.state = match m.get_file_page(self.file_id, seq).await? {
             Some(pp) => {
-                let (h, mut r) = m.read_page::<DataHeader>(pp.page_id).await.inspect_err(|e| {
+                let (h, mut r) = m.read_page::<DataHeader>(pp.page_id).await.inspect_err(|_| {
                     debug!("failed read next page={:?}", pp.page_id);
                 })?;
                 let n = seq.sub(h.seq);
@@ -954,7 +954,7 @@ impl FileSearcher {
             if page_id.index() >= m.page_count() {
                 corrupted!()
             }
-            let (h, r) = m.read_page::<DataHeader>(page_id).await.inspect_err(|e| {
+            let (h, r) = m.read_page::<DataHeader>(page_id).await.inspect_err(|_| {
                 debug!("failed read next page={:?}", page_id);
             })?;
 
