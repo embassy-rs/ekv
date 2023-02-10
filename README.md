@@ -20,9 +20,8 @@ Soon:
 
 - Add (optional) CRCs to check data integrity. Both headers and data.
 - Transaction tests
-- Free uncommitted pages on transaction drop.
 - Remove tombstone records when compacting the topmost level.
-- Add a way to configure settings (page size, etc) at compile time.
+- start allocator at a random offset, to ensure wear leveling.
 
 Later:
 

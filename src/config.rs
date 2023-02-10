@@ -1,14 +1,24 @@
 use core::mem::size_of;
 
-use crate::file::{DataHeader, MetaHeader};
+use crate::file::{DataHeader, MetaHeader, PAGE_MAX_PAYLOAD_SIZE};
+use crate::record::record_size;
 
-// ======== Flash parameters -- TODO unhardcode
-pub const ALIGN: usize = 4;
-pub const PAGE_SIZE: usize = 256;
-pub const MAX_PAGE_COUNT: usize = 128;
-pub const ERASE_VALUE: u8 = 0xFF;
+mod raw {
+    #![allow(unused)]
+    include!(concat!(env!("OUT_DIR"), "/config.rs"));
+}
 
-pub const MAX_HEADER_SIZE: usize = {
+// ======== Flash parameters
+pub const ALIGN: usize = raw::ALIGN;
+pub const PAGE_SIZE: usize = raw::PAGE_SIZE;
+pub const MAX_PAGE_COUNT: usize = raw::MAX_PAGE_COUNT;
+pub const ERASE_VALUE: u8 = match raw::ERASE_VALUE {
+    0x00 => 0x00,
+    0xFF => 0xFF,
+    _ => core::panic!("invalid ERASE_VALUE"),
+};
+
+pub(crate) const MAX_HEADER_SIZE: usize = {
     let a = size_of::<MetaHeader>();
     let b = size_of::<DataHeader>();
     if a > b {
@@ -19,28 +29,52 @@ pub const MAX_HEADER_SIZE: usize = {
 };
 
 // ======== Filesystem parameters
+
 /// Number of entries in the page header skiplist.
-pub const SKIPLIST_LEN: usize = 5;
+/// Substract 2 because we normally won't have a single file spanning the entire flash.
+/// Assuming it'll span 1/4th is reasonable, and if it's larger it'll still work,
+/// just doing 1-2 extra binary search steps.
+pub(crate) const SKIPLIST_LEN: usize = MAX_PAGE_COUNT.ilog2() as usize - 2;
 /// Shift of the first entry of the skiplist. Ideal value is ceil(log2(PAGE_SIZE))
-pub const SKIPLIST_SHIFT: usize = 8;
+pub(crate) const SKIPLIST_SHIFT: usize = PAGE_MAX_PAYLOAD_SIZE.ilog2() as usize + 1;
 
 // ======== File tree parameters
-pub const BRANCHING_FACTOR: usize = 3; // must be 2 or higher
-pub const LEVEL_COUNT: usize = 4;
-pub const FILE_COUNT: usize = BRANCHING_FACTOR * LEVEL_COUNT + 1;
+pub(crate) const BRANCHING_FACTOR: usize = 3; // must be 2 or higher
+pub(crate) const LEVEL_COUNT: usize = MAX_PAGE_COUNT.ilog(BRANCHING_FACTOR) as usize;
+pub(crate) const FILE_COUNT: usize = BRANCHING_FACTOR * LEVEL_COUNT + 1;
 
 // ======== Key-value database parameters
-pub const MAX_KEY_SIZE: usize = 64;
-pub const MAX_VALUE_SIZE: usize = 2500;
+pub const MAX_KEY_SIZE: usize = raw::MAX_KEY_SIZE;
+pub const MAX_VALUE_SIZE: usize = raw::MAX_VALUE_SIZE;
+
+pub const SCRATCH_PAGE_COUNT: usize = raw::SCRATCH_PAGE_COUNT;
+
+// Compaction will be stopped when there's this amount of free pages left.
+// We need at least one page free, in case file commit needs to write a new meta page.
+// There's no point in leaving more pages.
+pub(crate) const MIN_FREE_PAGE_COUNT_COMPACT: usize = 1;
 
 // Compaction will be triggered when there's thisamount of free pages left or less.
 // there's some lower bound to this that guarantees progressive compaction will never get stuck. it's something like:
 // FREE_PAGE_BUFFER_COMMIT + BRANCHING_FACTOR + ceil(max_record_size / page_max_payload_size)
 // TODO: figure out exact formula, prove it
-pub const FREE_PAGE_BUFFER: usize = 1 + 3 + 12;
-
-// Compaction will be stopped when there's this amount of free pages left.
-// We need at least one page free, in case file commit needs to write a new meta page.
-pub const FREE_PAGE_BUFFER_COMMIT: usize = 1;
+pub(crate) const MIN_FREE_PAGE_COUNT: usize = 1
+    + SCRATCH_PAGE_COUNT
+    + MIN_FREE_PAGE_COUNT_COMPACT
+    + BRANCHING_FACTOR
+    + (record_size(MAX_KEY_SIZE, MAX_VALUE_SIZE) + PAGE_MAX_PAYLOAD_SIZE - 1) / PAGE_MAX_PAYLOAD_SIZE;
 
 pub type FileID = u8;
+
+const _CHECKS: () = {
+    // using core::assert to avoid using defmt, because it doesn't work in const.
+
+    // Only align 1, 2, 4 is supported for now.
+    // We only align data. Header sizes are aligned to 4 but not 8.
+    // Supporting higher aligns would require aligning the headers as well.
+    core::assert!(ALIGN == 1 || ALIGN == 2 || ALIGN == 4);
+
+    // assert MIN_FREE_PAGE_COUNT is reasonable.
+    // If it's too big relative to the total flash size, we'll waste a lot of space!
+    core::assert!(MIN_FREE_PAGE_COUNT < MAX_PAGE_COUNT / 2);
+};

@@ -342,8 +342,8 @@ impl<F: Flash> Inner<F> {
             (max_record_size + PAGE_MAX_PAYLOAD_SIZE - 1) / PAGE_MAX_PAYLOAD_SIZE
         );
         debug!(
-            "free_page_buffer={}, free_page_buffer_commit={}",
-            FREE_PAGE_BUFFER, FREE_PAGE_BUFFER_COMMIT
+            "scratch_page_count={}, min_free_page_count={}, min_free_page_count_compact={}",
+            SCRATCH_PAGE_COUNT, MIN_FREE_PAGE_COUNT, MIN_FREE_PAGE_COUNT_COMPACT
         );
 
         Self {
@@ -466,7 +466,7 @@ impl<F: Flash> Inner<F> {
             let tx = self.write_tx.as_mut().unwrap();
 
             let record_size = record_size(key.len(), value.len());
-            let need_size = record_size + FREE_PAGE_BUFFER * PAGE_MAX_PAYLOAD_SIZE;
+            let need_size = record_size + MIN_FREE_PAGE_COUNT * PAGE_MAX_PAYLOAD_SIZE;
             let available_size = tx.w.space_left_on_current_page() + self.files.free_pages() * PAGE_MAX_PAYLOAD_SIZE;
             if need_size <= available_size {
                 break;
@@ -709,7 +709,7 @@ impl<F: Flash> Inner<F> {
                     let val_len = check_corrupted!(read_leb128(m, &mut r[i]).await);
 
                     let record_size = record_size(k[i].key.len(), val_len as usize);
-                    let need_size = record_size + FREE_PAGE_BUFFER_COMMIT * PAGE_MAX_PAYLOAD_SIZE;
+                    let need_size = record_size + MIN_FREE_PAGE_COUNT_COMPACT * PAGE_MAX_PAYLOAD_SIZE;
                     let available_size = w.space_left_on_current_page() + m.free_pages() * PAGE_MAX_PAYLOAD_SIZE;
 
                     trace!(
@@ -906,7 +906,7 @@ async fn write_leb128<F: Flash>(
     Ok(())
 }
 
-fn leb128_size(mut val: u32) -> usize {
+const fn leb128_size(mut val: usize) -> usize {
     let mut size = 0;
     loop {
         let rest = val >> 7;
@@ -921,8 +921,8 @@ fn leb128_size(mut val: u32) -> usize {
     size
 }
 
-fn record_size(key_len: usize, val_len: usize) -> usize {
-    leb128_size(key_len.try_into().unwrap()) + key_len + leb128_size(val_len.try_into().unwrap()) + val_len
+pub(crate) const fn record_size(key_len: usize, val_len: usize) -> usize {
+    leb128_size(key_len) + key_len + leb128_size(val_len) + val_len
 }
 
 async fn read_key<F: Flash>(
