@@ -68,32 +68,36 @@ struct FileState {
     flags: u8,
 }
 
+impl FileState {
+    const EMPTY: Self = Self {
+        dirty: false,
+        last_page: None,
+        first_seq: Seq::ZERO,
+        last_seq: Seq::ZERO,
+        flags: 0,
+    };
+}
+
 pub struct FileManager<F: Flash> {
     flash: F,
     pages: PageManager<F>,
     files: [FileState; FILE_COUNT],
     meta_page_id: PageID,
     meta_seq: Seq,
-
+    dirty: bool,
     alloc: Allocator,
 }
 
 impl<F: Flash> FileManager<F> {
     pub fn new(flash: F) -> Self {
         let page_count = flash.page_count();
-        const DUMMY_FILE: FileState = FileState {
-            dirty: false,
-            last_page: None,
-            first_seq: Seq::ZERO,
-            last_seq: Seq::ZERO,
-            flags: 0,
-        };
         Self {
             flash,
             meta_page_id: PageID::from_raw(0).unwrap(),
             meta_seq: Seq::ZERO,
             pages: PageManager::new(),
-            files: [DUMMY_FILE; FILE_COUNT],
+            files: [FileState::EMPTY; FILE_COUNT],
+            dirty: false,
             alloc: Allocator::new(page_count),
         }
     }
@@ -123,10 +127,12 @@ impl<F: Flash> FileManager<F> {
     }
 
     pub async fn read(&mut self, file_id: FileID) -> FileReader {
+        assert!(!self.dirty);
         FileReader::new(self, file_id)
     }
 
     pub async fn write(&mut self, file_id: FileID) -> Result<FileWriter, Error<F::Error>> {
+        assert!(!self.dirty);
         FileWriter::new(self, file_id).await
     }
 
@@ -139,6 +145,8 @@ impl<F: Flash> FileManager<F> {
     }
 
     pub async fn format(&mut self) -> Result<(), FormatError<F::Error>> {
+        self.dirty = true;
+
         // Erase all meta pages.
         for page_id in 0..self.page_count() {
             let page_id = PageID::from_raw(page_id as _).unwrap();
@@ -154,11 +162,14 @@ impl<F: Flash> FileManager<F> {
             .await
             .map_err(FormatError::Flash)?;
 
+        self.dirty = false;
         Ok(())
     }
 
     pub async fn mount(&mut self) -> Result<(), Error<F::Error>> {
+        self.dirty = true;
         self.alloc.reset();
+        self.files.fill(FileState::EMPTY);
 
         let mut meta_page_id = None;
         let mut meta_seq = Seq::ZERO;
@@ -265,10 +276,20 @@ impl<F: Flash> FileManager<F> {
             }
         }
 
+        self.dirty = false;
         Ok(())
     }
 
+    pub async fn remount_if_dirty(&mut self) -> Result<(), Error<F::Error>> {
+        if self.dirty {
+            self.mount().await
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn transaction(&mut self) -> Transaction<'_, F> {
+        assert!(!self.dirty);
         Transaction { m: self }
     }
 
@@ -407,15 +428,10 @@ pub struct Transaction<'a, F: Flash> {
     m: &'a mut FileManager<F>,
 }
 
-impl<'a, F: Flash> Drop for Transaction<'a, F> {
-    fn drop(&mut self) {
-        // TODO: if a transaction is aborted halfway, mark the FileManager
-        // as inconsistent, so that it is remounted at next operation.
-    }
-}
-
 impl<'a, F: Flash> Transaction<'a, F> {
     pub async fn set_flags(&mut self, file_id: FileID, flags: u8) -> Result<(), Error<F::Error>> {
+        self.m.dirty = true;
+
         let f = &mut self.m.files[file_id as usize];
         // flags only stick to nonempty files.
         if f.last_page.is_some() && f.flags != flags {
@@ -426,6 +442,8 @@ impl<'a, F: Flash> Transaction<'a, F> {
     }
 
     pub async fn rename(&mut self, from: FileID, to: FileID) -> Result<(), Error<F::Error>> {
+        self.m.dirty = true;
+
         self.m.files.swap(from as usize, to as usize);
         self.m.files[from as usize].dirty = true;
         self.m.files[to as usize].dirty = true;
@@ -436,6 +454,8 @@ impl<'a, F: Flash> Transaction<'a, F> {
         if bytes == 0 {
             return Ok(());
         }
+
+        self.m.dirty = true;
 
         let f = &mut self.m.files[file_id as usize];
         let old_f = *f;
@@ -501,6 +521,8 @@ impl<'a, F: Flash> Transaction<'a, F> {
     }
 
     pub async fn commit(mut self) -> Result<(), Error<F::Error>> {
+        self.m.dirty = true;
+
         // Try appending to the existing meta page.
         let res: Result<(), WriteError<F::Error>> = try {
             let (_, mut mw) = self
@@ -517,7 +539,10 @@ impl<'a, F: Flash> Transaction<'a, F> {
         };
 
         match res {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                self.m.dirty = false;
+                Ok(())
+            }
             Err(WriteError::Flash(e)) => Err(Error::Flash(e)),
             Err(WriteError::Corrupted) => corrupted!(),
             Err(WriteError::Full) => {
@@ -544,6 +569,7 @@ impl<'a, F: Flash> Transaction<'a, F> {
                 self.m.free_page(self.m.meta_page_id);
                 self.m.meta_page_id = page_id;
 
+                self.m.dirty = false;
                 Ok(())
             }
         }
@@ -1223,6 +1249,8 @@ impl FileWriter {
     pub async fn commit<F: Flash>(&mut self, tx: &mut Transaction<'_, F>) -> Result<(), Error<F::Error>> {
         if let Some(w) = mem::replace(&mut self.writer, None) {
             self.flush_header(tx.m, w).await?;
+
+            tx.m.dirty = true;
             let f = &mut tx.m.files[self.file_id as usize];
             let old_f = *f;
             f.last_page = self.last_page;
@@ -1543,6 +1571,30 @@ mod tests {
         let mut buf = [0; 4];
         r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(buf, [9, 10, 11, 12]);
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_transaction_drop() {
+        let mut f = MemFlash::new();
+        let mut m = FileManager::new(&mut f);
+        m.format().await.unwrap();
+        m.mount().await.unwrap();
+
+        let mut w = m.write(0).await.unwrap();
+        w.write(&mut m, &[1, 2, 3, 4, 5]).await.unwrap();
+
+        let mut tx = m.transaction();
+        w.commit(&mut tx).await.unwrap();
+        // no commit!
+
+        assert!(m.dirty);
+
+        m.remount_if_dirty().await.unwrap();
+
+        let mut r = m.read(0).await;
+        let mut buf = [0; 1];
+        let res = r.read(&mut m, &mut buf).await;
+        assert_eq!(res, Err(ReadError::Eof));
     }
 
     #[test_log::test(tokio::test)]

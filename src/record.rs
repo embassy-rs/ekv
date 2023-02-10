@@ -260,6 +260,8 @@ impl<'a, F: Flash + 'a> WriteTransaction<'a, F> {
 
         // If inner `write` fails, we also cancel the transaction.
         let mut db = self.db.inner.lock().await;
+        db.files.remount_if_dirty().await?;
+
         if is_first_write {
             db.rollback_if_any().await?;
         }
@@ -363,6 +365,8 @@ impl<F: Flash> Inner<F> {
     }
 
     async fn read(&mut self, key: &[u8], value: &mut [u8]) -> Result<usize, ReadError<F::Error>> {
+        self.files.remount_if_dirty().await?;
+
         for file_id in (0..FILE_COUNT).rev() {
             if let Some(res) = self.read_in_file(file_id as _, key, value).await? {
                 return Ok(res);
