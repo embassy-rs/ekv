@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 
-use ekv::config::{PAGE_COUNT, PAGE_SIZE};
+use ekv::config::{MAX_PAGE_COUNT, PAGE_SIZE};
 use ekv::flash::MemFlash;
 use ekv::{Config, Database, FormatConfig};
 use rand::Rng;
@@ -32,7 +32,7 @@ async fn main() {
     env_logger::init();
 
     println!("Hi there!");
-    println!("flash size: {}", PAGE_SIZE * PAGE_COUNT);
+    println!("flash size: {}", PAGE_SIZE * MAX_PAGE_COUNT);
     println!(
         "avg data size: {}",
         (KEY_COUNT + TX_MAX_COUNT) * (KEY_MIN_LEN + KEY_MAX_LEN + VAL_MIN_LEN + VAL_MAX_LEN) / 2

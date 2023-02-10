@@ -7,6 +7,8 @@ pub use crate::types::PageID;
 /// TODO use embedded-storage
 pub trait Flash {
     type Error: Debug;
+
+    fn page_count(&self) -> usize;
     async fn erase(&mut self, page_id: PageID) -> Result<(), Self::Error>;
     async fn read(&mut self, page_id: PageID, offset: usize, data: &mut [u8]) -> Result<(), Self::Error>;
     async fn write(&mut self, page_id: PageID, offset: usize, data: &[u8]) -> Result<(), Self::Error>;
@@ -14,6 +16,9 @@ pub trait Flash {
 
 impl<T: Flash> Flash for &mut T {
     type Error = T::Error;
+    fn page_count(&self) -> usize {
+        T::page_count(self)
+    }
     async fn erase(&mut self, page_id: PageID) -> Result<(), Self::Error> {
         T::erase(self, page_id).await
     }
@@ -41,7 +46,7 @@ pub struct MemFlash {
 impl MemFlash {
     pub fn new() -> Self {
         Self {
-            data: vec![ERASE_VALUE; PAGE_SIZE * PAGE_COUNT],
+            data: vec![ERASE_VALUE; PAGE_SIZE * MAX_PAGE_COUNT],
             read_count: 0,
             read_bytes: 0,
             write_count: 0,
@@ -65,10 +70,14 @@ impl MemFlash {
 impl Flash for MemFlash {
     type Error = core::convert::Infallible;
 
+    fn page_count(&self) -> usize {
+        MAX_PAGE_COUNT
+    }
+
     async fn erase(&mut self, page_id: PageID) -> Result<(), Self::Error> {
         let page_id = page_id.index();
 
-        assert!(page_id < PAGE_COUNT);
+        assert!(page_id < self.page_count());
         self.data[page_id * PAGE_SIZE..][..PAGE_SIZE].fill(ERASE_VALUE);
         self.erase_count += 1;
         self.erase_bytes += PAGE_SIZE;
@@ -79,7 +88,7 @@ impl Flash for MemFlash {
     async fn read(&mut self, page_id: PageID, offset: usize, data: &mut [u8]) -> Result<(), Self::Error> {
         let page_id = page_id.index();
 
-        assert!(page_id < PAGE_COUNT);
+        assert!(page_id < self.page_count());
         assert!(offset <= PAGE_SIZE);
         assert!(offset + data.len() <= PAGE_SIZE);
         assert!(offset % WRITE_SIZE == 0);
@@ -96,7 +105,7 @@ impl Flash for MemFlash {
     async fn write(&mut self, page_id: PageID, offset: usize, data: &[u8]) -> Result<(), Self::Error> {
         let page_id = page_id.index();
 
-        assert!(page_id < PAGE_COUNT);
+        assert!(page_id < self.page_count());
         assert!(offset <= PAGE_SIZE);
         assert!(offset + data.len() <= PAGE_SIZE);
         assert!(offset % WRITE_SIZE == 0);

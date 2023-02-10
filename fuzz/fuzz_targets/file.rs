@@ -2,7 +2,7 @@
 
 use std::cmp::Ordering;
 
-use ekv::config::{FileID, PAGE_COUNT, PAGE_SIZE};
+use ekv::config::{FileID, MAX_PAGE_COUNT, PAGE_SIZE};
 use ekv::file::{FileManager, FileSearcher, ReadError, SeekDirection};
 use ekv::flash::MemFlash;
 use libfuzzer_sys::arbitrary::Arbitrary;
@@ -64,7 +64,7 @@ async fn fuzz_inner(ops: Input, logging: bool) {
                     continue;
                 }
 
-                if (m.used_pages() + 3) * PAGE_SIZE + len >= PAGE_COUNT * PAGE_SIZE {
+                if (m.used_pages() + 3) * PAGE_SIZE + len >= MAX_PAGE_COUNT * PAGE_SIZE {
                     continue;
                 }
 

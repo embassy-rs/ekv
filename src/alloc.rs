@@ -10,15 +10,18 @@ pub enum PageState {
 
 /// Page allocator
 pub struct Allocator {
-    pages: [PageState; PAGE_COUNT], // TODO use a bitfield
+    page_count: usize,
+    pages: [PageState; MAX_PAGE_COUNT], // TODO use a bitfield
     used: usize,
-    next_page_id: RawPageID,
+    next_page_id: usize,
 }
 
 impl Allocator {
-    pub fn new() -> Self {
+    pub fn new(page_count: usize) -> Self {
+        assert!(page_count <= MAX_PAGE_COUNT);
         Self {
-            pages: [PageState::Free; PAGE_COUNT],
+            page_count,
+            pages: [PageState::Free; MAX_PAGE_COUNT],
             used: 0,
             next_page_id: 0, // TODO make random to spread out wear
         }
@@ -34,15 +37,15 @@ impl Allocator {
         loop {
             let p = self.next_page_id;
             self.next_page_id += 1;
-            if self.next_page_id == PAGE_COUNT as _ {
+            if self.next_page_id == self.page_count {
                 self.next_page_id = 0;
             }
 
-            let v = &mut self.pages[p as usize];
+            let v = &mut self.pages[p];
             if *v == PageState::Free {
                 *v = PageState::Used;
                 self.used += 1;
-                return PageID::from_raw(p).unwrap();
+                return PageID::from_raw(p as RawPageID).unwrap();
             }
 
             if self.next_page_id == start {
@@ -52,12 +55,16 @@ impl Allocator {
     }
 
     pub fn mark_used(&mut self, page_id: PageID) {
+        assert!(page_id.index() < self.page_count);
+
         assert_eq!(self.pages[page_id.index()], PageState::Free);
         self.pages[page_id.index()] = PageState::Used;
         self.used += 1;
     }
 
     pub fn free(&mut self, page_id: PageID) {
+        assert!(page_id.index() < self.page_count);
+
         let v = &mut self.pages[page_id.index()];
         *v = match *v {
             PageState::Free => panic!("double free"),
@@ -67,10 +74,20 @@ impl Allocator {
     }
 
     pub fn is_used(&self, page_id: PageID) -> bool {
+        assert!(page_id.index() < self.page_count);
+
         self.pages[page_id.index()] == PageState::Used
     }
 
-    pub fn used(&self) -> usize {
+    pub fn used_pages(&self) -> usize {
         self.used
+    }
+
+    pub(crate) fn free_pages(&self) -> usize {
+        self.page_count - self.used
+    }
+
+    pub(crate) fn page_count(&self) -> usize {
+        self.page_count
     }
 }

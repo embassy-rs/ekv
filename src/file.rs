@@ -80,6 +80,7 @@ pub struct FileManager<F: Flash> {
 
 impl<F: Flash> FileManager<F> {
     pub fn new(flash: F) -> Self {
+        let page_count = flash.page_count();
         const DUMMY_FILE: FileState = FileState {
             dirty: false,
             last_page: None,
@@ -93,16 +94,20 @@ impl<F: Flash> FileManager<F> {
             meta_seq: Seq::ZERO,
             pages: PageManager::new(),
             files: [DUMMY_FILE; FILE_COUNT],
-            alloc: Allocator::new(),
+            alloc: Allocator::new(page_count),
         }
     }
 
+    fn page_count(&self) -> usize {
+        self.alloc.page_count()
+    }
+
     pub fn used_pages(&self) -> usize {
-        self.alloc.used()
+        self.alloc.used_pages()
     }
 
     pub fn free_pages(&self) -> usize {
-        PAGE_COUNT - self.alloc.used()
+        self.alloc.free_pages()
     }
 
     pub fn flash(&self) -> &F {
@@ -135,7 +140,7 @@ impl<F: Flash> FileManager<F> {
 
     pub async fn format(&mut self) -> Result<(), FormatError<F::Error>> {
         // Erase all meta pages.
-        for page_id in 0..PAGE_COUNT {
+        for page_id in 0..self.page_count() {
             let page_id = PageID::from_raw(page_id as _).unwrap();
             if self.read_header::<MetaHeader>(page_id).await.is_ok() {
                 self.flash.erase(page_id).await.map_err(FormatError::Flash)?;
@@ -157,7 +162,7 @@ impl<F: Flash> FileManager<F> {
 
         let mut meta_page_id = None;
         let mut meta_seq = Seq::ZERO;
-        for page_id in 0..PAGE_COUNT {
+        for page_id in 0..self.page_count() {
             let page_id = PageID::from_raw(page_id as _).unwrap();
             if let Ok(h) = self.read_header::<MetaHeader>(page_id).await {
                 if h.seq > meta_seq {
@@ -203,7 +208,7 @@ impl<F: Flash> FileManager<F> {
             }
 
             if let Some(page_id) = meta.last_page_id.into_option() {
-                if page_id.index() >= PAGE_COUNT {
+                if page_id.index() >= self.page_count() {
                     debug!("meta last_page_id out of range: {}", meta.file_id);
                     corrupted!();
                 }
@@ -566,7 +571,7 @@ impl PagePointer {
             return Ok(None);
         };
 
-        if p2.index() >= PAGE_COUNT {
+        if p2.index() >= m.page_count() {
             debug!("prev page out of range {:?}", p2);
             corrupted!();
         }
@@ -595,7 +600,7 @@ impl PagePointer {
                 debug!("no prev page??");
                 corrupted!();
             };
-            if p2.index() >= PAGE_COUNT {
+            if p2.index() >= m.page_count() {
                 debug!("prev page out of range {:?}", p2);
                 corrupted!();
             }
@@ -920,7 +925,7 @@ impl FileSearcher {
         let mut right_limit = self.right;
 
         let (h, mut r) = loop {
-            if page_id.index() >= PAGE_COUNT {
+            if page_id.index() >= m.page_count() {
                 corrupted!()
             }
             let (h, r) = m.read_page::<DataHeader>(page_id).await.inspect_err(|e| {

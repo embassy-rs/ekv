@@ -314,10 +314,12 @@ impl<F: Flash> Inner<F> {
     async fn new(flash: F) -> Self {
         debug!("creating database!");
         debug!(
-            "page_size={}, page_count={}, total_size={}",
+            "page_size={}, page_count={}, total_size={}, max_page_count={}, max_total_size={}",
             PAGE_SIZE,
-            PAGE_COUNT,
-            PAGE_COUNT * PAGE_SIZE
+            flash.page_count(),
+            flash.page_count() * PAGE_SIZE,
+            MAX_PAGE_COUNT,
+            MAX_PAGE_COUNT * PAGE_SIZE,
         );
         debug!("write_size={}, erase_value={:02x}", WRITE_SIZE, ERASE_VALUE);
         debug!(
@@ -498,8 +500,8 @@ impl<F: Flash> Inner<F> {
     async fn rollback(&mut self) -> Result<(), Error<F::Error>> {
         debug!("write_transaction: rollback");
 
-        let _tx = self.write_tx.as_mut().unwrap();
-        // TODO: free pages.
+        let tx = self.write_tx.as_mut().unwrap();
+        tx.w.discard(&mut self.files).await.unwrap();
 
         self.write_tx = None;
 
@@ -1022,6 +1024,13 @@ mod tests {
         config
     };
 
+    async fn check_read(db: &Database<impl Flash>, key: &[u8], value: &[u8]) {
+        let mut rtx = db.read_transaction().await;
+        let mut buf = [0; 1024];
+        let n = rtx.read(key, &mut buf).await.unwrap();
+        assert_eq!(&buf[..n], value);
+    }
+
     #[test_log::test(tokio::test)]
     async fn test() {
         let mut f = MemFlash::new();
@@ -1034,14 +1043,9 @@ mod tests {
         wtx.write(b"foo", b"1234").await.unwrap();
         wtx.commit().await.unwrap();
 
-        let mut rtx = db.read_transaction().await;
-        let n = rtx.read(b"foo", &mut buf).await.unwrap();
-        assert_eq!(&buf[..n], b"1234");
-        let n = rtx.read(b"bar", &mut buf).await.unwrap();
-        assert_eq!(&buf[..n], b"4321");
-        let n = rtx.read(b"baz", &mut buf).await.unwrap();
-        assert_eq!(&buf[..n], b"");
-        drop(rtx);
+        check_read(&db, b"foo", b"1234").await;
+        check_read(&db, b"bar", b"4321").await;
+        check_read(&db, b"baz", b"").await;
 
         let mut wtx = db.write_transaction().await;
         wtx.write(b"bar", b"8765").await.unwrap();
@@ -1049,37 +1053,24 @@ mod tests {
         wtx.write(b"foo", b"5678").await.unwrap();
         wtx.commit().await.unwrap();
 
-        let mut rtx = db.read_transaction().await;
-        let n = rtx.read(b"foo", &mut buf).await.unwrap();
-        assert_eq!(&buf[..n], b"5678");
-        let n = rtx.read(b"bar", &mut buf).await.unwrap();
-        assert_eq!(&buf[..n], b"8765");
-        let n = rtx.read(b"baz", &mut buf).await.unwrap();
-        assert_eq!(&buf[..n], b"4242");
-        drop(rtx);
+        check_read(&db, b"foo", b"5678").await;
+        check_read(&db, b"bar", b"8765").await;
+        check_read(&db, b"baz", b"4242").await;
 
         let mut wtx = db.write_transaction().await;
         wtx.write(b"lol", b"9999").await.unwrap();
         wtx.commit().await.unwrap();
 
-        let mut rtx = db.read_transaction().await;
-        let n = rtx.read(b"foo", &mut buf).await.unwrap();
-        assert_eq!(&buf[..n], b"5678");
-        let n = rtx.read(b"bar", &mut buf).await.unwrap();
-        assert_eq!(&buf[..n], b"8765");
-        let n = rtx.read(b"baz", &mut buf).await.unwrap();
-        assert_eq!(&buf[..n], b"4242");
-        let n = rtx.read(b"lol", &mut buf).await.unwrap();
-        assert_eq!(&buf[..n], b"9999");
-        drop(rtx);
+        check_read(&db, b"foo", b"5678").await;
+        check_read(&db, b"bar", b"8765").await;
+        check_read(&db, b"baz", b"4242").await;
+        check_read(&db, b"lol", b"9999").await;
     }
 
     #[test_log::test(tokio::test)]
     async fn test_empty_key() {
         let mut f = MemFlash::new();
         let db = Database::new(&mut f, FORMAT).await.unwrap();
-
-        let mut buf = [0u8; 1024];
 
         let mut wtx = db.write_transaction().await;
         wtx.write(b"", b"aaaa").await.unwrap();
@@ -1091,16 +1082,74 @@ mod tests {
         wtx.write(b"foo", b"1234").await.unwrap();
         wtx.commit().await.unwrap();
 
+        // force compact, to check it handles empty key fine.
         assert_eq!(db.inner.lock().await.compact().await.unwrap(), true);
 
-        let mut rtx = db.read_transaction().await;
-        let n = rtx.read(b"", &mut buf).await.unwrap();
-        assert_eq!(&buf[..n], b"bbbb");
-        let n = rtx.read(b"foo", &mut buf).await.unwrap();
-        assert_eq!(&buf[..n], b"1234");
-        let n = rtx.read(b"baz", &mut buf).await.unwrap();
-        assert_eq!(&buf[..n], b"");
-        drop(rtx);
+        check_read(&db, b"", b"bbbb").await;
+        check_read(&db, b"foo", b"1234").await;
+        check_read(&db, b"baz", b"").await;
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_transaction() {
+        let mut f = MemFlash::new();
+        let db = Database::new(&mut f, FORMAT).await.unwrap();
+
+        check_read(&db, b"foo", b"").await;
+        check_read(&db, b"bar", b"").await;
+
+        let mut wtx = db.write_transaction().await;
+
+        wtx.write(b"bar", b"1234").await.unwrap();
+        check_read(&db, b"foo", b"").await;
+        check_read(&db, b"bar", b"").await;
+
+        wtx.write(b"foo", b"4321").await.unwrap();
+        check_read(&db, b"foo", b"").await;
+        check_read(&db, b"bar", b"").await;
+
+        wtx.commit().await.unwrap();
+
+        check_read(&db, b"foo", b"4321").await;
+        check_read(&db, b"bar", b"1234").await;
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_transaction_drop() {
+        let mut f = MemFlash::new();
+        let db = Database::new(&mut f, FORMAT).await.unwrap();
+
+        let mut wtx = db.write_transaction().await;
+        wtx.write(b"foo", b"4321").await.unwrap();
+        drop(wtx);
+
+        check_read(&db, b"foo", b"").await;
+
+        let mut wtx = db.write_transaction().await;
+        wtx.write(b"bar", b"4321").await.unwrap();
+        wtx.commit().await.unwrap();
+
+        check_read(&db, b"foo", b"").await;
+        check_read(&db, b"bar", b"4321").await;
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_free_pages_on_transaction_drop() {
+        let mut f = MemFlash::new();
+        let db = Database::new(&mut f, FORMAT).await.unwrap();
+
+        let prev_free = db.inner.lock().await.files.free_pages();
+
+        let mut wtx = db.write_transaction().await;
+        wtx.write(b"foo", b"4321").await.unwrap();
+        drop(wtx);
+
+        // rollback is lazy, force it.
+        db.inner.lock().await.rollback().await.unwrap();
+
+        let now_free = db.inner.lock().await.files.free_pages();
+
+        assert_eq!(prev_free, now_free);
     }
 
     #[test_log::test(tokio::test)]
@@ -1136,14 +1185,9 @@ mod tests {
             // remount
             let db = Database::new(&mut f, NO_FORMAT).await.unwrap();
 
-            let mut rtx = db.read_transaction().await;
-            let n = rtx.read(b"foo", &mut buf).await.unwrap();
-            assert_eq!(&buf[..n], b"1234");
-            let n = rtx.read(b"bar", &mut buf).await.unwrap();
-            assert_eq!(&buf[..n], b"4321");
-            let n = rtx.read(b"baz", &mut buf).await.unwrap();
-            assert_eq!(&buf[..n], b"");
-            drop(rtx);
+            check_read(&db, b"foo", b"1234").await;
+            check_read(&db, b"bar", b"4321").await;
+            check_read(&db, b"baz", b"").await;
 
             let mut wtx = db.write_transaction().await;
             wtx.write(b"bar", b"8765").await.unwrap();
@@ -1156,14 +1200,9 @@ mod tests {
             // remount
             let db = Database::new(&mut f, NO_FORMAT).await.unwrap();
 
-            let mut rtx = db.read_transaction().await;
-            let n = rtx.read(b"foo", &mut buf).await.unwrap();
-            assert_eq!(&buf[..n], b"5678");
-            let n = rtx.read(b"bar", &mut buf).await.unwrap();
-            assert_eq!(&buf[..n], b"8765");
-            let n = rtx.read(b"baz", &mut buf).await.unwrap();
-            assert_eq!(&buf[..n], b"4242");
-            drop(rtx);
+            check_read(&db, b"foo", b"5678").await;
+            check_read(&db, b"bar", b"8765").await;
+            check_read(&db, b"baz", b"4242").await;
 
             let mut wtx = db.write_transaction().await;
             wtx.write(b"lol", b"9999").await.unwrap();
@@ -1174,16 +1213,10 @@ mod tests {
             // remount
             let db = Database::new(&mut f, NO_FORMAT).await.unwrap();
 
-            let mut rtx = db.read_transaction().await;
-            let n = rtx.read(b"foo", &mut buf).await.unwrap();
-            assert_eq!(&buf[..n], b"5678");
-            let n = rtx.read(b"bar", &mut buf).await.unwrap();
-            assert_eq!(&buf[..n], b"8765");
-            let n = rtx.read(b"baz", &mut buf).await.unwrap();
-            assert_eq!(&buf[..n], b"4242");
-            let n = rtx.read(b"lol", &mut buf).await.unwrap();
-            assert_eq!(&buf[..n], b"9999");
-            drop(rtx);
+            check_read(&db, b"foo", b"5678").await;
+            check_read(&db, b"bar", b"8765").await;
+            check_read(&db, b"baz", b"4242").await;
+            check_read(&db, b"lol", b"9999").await;
         }
     }
 }
