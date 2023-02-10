@@ -1014,6 +1014,14 @@ impl<I: Iterator> Single for I {
 
 #[cfg(test)]
 mod tests {
+    use core::cell::Cell;
+    use core::future::Future;
+    use core::pin::Pin;
+    use core::ptr;
+    use core::task::{Context, RawWaker, RawWakerVTable, Waker};
+
+    use tokio::task::yield_now;
+
     use super::*;
     use crate::flash::MemFlash;
 
@@ -1135,6 +1143,168 @@ mod tests {
 
         check_read(&db, b"foo", b"").await;
         check_read(&db, b"bar", b"4321").await;
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_transaction_locking() {
+        let mut f = MemFlash::new();
+        let db = Database::new(&mut f, FORMAT).await.unwrap();
+
+        static VTABLE: RawWakerVTable =
+            RawWakerVTable::new(|_| RawWaker::new(ptr::null(), &VTABLE), |_| {}, |_| {}, |_| {});
+        let raw_waker = RawWaker::new(ptr::null(), &VTABLE);
+        let waker = unsafe { Waker::from_raw(raw_waker) };
+        let cx = &mut Context::from_waker(&waker);
+
+        let read_state = Cell::new(0);
+        let mut read_fut = async {
+            read_state.set(1);
+            let mut rtx = db.read_transaction().await;
+
+            read_state.set(2);
+            yield_now().await;
+
+            let mut buf = [0; 128];
+            let _ = rtx.read(b"foo", &mut buf).await;
+
+            read_state.set(3);
+            drop(rtx);
+
+            read_state.set(4);
+        };
+
+        let write_state = Cell::new(0);
+        let mut write_fut = async {
+            write_state.set(1);
+            let mut wtx = db.write_transaction().await;
+
+            write_state.set(2);
+            wtx.write(b"foo", b"lol").await.unwrap();
+
+            write_state.set(3);
+            wtx.commit().await.unwrap();
+
+            write_state.set(4);
+        };
+
+        let mut read_fut = unsafe { Pin::new_unchecked(&mut read_fut) };
+        let mut write_fut = unsafe { Pin::new_unchecked(&mut write_fut) };
+
+        // Start read tx
+        assert_eq!(read_fut.as_mut().poll(cx), Poll::Pending);
+        assert_eq!(read_state.get(), 2);
+
+        // Start write tx. Commit should wait for the rtx to end.
+        assert_eq!(write_fut.as_mut().poll(cx), Poll::Pending);
+        assert_eq!(write_state.get(), 3);
+
+        // Still shouldn't move.
+        assert_eq!(write_fut.as_mut().poll(cx), Poll::Pending);
+        assert_eq!(write_state.get(), 3);
+
+        // End read tx
+        assert_eq!(read_fut.as_mut().poll(cx), Poll::Ready(()));
+        assert_eq!(read_state.get(), 4);
+
+        assert_eq!(write_fut.as_mut().poll(cx), Poll::Ready(()));
+        assert_eq!(write_state.get(), 4);
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_transaction_locking_queue() {
+        let mut f = MemFlash::new();
+        let db = Database::new(&mut f, FORMAT).await.unwrap();
+
+        static VTABLE: RawWakerVTable =
+            RawWakerVTable::new(|_| RawWaker::new(ptr::null(), &VTABLE), |_| {}, |_| {}, |_| {});
+        let raw_waker = RawWaker::new(ptr::null(), &VTABLE);
+        let waker = unsafe { Waker::from_raw(raw_waker) };
+        let cx = &mut Context::from_waker(&waker);
+
+        let read_state = Cell::new(0);
+        let mut read_fut = async {
+            read_state.set(1);
+            let mut rtx = db.read_transaction().await;
+
+            read_state.set(2);
+            yield_now().await;
+
+            let mut buf = [0; 128];
+            let _ = rtx.read(b"foo", &mut buf).await;
+
+            read_state.set(3);
+            drop(rtx);
+
+            read_state.set(4);
+        };
+
+        let read2_state = Cell::new(0);
+        let mut read2_fut = async {
+            read2_state.set(1);
+            let mut rtx = db.read_transaction().await;
+
+            read2_state.set(2);
+
+            let mut buf = [0; 128];
+            let _ = rtx.read(b"foo", &mut buf).await;
+
+            read2_state.set(3);
+            drop(rtx);
+
+            read2_state.set(4);
+        };
+
+        let write_state = Cell::new(0);
+        let mut write_fut = async {
+            write_state.set(1);
+            let mut wtx = db.write_transaction().await;
+
+            write_state.set(2);
+            wtx.write(b"foo", b"lol").await.unwrap();
+
+            write_state.set(3);
+            wtx.commit().await.unwrap();
+
+            write_state.set(4);
+        };
+
+        let mut read_fut = unsafe { Pin::new_unchecked(&mut read_fut) };
+        let mut read2_fut = unsafe { Pin::new_unchecked(&mut read2_fut) };
+        let mut write_fut = unsafe { Pin::new_unchecked(&mut write_fut) };
+
+        // Start read tx
+        assert_eq!(read_fut.as_mut().poll(cx), Poll::Pending);
+        assert_eq!(read_state.get(), 2);
+
+        // Start write tx. Commit should wait for the rtx to end.
+        assert_eq!(write_fut.as_mut().poll(cx), Poll::Pending);
+        assert_eq!(write_state.get(), 3);
+
+        // Try to start the other read tx. Because commit is waiting, it should wait.
+        assert_eq!(read2_fut.as_mut().poll(cx), Poll::Pending);
+        assert_eq!(read2_state.get(), 1);
+
+        // Still shouldn't move.
+        assert_eq!(write_fut.as_mut().poll(cx), Poll::Pending);
+        assert_eq!(write_state.get(), 3);
+        assert_eq!(read2_fut.as_mut().poll(cx), Poll::Pending);
+        assert_eq!(read2_state.get(), 1);
+
+        // End read tx
+        assert_eq!(read_fut.as_mut().poll(cx), Poll::Ready(()));
+        assert_eq!(read_state.get(), 4);
+
+        // The read2 tx shouldn't start because we haven't polled the write tx yet.
+        assert_eq!(read2_fut.as_mut().poll(cx), Poll::Pending);
+        assert_eq!(read2_state.get(), 1);
+
+        // poll the write tx, it commits.
+        assert_eq!(write_fut.as_mut().poll(cx), Poll::Ready(()));
+        assert_eq!(write_state.get(), 4);
+
+        // then the other read tx can go through now.
+        assert_eq!(read2_fut.as_mut().poll(cx), Poll::Ready(()));
+        assert_eq!(read2_state.get(), 4);
     }
 
     #[test_log::test(tokio::test)]

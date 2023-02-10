@@ -19,7 +19,6 @@ None yet. This is a work in progress. Don't use it. When it's done, it will have
 Soon:
 
 - Add (optional) CRCs to check data integrity. Both headers and data.
-- Transaction tests
 - Remove tombstone records when compacting the topmost level.
 - start allocator at a random offset, to ensure wear leveling.
 
