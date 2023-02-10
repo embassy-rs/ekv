@@ -621,6 +621,8 @@ impl<F: Flash> Inner<F> {
     async fn do_compact(&mut self, src: Vec<FileID, BRANCHING_FACTOR>, dst: FileID) -> Result<(), Error<F::Error>> {
         debug!("do_compact {:?} -> {}", &src[..], dst);
 
+        let topmost = dst == 0;
+
         assert!(!src.is_empty());
 
         if self.files.is_empty(dst) && src.len() == 1 {
@@ -738,10 +740,17 @@ impl<F: Flash> Inner<F> {
 
                     progress = true;
 
-                    write_key(m, &mut w, &k[i].key).await?;
-                    write_leb128(m, &mut w, val_len).await?;
-                    copy(m, &mut r[i], &mut w, val_len as usize).await?;
-                    w.record_end();
+                    // if we're compacting to the topmost level, do not write tombstone
+                    // records (records for deleted keys, ie val_len=0)
+                    if topmost && val_len == 0 {
+                        trace!("do_compact: skipping tombstone.");
+                        check_corrupted!(r[i].skip(m, val_len as usize).await);
+                    } else {
+                        write_key(m, &mut w, &k[i].key).await?;
+                        write_leb128(m, &mut w, val_len).await?;
+                        copy(m, &mut r[i], &mut w, val_len as usize).await?;
+                        w.record_end();
+                    }
 
                     // Advance all readers
                     for j in 0..BRANCHING_FACTOR {
@@ -777,7 +786,7 @@ impl<F: Flash> Inner<F> {
         tx.set_flags(dst, dst_flag).await?;
 
         // special case: if compacting from level 0
-        if dst == 0 && done {
+        if topmost && done {
             tx.rename(0, Self::file_id(0, 0)).await?;
         }
 
@@ -1392,5 +1401,30 @@ mod tests {
             check_read(&db, b"baz", b"4242").await;
             check_read(&db, b"lol", b"9999").await;
         }
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_compact_removes_tombstones() {
+        let mut f = MemFlash::new();
+        let db = Database::new(&mut f, FORMAT).await.unwrap();
+
+        // Write the key
+        let mut wtx = db.write_transaction().await;
+        wtx.write(b"foo", b"4321").await.unwrap();
+        wtx.commit().await.unwrap();
+
+        // force compact all the way.
+        while db.inner.lock().await.compact().await.unwrap() {}
+
+        // Then erase it.
+        let mut wtx = db.write_transaction().await;
+        wtx.write(b"foo", b"").await.unwrap();
+        wtx.commit().await.unwrap();
+
+        // force compact all the way.
+        while db.inner.lock().await.compact().await.unwrap() {}
+
+        let dbi = db.inner.lock().await;
+        assert!((0..FILE_COUNT).into_iter().all(|i| dbi.files.is_empty(i as _)));
     }
 }
