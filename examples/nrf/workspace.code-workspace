@@ -10,7 +10,7 @@
         "rust-analyzer.cargo.target": "thumbv7em-none-eabi",
         "rust-analyzer.cargo.features": [],
         "rust-analyzer.linkedProjects": [
-            "nrf/Cargo.toml",
+            "examples/nrf/Cargo.toml",
         ],
         "rust-analyzer.imports.granularity.enforce": true,
         "rust-analyzer.imports.granularity.group": "module",
