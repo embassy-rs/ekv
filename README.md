@@ -13,13 +13,13 @@ None yet. This is a work in progress. Don't use it. When it's done, it will have
   - Atomic writes: Start a write transaction, write multiple keys, commit. If power fails midway, either all or no writes are committed.
   - Consistent reads: Read transactions see a consistent snapshot of the database, unaffected by concurrent writes.
   - Unlimited read transactions and one write transaction are allowed concurrently.
+- Wear leveling: erase cycles are spread out evenly between all flash pages. Pages are allocated cyclically. At boot, a random seed is required to decide which is the first.
 
 ## TODO
 
 Soon:
 
 - Add (optional) CRCs to check data integrity. Both headers and data.
-- start allocator at a random offset, to ensure wear leveling.
 
 Later:
 

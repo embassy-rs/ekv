@@ -89,7 +89,7 @@ pub struct FileManager<F: Flash> {
 }
 
 impl<F: Flash> FileManager<F> {
-    pub fn new(flash: F) -> Self {
+    pub fn new(flash: F, random_seed: u32) -> Self {
         let page_count = flash.page_count();
         Self {
             flash,
@@ -98,7 +98,7 @@ impl<F: Flash> FileManager<F> {
             pages: PageManager::new(),
             files: [FileState::EMPTY; FILE_COUNT],
             dirty: false,
-            alloc: Allocator::new(page_count),
+            alloc: Allocator::new(page_count, random_seed),
         }
     }
 
@@ -1410,7 +1410,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_read_write() {
         let mut f = MemFlash::new();
-        let mut m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f, 0);
         m.format().await.unwrap();
         m.mount().await.unwrap();
 
@@ -1437,7 +1437,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_read_write_long() {
         let mut f = MemFlash::new();
-        let mut m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f, 0);
         m.format().await.unwrap();
         m.mount().await.unwrap();
 
@@ -1465,7 +1465,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_append() {
         let mut f = MemFlash::new();
-        let mut m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f, 0);
         m.format().await.unwrap();
         m.mount().await.unwrap();
 
@@ -1493,7 +1493,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_truncate() {
         let mut f = MemFlash::new();
-        let mut m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f, 0);
         m.format().await.unwrap();
         m.mount().await.unwrap();
 
@@ -1527,7 +1527,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_append_truncate() {
         let mut f = MemFlash::new();
-        let mut m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f, 0);
         m.format().await.unwrap();
         m.mount().await.unwrap();
 
@@ -1583,7 +1583,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_transaction_drop() {
         let mut f = MemFlash::new();
-        let mut m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f, 0);
         m.format().await.unwrap();
         m.mount().await.unwrap();
 
@@ -1607,7 +1607,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_delete() {
         let mut f = MemFlash::new();
-        let mut m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f, 0);
         m.format().await.unwrap();
         m.mount().await.unwrap();
 
@@ -1635,7 +1635,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_truncate_alloc() {
         let mut f = MemFlash::new();
-        let mut m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f, 0);
         m.format().await.unwrap();
         m.mount().await.unwrap();
 
@@ -1665,7 +1665,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_truncate_alloc_2() {
         let mut f = MemFlash::new();
-        let mut m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f, 0);
         m.format().await.unwrap();
         m.mount().await.unwrap();
 
@@ -1704,7 +1704,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_append_no_commit() {
         let mut f = MemFlash::new();
-        let mut m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f, 0);
         m.format().await.unwrap();
         m.mount().await.unwrap();
 
@@ -1737,7 +1737,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_read_unwritten() {
         let mut f = MemFlash::new();
-        let mut m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f, 0);
         m.format().await.unwrap();
         m.mount().await.unwrap();
 
@@ -1750,7 +1750,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_read_uncommitted() {
         let mut f = MemFlash::new();
-        let mut m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f, 0);
         m.format().await.unwrap();
         m.mount().await.unwrap();
 
@@ -1769,7 +1769,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_alloc_commit() {
         let mut f = MemFlash::new();
-        let mut m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f, 0);
         m.format().await.unwrap();
         m.mount().await.unwrap();
 
@@ -1808,7 +1808,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_alloc_discard_1page() {
         let mut f = MemFlash::new();
-        let mut m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f, 0);
         m.format().await.unwrap();
         m.mount().await.unwrap();
 
@@ -1839,7 +1839,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_alloc_discard_2page() {
         let mut f = MemFlash::new();
-        let mut m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f, 0);
         m.format().await.unwrap();
         m.mount().await.unwrap();
 
@@ -1877,7 +1877,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_alloc_discard_3page() {
         let mut f = MemFlash::new();
-        let mut m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f, 0);
         m.format().await.unwrap();
         m.mount().await.unwrap();
 
@@ -1914,7 +1914,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_append_alloc_discard() {
         let mut f = MemFlash::new();
-        let mut m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f, 0);
         m.format().await.unwrap();
         m.mount().await.unwrap();
 
@@ -1954,7 +1954,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_write_2_files() {
         let mut f = MemFlash::new();
-        let mut m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f, 0);
         m.format().await.unwrap();
         m.mount().await.unwrap();
 
@@ -1996,7 +1996,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_flags() {
         let mut f = MemFlash::new();
-        let mut m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f, 0);
         m.format().await.unwrap();
         m.mount().await.unwrap();
 
@@ -2043,7 +2043,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_record_boundary_one() {
         let mut f = MemFlash::new();
-        let mut m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f, 0);
         m.format().await.unwrap();
         m.mount().await.unwrap();
 
@@ -2060,7 +2060,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_record_boundary_two() {
         let mut f = MemFlash::new();
-        let mut m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f, 0);
         m.format().await.unwrap();
         m.mount().await.unwrap();
 
@@ -2083,7 +2083,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_record_boundary_three() {
         let mut f = MemFlash::new();
-        let mut m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f, 0);
         m.format().await.unwrap();
         m.mount().await.unwrap();
 
@@ -2108,7 +2108,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_record_boundary_overlong() {
         let mut f = MemFlash::new();
-        let mut m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f, 0);
         m.format().await.unwrap();
         m.mount().await.unwrap();
 
@@ -2135,7 +2135,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_record_boundary_overlong_2() {
         let mut f = MemFlash::new();
-        let mut m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f, 0);
         m.format().await.unwrap();
         m.mount().await.unwrap();
 
@@ -2172,7 +2172,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_record_boundary_overlong_3() {
         let mut f = MemFlash::new();
-        let mut m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f, 0);
         m.format().await.unwrap();
         m.mount().await.unwrap();
 
@@ -2216,7 +2216,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_record_boundary_exact_page() {
         let mut f = MemFlash::new();
-        let mut m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f, 0);
         m.format().await.unwrap();
         m.mount().await.unwrap();
 
@@ -2245,7 +2245,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_search_empty() {
         let mut f = MemFlash::new();
-        let mut m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f, 0);
         m.format().await.unwrap();
         m.mount().await.unwrap();
 
@@ -2257,7 +2257,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_search_one_page() {
         let mut f = MemFlash::new();
-        let mut m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f, 0);
         m.format().await.unwrap();
         m.mount().await.unwrap();
 
@@ -2275,7 +2275,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_search_two_pages() {
         let mut f = MemFlash::new();
-        let mut m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f, 0);
         m.format().await.unwrap();
         m.mount().await.unwrap();
 
@@ -2302,7 +2302,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_search_no_boundary_on_second_page() {
         let mut f = MemFlash::new();
-        let mut m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f, 0);
         m.format().await.unwrap();
         m.mount().await.unwrap();
 
@@ -2321,7 +2321,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_search_no_boundary_more_pages() {
         let mut f = MemFlash::new();
-        let mut m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f, 0);
         m.format().await.unwrap();
         m.mount().await.unwrap();
 
@@ -2340,7 +2340,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_search_no_boundary_more_pages_two() {
         let mut f = MemFlash::new();
-        let mut m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f, 0);
         m.format().await.unwrap();
         m.mount().await.unwrap();
 
@@ -2372,7 +2372,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_search_no_boundary_more_pages_three() {
         let mut f = MemFlash::new();
-        let mut m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f, 0);
         m.format().await.unwrap();
         m.mount().await.unwrap();
 
@@ -2431,7 +2431,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_search_truncate() {
         let mut f = MemFlash::new();
-        let mut m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f, 0);
         m.format().await.unwrap();
         m.mount().await.unwrap();
 
@@ -2480,7 +2480,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_search_long() {
         let mut f = MemFlash::new();
-        let mut m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f, 0);
         m.format().await.unwrap();
         m.mount().await.unwrap();
 
@@ -2547,7 +2547,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_smoke() {
         let mut f = MemFlash::new();
-        let mut m = FileManager::new(&mut f);
+        let mut m = FileManager::new(&mut f, 0);
         m.format().await.unwrap();
         m.mount().await.unwrap();
 

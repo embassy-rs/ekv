@@ -38,6 +38,7 @@ pub enum FormatConfig {
 #[non_exhaustive]
 pub struct Config {
     pub format: FormatConfig,
+    pub random_seed: u32,
 }
 
 impl Default for Config {
@@ -50,6 +51,7 @@ impl Config {
     const fn default() -> Self {
         Self {
             format: FormatConfig::Never,
+            random_seed: 0,
         }
     }
 }
@@ -77,7 +79,7 @@ pub struct Database<F: Flash, M: RawMutex> {
 
 impl<F: Flash, M: RawMutex> Database<F, M> {
     pub async fn new(flash: F, config: Config) -> Result<Self, Error<F::Error>> {
-        let mut inner = Inner::new(flash).await;
+        let mut inner = Inner::new(flash, config.random_seed).await;
 
         match config.format {
             FormatConfig::Format => {
@@ -324,7 +326,7 @@ struct Inner<F: Flash> {
 }
 
 impl<F: Flash> Inner<F> {
-    async fn new(flash: F) -> Self {
+    async fn new(flash: F, random_seed: u32) -> Self {
         debug!("creating database!");
         debug!(
             "page_size={}, page_count={}, total_size={}, max_page_count={}, max_total_size={}",
@@ -360,7 +362,7 @@ impl<F: Flash> Inner<F> {
         );
 
         Self {
-            files: FileManager::new(flash),
+            files: FileManager::new(flash, random_seed),
             write_tx: None,
         }
     }

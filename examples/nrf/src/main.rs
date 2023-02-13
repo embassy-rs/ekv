@@ -11,10 +11,12 @@ use defmt::{assert_eq, info, unwrap};
 use ekv::flash::PageID;
 use ekv::{config, Config, Database, FormatConfig};
 use embassy_executor::Spawner;
+use embassy_nrf::rng::Rng;
 use embassy_nrf::{interrupt, pac, peripherals, qspi};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_time::Instant;
 use heapless::Vec;
+use rand_core::RngCore;
 use {defmt_rtt as _, panic_probe as _};
 
 const FLASH_SIZE: usize = config::PAGE_SIZE * config::MAX_PAGE_COUNT;
@@ -75,6 +77,10 @@ async fn main(_spawner: Spawner) -> ! {
 
     let p = embassy_nrf::init(Default::default());
 
+    // Generate random seed.
+    let mut rng = Rng::new(p.RNG, interrupt::take!(RNG));
+    let random_seed = rng.next_u32();
+
     // Config for the MX25R64 present in the nRF52840 DK
     let mut config = qspi::Config::default();
     config.read_opcode = qspi::ReadOpcode::READ4IO;
@@ -111,6 +117,7 @@ async fn main(_spawner: Spawner) -> ! {
     let start = Instant::now();
     let mut config = Config::default();
     config.format = FormatConfig::Format;
+    config.random_seed = random_seed;
     let db = unwrap!(Database::<_, NoopRawMutex>::new(&mut f, config).await);
     let ms = Instant::now().duration_since(start).as_millis();
     info!("Done in {} ms!", ms);
