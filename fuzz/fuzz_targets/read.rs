@@ -1,6 +1,7 @@
 #![no_main]
 use ekv::flash::MemFlash;
 use ekv::{Config, Database, FormatConfig};
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| { fuzz(data) });
@@ -24,7 +25,7 @@ async fn fuzz_inner(data: &[u8], logging: bool) {
 
     let mut config = Config::default();
     config.format = FormatConfig::Never;
-    let Ok(db) = Database::new(&mut f, config).await else { return };
+    let Ok(db) = Database::<_, NoopRawMutex>::new(&mut f, config).await else { return };
 
     if logging {
         db.dump().await;

@@ -6,7 +6,8 @@ use core::ops::{Deref, DerefMut};
 use core::slice;
 use core::task::Poll;
 
-use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::blocking_mutex::raw::RawMutex;
+use embassy_sync::blocking_mutex::Mutex as BlockingMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_sync::waitqueue::WakerRegistration;
 use heapless::Vec;
@@ -68,13 +69,13 @@ struct State {
     waker: WakerRegistration,
 }
 
-pub struct Database<F: Flash> {
-    state: RefCell<State>,
+pub struct Database<F: Flash, M: RawMutex> {
+    state: BlockingMutex<M, RefCell<State>>,
 
-    inner: Mutex<NoopRawMutex, Inner<F>>,
+    inner: Mutex<M, Inner<F>>,
 }
 
-impl<F: Flash> Database<F> {
+impl<F: Flash, M: RawMutex> Database<F, M> {
     pub async fn new(flash: F, config: Config) -> Result<Self, Error<F::Error>> {
         let mut inner = Inner::new(flash).await;
 
@@ -98,11 +99,11 @@ impl<F: Flash> Database<F> {
 
         Ok(Self {
             inner: Mutex::new(inner),
-            state: RefCell::new(State {
+            state: BlockingMutex::new(RefCell::new(State {
                 read_tx_count: 0,
                 write_tx: WriteTxState::Idle,
                 waker: WakerRegistration::new(),
-            }),
+            })),
         })
     }
 
@@ -119,40 +120,44 @@ impl<F: Flash> Database<F> {
         self.inner.lock().await.dump().await
     }
 
-    pub async fn read_transaction(&self) -> ReadTransaction<'_, F> {
+    pub async fn read_transaction(&self) -> ReadTransaction<'_, F, M> {
         poll_fn(|cx| {
-            let s = &mut *self.state.borrow_mut();
+            self.state.lock(|s| {
+                let s = &mut s.borrow_mut();
 
-            // If there's a write transaction either
-            // - committing, or
-            // - trying to commit, waiting for other read transactions to end,
-            // then we don't let new read transactions start.
-            //
-            // The latter is needed to avoid a commit to get stuck forever if other
-            // tasks are constantly doing reads.
-            if s.write_tx == WriteTxState::Committing {
-                s.waker.register(cx.waker());
-                return Poll::Pending;
-            }
+                // If there's a write transaction either
+                // - committing, or
+                // - trying to commit, waiting for other read transactions to end,
+                // then we don't let new read transactions start.
+                //
+                // The latter is needed to avoid a commit to get stuck forever if other
+                // tasks are constantly doing reads.
+                if s.write_tx == WriteTxState::Committing {
+                    s.waker.register(cx.waker());
+                    return Poll::Pending;
+                }
 
-            // NOTE(unwrap): we'll panic if there's 2^32 concurrent read txs, that's fine.
-            s.read_tx_count = s.read_tx_count.checked_add(1).unwrap();
-            Poll::Ready(())
+                // NOTE(unwrap): we'll panic if there's 2^32 concurrent read txs, that's fine.
+                s.read_tx_count = s.read_tx_count.checked_add(1).unwrap();
+                Poll::Ready(())
+            })
         })
         .await;
 
         ReadTransaction { db: self }
     }
 
-    pub async fn write_transaction(&self) -> WriteTransaction<'_, F> {
+    pub async fn write_transaction(&self) -> WriteTransaction<'_, F, M> {
         poll_fn(|cx| {
-            let s = &mut *self.state.borrow_mut();
-            if s.write_tx != WriteTxState::Idle {
-                s.waker.register(cx.waker());
-                return Poll::Pending;
-            }
-            s.write_tx = WriteTxState::Created;
-            Poll::Ready(())
+            self.state.lock(|s| {
+                let s = &mut s.borrow_mut();
+                if s.write_tx != WriteTxState::Idle {
+                    s.waker.register(cx.waker());
+                    return Poll::Pending;
+                }
+                s.write_tx = WriteTxState::Created;
+                Poll::Ready(())
+            })
         })
         .await;
 
@@ -189,24 +194,26 @@ where
     }
 }
 
-pub struct ReadTransaction<'a, F: Flash + 'a> {
-    db: &'a Database<F>,
+pub struct ReadTransaction<'a, F: Flash + 'a, M: RawMutex + 'a> {
+    db: &'a Database<F, M>,
 }
 
-impl<'a, F: Flash + 'a> Drop for ReadTransaction<'a, F> {
+impl<'a, F: Flash + 'a, M: RawMutex + 'a> Drop for ReadTransaction<'a, F, M> {
     fn drop(&mut self) {
-        let s = &mut *self.db.state.borrow_mut();
+        self.db.state.lock(|s| {
+            let s = &mut s.borrow_mut();
 
-        // NOTE(unwrap): It's impossible that read_tx_count==0, because at least one
-        // read transaction was in progress: the one we're dropping now.
-        s.read_tx_count = s.read_tx_count.checked_sub(1).unwrap();
-        if s.read_tx_count == 0 {
-            s.waker.wake();
-        }
+            // NOTE(unwrap): It's impossible that read_tx_count==0, because at least one
+            // read transaction was in progress: the one we're dropping now.
+            s.read_tx_count = s.read_tx_count.checked_sub(1).unwrap();
+            if s.read_tx_count == 0 {
+                s.waker.wake();
+            }
+        })
     }
 }
 
-impl<'a, F: Flash + 'a> ReadTransaction<'a, F> {
+impl<'a, F: Flash + 'a, M: RawMutex + 'a> ReadTransaction<'a, F, M> {
     pub async fn read(&mut self, key: &[u8], value: &mut [u8]) -> Result<usize, ReadError<F::Error>> {
         if key.len() > MAX_KEY_SIZE {
             return Err(ReadError::KeyTooBig);
@@ -224,22 +231,24 @@ enum WriteTransactionState {
     Canceled,
 }
 
-pub struct WriteTransaction<'a, F: Flash + 'a> {
-    db: &'a Database<F>,
+pub struct WriteTransaction<'a, F: Flash + 'a, M: RawMutex + 'a> {
+    db: &'a Database<F, M>,
     state: WriteTransactionState,
 }
 
-impl<'a, F: Flash + 'a> Drop for WriteTransaction<'a, F> {
+impl<'a, F: Flash + 'a, M: RawMutex + 'a> Drop for WriteTransaction<'a, F, M> {
     fn drop(&mut self) {
-        let s = &mut *self.db.state.borrow_mut();
+        self.db.state.lock(|s| {
+            let s = &mut s.borrow_mut();
 
-        assert!(s.write_tx != WriteTxState::Idle);
-        s.write_tx = WriteTxState::Idle;
-        s.waker.wake();
+            assert!(s.write_tx != WriteTxState::Idle);
+            s.write_tx = WriteTxState::Idle;
+            s.waker.wake();
+        })
     }
 }
 
-impl<'a, F: Flash + 'a> WriteTransaction<'a, F> {
+impl<'a, F: Flash + 'a, M: RawMutex + 'a> WriteTransaction<'a, F, M> {
     pub async fn write(&mut self, key: &[u8], value: &[u8]) -> Result<(), WriteError<F::Error>> {
         let is_first_write = match self.state {
             WriteTransactionState::Canceled => return Err(WriteError::TransactionCanceled),
@@ -280,20 +289,22 @@ impl<'a, F: Flash + 'a> WriteTransaction<'a, F> {
         }
 
         // First switch to Committing, so that no new read txs can start.
-        {
-            let s = &mut *self.db.state.borrow_mut();
+        self.db.state.lock(|s| {
+            let s = &mut s.borrow_mut();
             assert!(s.write_tx == WriteTxState::Created);
             s.write_tx = WriteTxState::Committing;
-        }
+        });
 
         // Then wait for the existing read txs to finish.
         poll_fn(|cx| {
-            let s = &mut *self.db.state.borrow_mut();
-            if s.read_tx_count != 0 {
-                s.waker.register(cx.waker());
-                return Poll::Pending;
-            }
-            Poll::Ready(())
+            self.db.state.lock(|s| {
+                let s = &mut s.borrow_mut();
+                if s.read_tx_count != 0 {
+                    s.waker.register(cx.waker());
+                    return Poll::Pending;
+                }
+                Poll::Ready(())
+            })
         })
         .await;
 
@@ -1029,6 +1040,7 @@ mod tests {
     use core::ptr;
     use core::task::{Context, RawWaker, RawWakerVTable, Waker};
 
+    use embassy_sync::blocking_mutex::raw::NoopRawMutex;
     use tokio::task::yield_now;
 
     use super::*;
@@ -1045,7 +1057,7 @@ mod tests {
         config
     };
 
-    async fn check_read(db: &Database<impl Flash>, key: &[u8], value: &[u8]) {
+    async fn check_read(db: &Database<impl Flash, NoopRawMutex>, key: &[u8], value: &[u8]) {
         let mut rtx = db.read_transaction().await;
         let mut buf = [0; 1024];
         let n = rtx.read(key, &mut buf).await.unwrap();
@@ -1155,7 +1167,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_transaction_locking() {
         let mut f = MemFlash::new();
-        let db = Database::new(&mut f, FORMAT).await.unwrap();
+        let db = Database::<_, NoopRawMutex>::new(&mut f, FORMAT).await.unwrap();
 
         static VTABLE: RawWakerVTable =
             RawWakerVTable::new(|_| RawWaker::new(ptr::null(), &VTABLE), |_| {}, |_| {}, |_| {});
@@ -1220,7 +1232,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_transaction_locking_queue() {
         let mut f = MemFlash::new();
-        let db = Database::new(&mut f, FORMAT).await.unwrap();
+        let db = Database::<_, NoopRawMutex>::new(&mut f, FORMAT).await.unwrap();
 
         static VTABLE: RawWakerVTable =
             RawWakerVTable::new(|_| RawWaker::new(ptr::null(), &VTABLE), |_| {}, |_| {}, |_| {});
@@ -1317,7 +1329,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_free_pages_on_transaction_drop() {
         let mut f = MemFlash::new();
-        let db = Database::new(&mut f, FORMAT).await.unwrap();
+        let db = Database::<_, NoopRawMutex>::new(&mut f, FORMAT).await.unwrap();
 
         let prev_free = db.inner.lock().await.files.free_pages();
 
@@ -1336,7 +1348,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_buf_too_small() {
         let mut f = MemFlash::new();
-        let db = Database::new(&mut f, FORMAT).await.unwrap();
+        let db = Database::<_, NoopRawMutex>::new(&mut f, FORMAT).await.unwrap();
 
         let mut wtx = db.write_transaction().await;
         wtx.write(b"foo", b"1234").await.unwrap();
@@ -1353,7 +1365,7 @@ mod tests {
         let mut f = MemFlash::new();
 
         {
-            let db = Database::new(&mut f, FORMAT).await.unwrap();
+            let db = Database::<_, NoopRawMutex>::new(&mut f, FORMAT).await.unwrap();
 
             let mut wtx = db.write_transaction().await;
             wtx.write(b"bar", b"4321").await.unwrap();
@@ -1403,7 +1415,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_compact_removes_tombstones() {
         let mut f = MemFlash::new();
-        let db = Database::new(&mut f, FORMAT).await.unwrap();
+        let db = Database::<_, NoopRawMutex>::new(&mut f, FORMAT).await.unwrap();
 
         // Write the key
         let mut wtx = db.write_transaction().await;
@@ -1428,7 +1440,7 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_write_not_sorted() {
         let mut f = MemFlash::new();
-        let db = Database::new(&mut f, FORMAT).await.unwrap();
+        let db = Database::<_, NoopRawMutex>::new(&mut f, FORMAT).await.unwrap();
 
         // Write the key
         let mut wtx = db.write_transaction().await;

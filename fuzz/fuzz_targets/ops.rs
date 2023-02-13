@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use ekv::flash::MemFlash;
 use ekv::{Config, Database, FormatConfig, WriteError};
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
@@ -43,7 +44,7 @@ async fn fuzz_inner(ops: Input) {
     let mut f = MemFlash::new();
     let mut config = Config::default();
     config.format = FormatConfig::Format;
-    let db = Database::new(&mut f, config).await.unwrap();
+    let db = Database::<_, NoopRawMutex>::new(&mut f, config).await.unwrap();
 
     // Mirror hashmap. Should always match F
     let mut m = HashMap::new();
