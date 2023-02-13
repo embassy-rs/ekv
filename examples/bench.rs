@@ -10,20 +10,13 @@ struct Params {
     val_len: usize,
 }
 
-fn rand(max: usize) -> usize {
-    rand::thread_rng().gen_range(0..max)
-}
-
-fn rand_between(from: usize, to: usize) -> usize {
-    rand::thread_rng().gen_range(from..=to)
-}
-
 fn rand_data(len: usize) -> Vec<u8> {
     let mut res = vec![0; len];
     rand::thread_rng().fill(&mut res[..]);
     res
 }
 
+#[allow(unused)]
 fn print_counters(f: &mut MemFlash, baseline: usize) {
     println!(
         "    read:  {}, {} bytes ({:.1}%)",

@@ -45,7 +45,7 @@ fn fuzz(ops: Input) {
 async fn fuzz_inner(ops: Input, logging: bool) {
     let mut f = MemFlash::new();
     let mut m = FileManager::new(&mut f);
-    m.format().await;
+    m.format().await.unwrap();
     m.mount().await.unwrap();
 
     const FILE_ID: FileID = 1;

@@ -325,6 +325,7 @@ pub struct PageWriter<H: Header> {
 }
 
 impl<H: Header> PageWriter<H> {
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.total_pos
     }
@@ -513,7 +514,7 @@ mod tests {
         // Write
         let mut w = b.write::<TestHeader>(f, PAGE).await;
         w.write(f, &data).await.unwrap();
-        drop(w); // don't commit
+        // don't commit
 
         // Read
         let res = b.read::<TestHeader>(f, PAGE).await;

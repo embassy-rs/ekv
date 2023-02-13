@@ -1434,7 +1434,7 @@ mod tests {
         while db.inner.lock().await.compact().await.unwrap() {}
 
         let dbi = db.inner.lock().await;
-        assert!((0..FILE_COUNT).into_iter().all(|i| dbi.files.is_empty(i as _)));
+        assert!((0..FILE_COUNT).all(|i| dbi.files.is_empty(i as _)));
     }
 
     #[test_log::test(tokio::test)]

@@ -8,8 +8,8 @@ macro_rules! impl_bytes {
 
             #[allow(unused)]
             #[inline(always)]
-            pub(crate) fn to_bytes(&self) -> [u8; Self::SIZE] {
-                unsafe { core::mem::transmute(*self) }
+            pub(crate) fn to_bytes(self) -> [u8; Self::SIZE] {
+                unsafe { core::mem::transmute(self) }
             }
 
             #[allow(unused)]

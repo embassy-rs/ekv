@@ -106,6 +106,7 @@ impl<F: Flash> FileManager<F> {
         self.alloc.page_count()
     }
 
+    #[allow(unused)]
     pub fn used_pages(&self) -> usize {
         self.alloc.used_pages()
     }
@@ -302,6 +303,7 @@ impl<F: Flash> FileManager<F> {
     }
 
     // convenience method
+    #[allow(unused)]
     pub async fn truncate(&mut self, file_id: FileID, bytes: usize) -> Result<(), Error<F::Error>> {
         let mut tx = self.transaction();
         tx.truncate(file_id, bytes).await?;
@@ -359,6 +361,7 @@ impl<F: Flash> FileManager<F> {
     }
 
     #[cfg(feature = "std")]
+    #[allow(unused)]
     pub async fn dump(&mut self) {
         for file_id in 0..FILE_COUNT {
             info!("====== FILE {} ======", file_id);
@@ -369,6 +372,7 @@ impl<F: Flash> FileManager<F> {
     }
 
     #[cfg(feature = "std")]
+    #[allow(unused)]
     pub async fn dump_file(&mut self, file_id: FileID) -> Result<(), Error<F::Error>> {
         let f = self.files[file_id as usize];
         info!(
@@ -786,6 +790,7 @@ impl FileReader {
         self.curr_seq(m).sub(first_seq)
     }
 
+    #[allow(unused)]
     pub async fn seek<F: Flash>(&mut self, m: &mut FileManager<F>, offs: usize) -> Result<(), ReadError<F::Error>> {
         let first_seq = m.files[self.file_id as usize].first_seq;
         let new_seq = first_seq.add(offs).map_err(|_| ReadError::Eof)?;
@@ -1156,11 +1161,13 @@ impl FileWriter {
         Ok(this)
     }
 
+    #[allow(unused)]
     fn curr_seq<F: Flash>(&mut self, _m: &mut FileManager<F>) -> Seq {
         let n = self.writer.as_ref().map(|w| w.len()).unwrap_or(0);
         self.seq.add(n).unwrap()
     }
 
+    #[allow(unused)]
     pub fn offset<F: Flash>(&mut self, m: &mut FileManager<F>) -> usize {
         let first_seq = m.files[self.file_id as usize].first_seq;
         self.curr_seq(m).sub(first_seq)

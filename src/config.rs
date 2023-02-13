@@ -66,6 +66,7 @@ pub(crate) const MIN_FREE_PAGE_COUNT: usize = 1
 
 pub type FileID = u8;
 
+#[allow(clippy::assertions_on_constants)]
 const _CHECKS: () = {
     // using core::assert to avoid using defmt, because it doesn't work in const.
 

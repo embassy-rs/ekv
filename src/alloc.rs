@@ -94,6 +94,7 @@ impl Allocator {
         self.get_bit(page_id.index()) == PageState::Used
     }
 
+    #[allow(unused)]
     pub fn used_pages(&self) -> usize {
         self.used
     }

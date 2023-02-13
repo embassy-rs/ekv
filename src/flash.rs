@@ -1,5 +1,6 @@
 use core::fmt::Debug;
 
+#[cfg(feature = "std")]
 use crate::config::*;
 pub use crate::types::PageID;
 
