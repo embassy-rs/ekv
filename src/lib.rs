@@ -19,7 +19,7 @@ pub mod flash;
 mod types;
 
 pub use errors::{CommitError, FormatError, ReadError, WriteError};
-pub use record::{Config, Database, FormatConfig, ReadTransaction, WriteTransaction};
+pub use record::{Config, Database, ReadTransaction, WriteTransaction};
 
 #[cfg(feature = "_test")]
 pub mod file;

@@ -79,3 +79,37 @@ const _CHECKS: () = {
     // If it's too big relative to the total flash size, we'll waste a lot of space!
     core::assert!(MIN_FREE_PAGE_COUNT < MAX_PAGE_COUNT / 2);
 };
+
+pub fn dump() {
+    debug!("ekv config dump:");
+    debug!(
+        "page_size={}, max_page_count={}, max_total_size={}",
+        PAGE_SIZE,
+        MAX_PAGE_COUNT,
+        MAX_PAGE_COUNT * PAGE_SIZE,
+    );
+    debug!("align={}, erase_value={:02x}", ALIGN, ERASE_VALUE);
+    debug!(
+        "sizeof(MetaHeader)={}, sizeof(DataHeader)={}, page_max_payload_size={}",
+        size_of::<MetaHeader>(),
+        size_of::<DataHeader>(),
+        PAGE_MAX_PAYLOAD_SIZE
+    );
+    debug!("skiplist_len={}, skiplist_shift={}", SKIPLIST_LEN, SKIPLIST_SHIFT);
+    debug!(
+        "branching_factor={}, level_count={}, file_count={}",
+        BRANCHING_FACTOR, LEVEL_COUNT, FILE_COUNT
+    );
+    let max_record_size = record_size(MAX_KEY_SIZE, MAX_VALUE_SIZE);
+    debug!(
+        "max_key_size={}, max_value_size={}, max_record_size={} ({} pages)",
+        MAX_KEY_SIZE,
+        MAX_VALUE_SIZE,
+        max_record_size,
+        (max_record_size + PAGE_MAX_PAYLOAD_SIZE - 1) / PAGE_MAX_PAYLOAD_SIZE
+    );
+    debug!(
+        "scratch_page_count={}, min_free_page_count={}, min_free_page_count_compact={}",
+        SCRATCH_PAGE_COUNT, MIN_FREE_PAGE_COUNT, MIN_FREE_PAGE_COUNT_COMPACT
+    );
+}

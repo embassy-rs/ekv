@@ -1,7 +1,7 @@
 use core::cell::RefCell;
 use core::cmp::Ordering;
 use core::future::poll_fn;
-use core::mem::{size_of, MaybeUninit};
+use core::mem::MaybeUninit;
 use core::ops::{Deref, DerefMut};
 use core::slice;
 use core::task::Poll;
@@ -14,9 +14,7 @@ use heapless::Vec;
 
 use crate::config::*;
 use crate::errors::{CorruptedError, Error, ReadError, WriteError};
-use crate::file::{
-    DataHeader, FileManager, FileReader, FileSearcher, FileWriter, MetaHeader, SeekDirection, PAGE_MAX_PAYLOAD_SIZE,
-};
+use crate::file::{FileManager, FileReader, FileSearcher, FileWriter, SeekDirection, PAGE_MAX_PAYLOAD_SIZE};
 use crate::flash::Flash;
 use crate::page::{PageReader, ReadError as PageReadError};
 use crate::{CommitError, FormatError};
@@ -24,20 +22,10 @@ use crate::{CommitError, FormatError};
 const FILE_FLAG_COMPACT_DEST: u8 = 0x01;
 const FILE_FLAG_COMPACT_SRC: u8 = 0x02;
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[non_exhaustive]
-pub enum FormatConfig {
-    Never,
-    IfNotFormatted,
-    Format,
-}
-
 #[derive(Debug, Clone, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[non_exhaustive]
 pub struct Config {
-    pub format: FormatConfig,
     pub random_seed: u32,
 }
 
@@ -49,10 +37,7 @@ impl Default for Config {
 
 impl Config {
     const fn default() -> Self {
-        Self {
-            format: FormatConfig::Never,
-            random_seed: 0,
-        }
+        Self { random_seed: 0 }
     }
 }
 
@@ -78,35 +63,15 @@ pub struct Database<F: Flash, M: RawMutex> {
 }
 
 impl<F: Flash, M: RawMutex> Database<F, M> {
-    pub async fn new(flash: F, config: Config) -> Result<Self, Error<F::Error>> {
-        let mut inner = Inner::new(flash, config.random_seed).await;
-
-        match config.format {
-            FormatConfig::Format => {
-                inner.format().await?;
-                inner.mount().await?;
-            }
-            FormatConfig::IfNotFormatted => match inner.mount().await {
-                Ok(()) => {}
-                Err(Error::Corrupted) => {
-                    inner.format().await?;
-                    inner.mount().await?;
-                }
-                Err(e) => return Err(e),
-            },
-            FormatConfig::Never => {
-                inner.mount().await?;
-            }
-        }
-
-        Ok(Self {
-            inner: Mutex::new(inner),
+    pub fn new(flash: F, config: Config) -> Self {
+        Self {
+            inner: Mutex::new(Inner::new(flash, config.random_seed)),
             state: BlockingMutex::new(RefCell::new(State {
                 read_tx_count: 0,
                 write_tx: WriteTxState::Idle,
                 waker: WakerRegistration::new(),
             })),
-        })
+        }
     }
 
     pub async fn lock_flash(&self) -> impl Deref<Target = F> + DerefMut + '_ {
@@ -114,7 +79,7 @@ impl<F: Flash, M: RawMutex> Database<F, M> {
     }
 
     pub async fn format(&self) -> Result<(), FormatError<F::Error>> {
-        todo!()
+        self.inner.lock().await.format().await
     }
 
     #[cfg(feature = "std")]
@@ -327,41 +292,7 @@ struct Inner<F: Flash> {
 }
 
 impl<F: Flash> Inner<F> {
-    async fn new(flash: F, random_seed: u32) -> Self {
-        debug!("creating database!");
-        debug!(
-            "page_size={}, page_count={}, total_size={}, max_page_count={}, max_total_size={}",
-            PAGE_SIZE,
-            flash.page_count(),
-            flash.page_count() * PAGE_SIZE,
-            MAX_PAGE_COUNT,
-            MAX_PAGE_COUNT * PAGE_SIZE,
-        );
-        debug!("align={}, erase_value={:02x}", ALIGN, ERASE_VALUE);
-        debug!(
-            "sizeof(MetaHeader)={}, sizeof(DataHeader)={}, page_max_payload_size={}",
-            size_of::<MetaHeader>(),
-            size_of::<DataHeader>(),
-            PAGE_MAX_PAYLOAD_SIZE
-        );
-        debug!("skiplist_len={}, skiplist_shift={}", SKIPLIST_LEN, SKIPLIST_SHIFT);
-        debug!(
-            "branching_factor={}, level_count={}, file_count={}",
-            BRANCHING_FACTOR, LEVEL_COUNT, FILE_COUNT
-        );
-        let max_record_size = record_size(MAX_KEY_SIZE, MAX_VALUE_SIZE);
-        debug!(
-            "max_key_size={}, max_value_size={}, max_record_size={} ({} pages)",
-            MAX_KEY_SIZE,
-            MAX_VALUE_SIZE,
-            max_record_size,
-            (max_record_size + PAGE_MAX_PAYLOAD_SIZE - 1) / PAGE_MAX_PAYLOAD_SIZE
-        );
-        debug!(
-            "scratch_page_count={}, min_free_page_count={}, min_free_page_count_compact={}",
-            SCRATCH_PAGE_COUNT, MIN_FREE_PAGE_COUNT, MIN_FREE_PAGE_COUNT_COMPACT
-        );
-
+    fn new(flash: F, random_seed: u32) -> Self {
         const NEW_PR: PageReader = PageReader::new();
         Self {
             files: FileManager::new(flash, random_seed),
@@ -373,11 +304,6 @@ impl<F: Flash> Inner<F> {
     async fn format(&mut self) -> Result<(), FormatError<F::Error>> {
         assert!(self.write_tx.is_none());
         self.files.format().await
-    }
-
-    async fn mount(&mut self) -> Result<(), Error<F::Error>> {
-        assert!(self.write_tx.is_none());
-        self.files.mount(&mut self.readers[0]).await
     }
 
     async fn read(&mut self, key: &[u8], value: &mut [u8]) -> Result<usize, ReadError<F::Error>> {
@@ -824,6 +750,11 @@ impl<F: Flash> Inner<F> {
 
     #[cfg(feature = "std")]
     pub async fn dump(&mut self) {
+        if let Err(e) = self.files.remount_if_dirty(&mut self.readers[0]).await {
+            info!("db is dirty, and remount failed: {:?}", e);
+            return;
+        }
+
         for file_id in 0..FILE_COUNT {
             info!("====== FILE {} ======", file_id);
             if let Err(e) = self.dump_file(file_id as _).await {
@@ -1053,17 +984,6 @@ mod tests {
     use super::*;
     use crate::flash::MemFlash;
 
-    const FORMAT: Config = {
-        let mut config = Config::default();
-        config.format = FormatConfig::Format;
-        config
-    };
-    const NO_FORMAT: Config = {
-        let mut config = Config::default();
-        config.format = FormatConfig::Never;
-        config
-    };
-
     async fn check_read(db: &Database<impl Flash, NoopRawMutex>, key: &[u8], value: &[u8]) {
         let mut rtx = db.read_transaction().await;
         let mut buf = [0; 1024];
@@ -1074,7 +994,8 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test() {
         let mut f = MemFlash::new();
-        let db = Database::new(&mut f, FORMAT).await.unwrap();
+        let db = Database::new(&mut f, Config::default());
+        db.format().await.unwrap();
 
         let mut wtx = db.write_transaction().await;
         wtx.write(b"bar", b"4321").await.unwrap();
@@ -1108,7 +1029,8 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_empty_key() {
         let mut f = MemFlash::new();
-        let db = Database::new(&mut f, FORMAT).await.unwrap();
+        let db = Database::new(&mut f, Config::default());
+        db.format().await.unwrap();
 
         let mut wtx = db.write_transaction().await;
         wtx.write(b"", b"aaaa").await.unwrap();
@@ -1131,7 +1053,8 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_transaction() {
         let mut f = MemFlash::new();
-        let db = Database::new(&mut f, FORMAT).await.unwrap();
+        let db = Database::new(&mut f, Config::default());
+        db.format().await.unwrap();
 
         check_read(&db, b"foo", b"").await;
         check_read(&db, b"bar", b"").await;
@@ -1155,7 +1078,8 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_transaction_drop() {
         let mut f = MemFlash::new();
-        let db = Database::new(&mut f, FORMAT).await.unwrap();
+        let db = Database::new(&mut f, Config::default());
+        db.format().await.unwrap();
 
         let mut wtx = db.write_transaction().await;
         wtx.write(b"foo", b"4321").await.unwrap();
@@ -1174,7 +1098,8 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_transaction_locking() {
         let mut f = MemFlash::new();
-        let db = Database::<_, NoopRawMutex>::new(&mut f, FORMAT).await.unwrap();
+        let db = Database::<_, NoopRawMutex>::new(&mut f, Config::default());
+        db.format().await.unwrap();
 
         static VTABLE: RawWakerVTable =
             RawWakerVTable::new(|_| RawWaker::new(ptr::null(), &VTABLE), |_| {}, |_| {}, |_| {});
@@ -1239,7 +1164,8 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_transaction_locking_queue() {
         let mut f = MemFlash::new();
-        let db = Database::<_, NoopRawMutex>::new(&mut f, FORMAT).await.unwrap();
+        let db = Database::<_, NoopRawMutex>::new(&mut f, Config::default());
+        db.format().await.unwrap();
 
         static VTABLE: RawWakerVTable =
             RawWakerVTable::new(|_| RawWaker::new(ptr::null(), &VTABLE), |_| {}, |_| {}, |_| {});
@@ -1336,7 +1262,8 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_free_pages_on_transaction_drop() {
         let mut f = MemFlash::new();
-        let db = Database::<_, NoopRawMutex>::new(&mut f, FORMAT).await.unwrap();
+        let db = Database::<_, NoopRawMutex>::new(&mut f, Config::default());
+        db.format().await.unwrap();
 
         let prev_free = db.inner.lock().await.files.free_pages();
 
@@ -1355,7 +1282,8 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_buf_too_small() {
         let mut f = MemFlash::new();
-        let db = Database::<_, NoopRawMutex>::new(&mut f, FORMAT).await.unwrap();
+        let db = Database::<_, NoopRawMutex>::new(&mut f, Config::default());
+        db.format().await.unwrap();
 
         let mut wtx = db.write_transaction().await;
         wtx.write(b"foo", b"1234").await.unwrap();
@@ -1368,11 +1296,34 @@ mod tests {
     }
 
     #[test_log::test(tokio::test)]
+    async fn test_unformatted_read() {
+        let mut f = MemFlash::new();
+
+        let db = Database::<_, NoopRawMutex>::new(&mut f, Config::default());
+
+        let mut rtx = db.read_transaction().await;
+        let mut buf = [0u8; 1];
+        let r = rtx.read(b"foo", &mut buf).await;
+        assert!(matches!(r, Err(ReadError::Corrupted)));
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_unformatted_write() {
+        let mut f = MemFlash::new();
+
+        let db = Database::<_, NoopRawMutex>::new(&mut f, Config::default());
+
+        let mut wtx = db.write_transaction().await;
+        assert_eq!(wtx.write(b"bar", b"4321").await, Err(WriteError::Corrupted));
+    }
+
+    #[test_log::test(tokio::test)]
     async fn test_remount() {
         let mut f = MemFlash::new();
 
         {
-            let db = Database::<_, NoopRawMutex>::new(&mut f, FORMAT).await.unwrap();
+            let db = Database::<_, NoopRawMutex>::new(&mut f, Config::default());
+            db.format().await.unwrap();
 
             let mut wtx = db.write_transaction().await;
             wtx.write(b"bar", b"4321").await.unwrap();
@@ -1382,7 +1333,7 @@ mod tests {
 
         {
             // remount
-            let db = Database::new(&mut f, NO_FORMAT).await.unwrap();
+            let db = Database::new(&mut f, Config::default());
 
             check_read(&db, b"foo", b"1234").await;
             check_read(&db, b"bar", b"4321").await;
@@ -1397,7 +1348,7 @@ mod tests {
 
         {
             // remount
-            let db = Database::new(&mut f, NO_FORMAT).await.unwrap();
+            let db = Database::new(&mut f, Config::default());
 
             check_read(&db, b"foo", b"5678").await;
             check_read(&db, b"bar", b"8765").await;
@@ -1410,7 +1361,7 @@ mod tests {
 
         {
             // remount
-            let db = Database::new(&mut f, NO_FORMAT).await.unwrap();
+            let db = Database::new(&mut f, Config::default());
 
             check_read(&db, b"foo", b"5678").await;
             check_read(&db, b"bar", b"8765").await;
@@ -1422,7 +1373,8 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_compact_removes_tombstones() {
         let mut f = MemFlash::new();
-        let db = Database::<_, NoopRawMutex>::new(&mut f, FORMAT).await.unwrap();
+        let db = Database::<_, NoopRawMutex>::new(&mut f, Config::default());
+        db.format().await.unwrap();
 
         // Write the key
         let mut wtx = db.write_transaction().await;
@@ -1447,7 +1399,8 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_write_not_sorted() {
         let mut f = MemFlash::new();
-        let db = Database::<_, NoopRawMutex>::new(&mut f, FORMAT).await.unwrap();
+        let db = Database::<_, NoopRawMutex>::new(&mut f, Config::default());
+        db.format().await.unwrap();
 
         // Write the key
         let mut wtx = db.write_transaction().await;

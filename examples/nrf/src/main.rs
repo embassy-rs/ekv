@@ -117,14 +117,9 @@ async fn main(_spawner: Spawner) -> ! {
 
     let mut f = Flash { qspi: q };
 
-    info!("Mounting...");
-    let start = Instant::now();
     let mut config = Config::default();
-    config.format = FormatConfig::Format;
     config.random_seed = random_seed;
-    let db = unwrap!(Database::<_, NoopRawMutex>::new(&mut f, config).await);
-    let ms = Instant::now().duration_since(start).as_millis();
-    info!("Done in {} ms!", ms);
+    let db = Database::<_, NoopRawMutex>::new(&mut f, config);
 
     const KEY_COUNT: usize = 100;
     const TX_SIZE: usize = 10;

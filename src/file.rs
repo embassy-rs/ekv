@@ -92,10 +92,10 @@ impl<F: Flash> FileManager<F> {
         let page_count = flash.page_count();
         Self {
             flash,
-            meta_page_id: PageID::from_raw(0).unwrap(),
+            meta_page_id: PageID::zero(),
             meta_seq: Seq::ZERO,
             files: [FileState::EMPTY; FILE_COUNT],
-            dirty: false,
+            dirty: true,
             alloc: Allocator::new(page_count, random_seed),
         }
     }
@@ -146,6 +146,11 @@ impl<F: Flash> FileManager<F> {
     pub async fn format(&mut self) -> Result<(), FormatError<F::Error>> {
         self.dirty = true;
 
+        self.alloc.reset();
+        self.files.fill(FileState::EMPTY);
+        self.meta_page_id = self.alloc.allocate();
+        self.meta_seq = Seq(1);
+
         // Erase all meta pages.
         for page_id in 0..self.page_count() {
             let page_id = PageID::from_raw(page_id as _).unwrap();
@@ -155,9 +160,8 @@ impl<F: Flash> FileManager<F> {
         }
 
         // Write initial meta page.
-        let page_id = PageID::from_raw(0).unwrap();
-        let mut w = self.write_page(page_id).await;
-        w.write_header(&mut self.flash, MetaHeader { seq: Seq(1) })
+        let mut w = self.write_page(self.meta_page_id).await;
+        w.write_header(&mut self.flash, MetaHeader { seq: self.meta_seq })
             .await
             .map_err(FormatError::Flash)?;
 

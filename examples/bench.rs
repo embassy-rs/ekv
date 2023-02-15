@@ -1,5 +1,5 @@
 use ekv::flash::MemFlash;
-use ekv::{Config, Database, FormatConfig};
+use ekv::{Config, Database};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use plotters::prelude::*;
 use rand::Rng;
@@ -50,9 +50,9 @@ async fn run(p: Params) -> f64 {
     }
 
     let mut f = MemFlash::new();
-    let mut config = Config::default();
-    config.format = FormatConfig::Format;
-    let db = Database::<_, NoopRawMutex>::new(&mut f, config).await.unwrap();
+    let config = Config::default();
+    let db = Database::<_, NoopRawMutex>::new(&mut f, config);
+    db.format().await.unwrap();
 
     for key in &keys {
         let mut wtx = db.write_transaction().await;

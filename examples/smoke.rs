@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use ekv::config::{MAX_PAGE_COUNT, PAGE_SIZE};
 use ekv::flash::MemFlash;
-use ekv::{Config, Database, FormatConfig};
+use ekv::{Config, Database};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use rand::Rng;
 
@@ -54,9 +54,9 @@ async fn main() {
     }
 
     let mut f = MemFlash::new();
-    let mut config = Config::default();
-    config.format = FormatConfig::Format;
-    let db = Database::<_, NoopRawMutex>::new(&mut f, config).await.unwrap();
+    let config = Config::default();
+    let db = Database::<_, NoopRawMutex>::new(&mut f, config);
+    db.format().await.unwrap();
 
     // Mirror hashmap. Should always match F
     let mut m = HashMap::new();
@@ -99,9 +99,8 @@ async fn main() {
     }
 
     // remount, recheck everything.
-    let mut config = Config::default();
-    config.format = FormatConfig::Format;
-    let db = Database::<_, NoopRawMutex>::new(&mut f, config).await.unwrap();
+    let config = Config::default();
+    let db = Database::<_, NoopRawMutex>::new(&mut f, config);
 
     for key in &keys {
         let mut rtx = db.read_transaction().await;
