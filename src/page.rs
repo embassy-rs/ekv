@@ -104,9 +104,9 @@ pub struct PageReader {
 }
 
 impl PageReader {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         PageReader {
-            page_id: PageID::from_raw(0).unwrap(),
+            page_id: PageID::zero(),
             prev_chunks_len: 0,
             at_end: true,
             chunk_offset: 0,
@@ -270,7 +270,7 @@ impl<H: Header> PageWriter<H> {
         }
     }
 
-    pub async fn open<F: Flash>(&mut self, flash: &mut F, page_id: PageID) {
+    pub async fn open<F: Flash>(&mut self, _flash: &mut F, page_id: PageID) {
         trace!("page: write {:?}", page_id);
         self.page_id = page_id;
         self.needs_erase = true;

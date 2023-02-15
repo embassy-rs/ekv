@@ -5,6 +5,7 @@ use std::cmp::Ordering;
 use ekv::config::{FileID, MAX_PAGE_COUNT, PAGE_SIZE};
 use ekv::file::{FileManager, FileSearcher, ReadError, SeekDirection};
 use ekv::flash::MemFlash;
+use ekv::page::PageReader;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
@@ -45,8 +46,9 @@ fn fuzz(ops: Input) {
 async fn fuzz_inner(ops: Input, logging: bool) {
     let mut f = MemFlash::new();
     let mut m = FileManager::new(&mut f, 0);
+    let mut pr = PageReader::new();
     m.format().await.unwrap();
-    m.mount().await.unwrap();
+    m.mount(&mut pr).await.unwrap();
 
     const FILE_ID: FileID = 1;
 
@@ -101,10 +103,10 @@ async fn fuzz_inner(ops: Input, logging: bool) {
                 w = None;
 
                 if logging {
-                    m.dump().await;
+                    m.dump(&mut pr).await;
                 }
 
-                let mut s = FileSearcher::new(m.read(FILE_ID).await);
+                let mut s = FileSearcher::new(m.read(&mut pr, FILE_ID).await);
                 let mut ok = s.start(&mut m).await.unwrap();
                 let mut found = false;
 

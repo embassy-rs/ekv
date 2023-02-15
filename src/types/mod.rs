@@ -8,6 +8,10 @@ pub struct PageID {
 }
 
 impl PageID {
+    pub(crate) const fn zero() -> Self {
+        Self { raw: 0 }
+    }
+
     pub const fn from_raw(raw: RawPageID) -> Option<Self> {
         match raw {
             RawPageID::MAX => None,

@@ -18,7 +18,7 @@ use crate::file::{
     DataHeader, FileManager, FileReader, FileSearcher, FileWriter, MetaHeader, SeekDirection, PAGE_MAX_PAYLOAD_SIZE,
 };
 use crate::flash::Flash;
-use crate::page::ReadError as PageReadError;
+use crate::page::{PageReader, ReadError as PageReadError};
 use crate::{CommitError, FormatError};
 
 const FILE_FLAG_COMPACT_DEST: u8 = 0x01;
@@ -270,8 +270,8 @@ impl<'a, F: Flash + 'a, M: RawMutex + 'a> WriteTransaction<'a, F, M> {
         self.state = WriteTransactionState::Canceled;
 
         // If inner `write` fails, we also cancel the transaction.
-        let mut db = self.db.inner.lock().await;
-        db.files.remount_if_dirty().await?;
+        let db = &mut *self.db.inner.lock().await;
+        db.files.remount_if_dirty(&mut db.readers[0]).await?;
 
         if is_first_write {
             db.rollback_if_any().await?;
@@ -322,6 +322,7 @@ impl<'a, F: Flash + 'a, M: RawMutex + 'a> WriteTransaction<'a, F, M> {
 
 struct Inner<F: Flash> {
     files: FileManager<F>,
+    readers: [PageReader; BRANCHING_FACTOR],
     write_tx: Option<WriteTransactionInner>,
 }
 
@@ -361,8 +362,10 @@ impl<F: Flash> Inner<F> {
             SCRATCH_PAGE_COUNT, MIN_FREE_PAGE_COUNT, MIN_FREE_PAGE_COUNT_COMPACT
         );
 
+        const NEW_PR: PageReader = PageReader::new();
         Self {
             files: FileManager::new(flash, random_seed),
+            readers: [NEW_PR; BRANCHING_FACTOR],
             write_tx: None,
         }
     }
@@ -374,11 +377,11 @@ impl<F: Flash> Inner<F> {
 
     async fn mount(&mut self) -> Result<(), Error<F::Error>> {
         assert!(self.write_tx.is_none());
-        self.files.mount().await
+        self.files.mount(&mut self.readers[0]).await
     }
 
     async fn read(&mut self, key: &[u8], value: &mut [u8]) -> Result<usize, ReadError<F::Error>> {
-        self.files.remount_if_dirty().await?;
+        self.files.remount_if_dirty(&mut self.readers[0]).await?;
 
         for file_id in (0..FILE_COUNT).rev() {
             if let Some(res) = self.read_in_file(file_id as _, key, value).await? {
@@ -394,7 +397,7 @@ impl<F: Flash> Inner<F> {
         key: &[u8],
         value: &mut [u8],
     ) -> Result<Option<usize>, ReadError<F::Error>> {
-        let r = self.files.read(file_id).await;
+        let r = self.files.read(&mut self.readers[0], file_id).await;
         let m = &mut self.files;
         let mut s = FileSearcher::new(r);
 
@@ -649,9 +652,11 @@ impl<F: Flash> Inner<F> {
         let mut w = self.files.write(dst).await?;
 
         // Open all files in level for reading.
+        // TODO: maybe use a bit less unsafe?
         let mut r: [MaybeUninit<FileReader>; BRANCHING_FACTOR] = unsafe { MaybeUninit::uninit().assume_init() };
+        let readers_ptr = self.readers.as_mut_ptr();
         for (i, &file_id) in src.iter().enumerate() {
-            r[i].write(self.files.read(file_id).await);
+            r[i].write(self.files.read(unsafe { &mut *readers_ptr.add(i) }, file_id).await);
         }
         let r = unsafe { slice::from_raw_parts_mut(r.as_mut_ptr() as *mut FileReader, src.len()) };
 
@@ -664,7 +669,7 @@ impl<F: Flash> Inner<F> {
 
         async fn read_key_slot<F: Flash>(
             m: &mut FileManager<F>,
-            r: &mut FileReader,
+            r: &mut FileReader<'_>,
             buf: &mut KeySlot,
         ) -> Result<(), Error<F::Error>> {
             match read_key(m, r, &mut buf.key).await {
@@ -829,9 +834,9 @@ impl<F: Flash> Inner<F> {
 
     #[cfg(feature = "std")]
     pub async fn dump_file(&mut self, file_id: FileID) -> Result<(), Error<F::Error>> {
-        self.files.dump_file(file_id).await?;
+        self.files.dump_file(&mut self.readers[0], file_id).await?;
 
-        let mut r = self.files.read(file_id).await;
+        let mut r = self.files.read(&mut self.readers[0], file_id).await;
         let mut key = Vec::new();
         let mut value = [0u8; 32 * 1024];
         loop {
@@ -895,7 +900,7 @@ async fn write_value<F: Flash>(
 
 async fn copy<F: Flash>(
     m: &mut FileManager<F>,
-    r: &mut FileReader,
+    r: &mut FileReader<'_>,
     w: &mut FileWriter,
     mut len: usize,
 ) -> Result<(), Error<F::Error>> {
@@ -953,7 +958,7 @@ pub(crate) const fn record_size(key_len: usize, val_len: usize) -> usize {
 
 async fn read_key<F: Flash>(
     m: &mut FileManager<F>,
-    r: &mut FileReader,
+    r: &mut FileReader<'_>,
     buf: &mut Vec<u8, MAX_KEY_SIZE>,
 ) -> Result<(), PageReadError<F::Error>> {
     let len = read_leb128(m, r).await? as usize;
@@ -967,7 +972,7 @@ async fn read_key<F: Flash>(
 
 async fn read_value<F: Flash>(
     m: &mut FileManager<F>,
-    r: &mut FileReader,
+    r: &mut FileReader<'_>,
     value: &mut [u8],
 ) -> Result<usize, ReadError<F::Error>> {
     let len = check_corrupted!(read_leb128(m, r).await) as usize;
@@ -978,19 +983,19 @@ async fn read_value<F: Flash>(
     Ok(len)
 }
 
-async fn skip_value<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader) -> Result<(), PageReadError<F::Error>> {
+async fn skip_value<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader<'_>) -> Result<(), PageReadError<F::Error>> {
     let len = read_leb128(m, r).await? as usize;
     r.skip(m, len).await?;
     Ok(())
 }
 
-async fn read_u8<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader) -> Result<u8, PageReadError<F::Error>> {
+async fn read_u8<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader<'_>) -> Result<u8, PageReadError<F::Error>> {
     let mut buf = [0u8; 1];
     r.read(m, &mut buf).await?;
     Ok(buf[0])
 }
 
-async fn read_leb128<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader) -> Result<u32, PageReadError<F::Error>> {
+async fn read_leb128<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader<'_>) -> Result<u32, PageReadError<F::Error>> {
     let mut res = 0;
     let mut shift = 0;
     loop {
