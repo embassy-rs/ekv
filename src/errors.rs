@@ -24,6 +24,22 @@ pub enum FormatError<E> {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum MountError<E> {
+    Corrupted,
+    Flash(E),
+}
+
+impl<E> From<Error<E>> for MountError<E> {
+    fn from(e: Error<E>) -> Self {
+        match e {
+            Error::Flash(e) => Self::Flash(e),
+            Error::Corrupted => Self::Corrupted,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum ReadError<E> {
     KeyTooBig,
     BufferTooSmall,

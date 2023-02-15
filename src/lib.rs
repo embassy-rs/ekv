@@ -18,7 +18,7 @@ mod errors;
 pub mod flash;
 mod types;
 
-pub use errors::{CommitError, FormatError, ReadError, WriteError};
+pub use errors::{CommitError, FormatError, MountError, ReadError, WriteError};
 pub use record::{Config, Database, ReadTransaction, WriteTransaction};
 
 #[cfg(feature = "_test")]

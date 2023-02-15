@@ -13,7 +13,7 @@ use embassy_sync::waitqueue::WakerRegistration;
 use heapless::Vec;
 
 use crate::config::*;
-use crate::errors::{CorruptedError, Error, ReadError, WriteError};
+use crate::errors::{CorruptedError, Error, MountError, ReadError, WriteError};
 use crate::file::{FileManager, FileReader, FileSearcher, FileWriter, SeekDirection, PAGE_MAX_PAYLOAD_SIZE};
 use crate::flash::Flash;
 use crate::page::{PageReader, ReadError as PageReadError};
@@ -80,6 +80,10 @@ impl<F: Flash, M: RawMutex> Database<F, M> {
 
     pub async fn format(&self) -> Result<(), FormatError<F::Error>> {
         self.inner.lock().await.format().await
+    }
+
+    pub async fn mount(&self) -> Result<(), MountError<F::Error>> {
+        self.inner.lock().await.mount().await
     }
 
     #[cfg(feature = "std")]
@@ -304,6 +308,12 @@ impl<F: Flash> Inner<F> {
     async fn format(&mut self) -> Result<(), FormatError<F::Error>> {
         assert!(self.write_tx.is_none());
         self.files.format().await
+    }
+
+    async fn mount(&mut self) -> Result<(), MountError<F::Error>> {
+        assert!(self.write_tx.is_none());
+        self.files.remount_if_dirty(&mut self.readers[0]).await?;
+        Ok(())
     }
 
     async fn read(&mut self, key: &[u8], value: &mut [u8]) -> Result<usize, ReadError<F::Error>> {
