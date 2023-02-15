@@ -5,6 +5,11 @@ build-std = ["core"]
 [target.'cfg(all(target_arch = "arm", target_os = "none"))']
 runner = "probe-run --chip nRF52840_xxAA"
 
+rustflags = [
+  "-Z", "emit-stack-sizes",
+  "-Z", "trap-unreachable=no",
+]
+
 [build]
 target = "thumbv7em-none-eabi"
 

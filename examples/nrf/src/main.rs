@@ -5,19 +5,23 @@
 #![feature(impl_trait_projections)]
 #![allow(incomplete_features)]
 
+// must go first
+mod fmt;
+
 use core::convert::Infallible;
 
-use defmt::{assert_eq, info, unwrap};
+#[cfg(feature = "defmt")]
+use defmt_rtt as _;
 use ekv::flash::PageID;
-use ekv::{config, Config, Database, FormatConfig};
+use ekv::{config, Config, Database};
 use embassy_executor::Spawner;
 use embassy_nrf::rng::Rng;
 use embassy_nrf::{interrupt, pac, peripherals, qspi};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_time::Instant;
 use heapless::Vec;
+use panic_probe as _;
 use rand_core::RngCore;
-use {defmt_rtt as _, panic_probe as _};
 
 const FLASH_SIZE: usize = config::PAGE_SIZE * config::MAX_PAGE_COUNT;
 
@@ -122,8 +126,8 @@ async fn main(_spawner: Spawner) -> ! {
     let ms = Instant::now().duration_since(start).as_millis();
     info!("Done in {} ms!", ms);
 
-    const KEY_COUNT: usize = 1000;
-    const TX_SIZE: usize = 100;
+    const KEY_COUNT: usize = 100;
+    const TX_SIZE: usize = 10;
 
     info!("Writing {} keys...", KEY_COUNT);
     let start = Instant::now();
@@ -157,6 +161,7 @@ async fn main(_spawner: Spawner) -> ! {
 
     info!("ALL DONE");
 
+    cortex_m::asm::bkpt();
     loop {}
 }
 
