@@ -154,7 +154,7 @@ impl PageReader {
             ch: ChunkIter {
                 page_id: PageID::zero(),
                 prev_chunks_len: 0,
-                at_end: true,
+                at_end: false,
                 chunk_offset: 0,
                 chunk_len: 0,
             },
