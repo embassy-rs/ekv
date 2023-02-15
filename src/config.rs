@@ -78,6 +78,9 @@ const _CHECKS: () = {
     // assert MIN_FREE_PAGE_COUNT is reasonable.
     // If it's too big relative to the total flash size, we'll waste a lot of space!
     core::assert!(MIN_FREE_PAGE_COUNT < MAX_PAGE_COUNT / 2);
+
+    // We use u16 for chunk sizes.
+    core::assert!(PAGE_MAX_PAYLOAD_SIZE <= u16::MAX as _);
 };
 
 pub fn dump() {

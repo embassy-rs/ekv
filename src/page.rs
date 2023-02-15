@@ -6,6 +6,8 @@ use crate::errors::Error;
 use crate::flash::Flash;
 use crate::types::PageID;
 
+const CHUNK_MAGIC: u16 = 0x58A4;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(C)]
 pub struct PageHeader {
@@ -16,7 +18,8 @@ impl_bytes!(PageHeader);
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(C)]
 pub struct ChunkHeader {
-    len: u32,
+    magic: u16,
+    len: u16,
 }
 impl_bytes!(ChunkHeader);
 
@@ -154,8 +157,7 @@ impl PageReader {
             .map_err(Error::Flash)?;
         let header = ChunkHeader::from_bytes(header);
 
-        // TODO make this more robust against written but not committed garbage.
-        if header.len == 0xFFFF_FFFF {
+        if header.magic != CHUNK_MAGIC {
             self.at_end = true;
             return Ok(false);
         }
@@ -428,7 +430,8 @@ impl<H: Header> PageWriter<H> {
         }
 
         let h = ChunkHeader {
-            len: self.chunk_pos as u32,
+            magic: CHUNK_MAGIC,
+            len: self.chunk_pos as u16,
         };
         flash
             .write(self.page_id as _, self.chunk_offset, &h.to_bytes())
