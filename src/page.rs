@@ -47,132 +47,40 @@ pub unsafe trait Header: Sized {
 
 pub const MAX_CHUNK_SIZE: usize = PAGE_SIZE - PageHeader::SIZE - ChunkHeader::SIZE;
 
-pub struct PageManager<F: Flash> {
-    _phantom: PhantomData<F>,
+async fn write_header<F: Flash, H: Header>(flash: &mut F, page_id: PageID, header: H) -> Result<(), F::Error> {
+    assert!(size_of::<H>() <= MAX_HEADER_SIZE);
+    let mut buf = [0u8; PageHeader::SIZE + MAX_HEADER_SIZE];
+    let buf = &mut buf[..PageHeader::SIZE + size_of::<H>()];
+
+    let page_header = PageHeader { magic: H::MAGIC };
+    buf[..PageHeader::SIZE].copy_from_slice(&page_header.to_bytes());
+    unsafe {
+        buf.as_mut_ptr()
+            .add(PageHeader::SIZE)
+            .cast::<H>()
+            .write_unaligned(header)
+    };
+
+    flash.write(page_id as _, 0, buf).await?;
+    Ok(())
 }
 
-impl<F: Flash> PageManager<F> {
-    pub fn new() -> Self {
-        Self { _phantom: PhantomData }
+pub async fn read_header<F: Flash, H: Header>(flash: &mut F, page_id: PageID) -> Result<H, Error<F::Error>> {
+    assert!(size_of::<H>() <= MAX_HEADER_SIZE);
+    let mut buf = [0u8; PageHeader::SIZE + MAX_HEADER_SIZE];
+    let buf = &mut buf[..PageHeader::SIZE + size_of::<H>()];
+
+    flash.read(page_id as _, 0, buf).await.map_err(Error::Flash)?;
+
+    let page_header = PageHeader::from_bytes(buf[..PageHeader::SIZE].try_into().unwrap());
+    if page_header.magic != H::MAGIC {
+        // don't use `corrupted!()` here, this can happen during normal
+        // operation while searching for meta pages, for mount/format.
+        return Err(Error::Corrupted);
     }
 
-    async fn write_header<H: Header>(flash: &mut F, page_id: PageID, header: H) -> Result<(), F::Error> {
-        assert!(size_of::<H>() <= MAX_HEADER_SIZE);
-        let mut buf = [0u8; PageHeader::SIZE + MAX_HEADER_SIZE];
-        let buf = &mut buf[..PageHeader::SIZE + size_of::<H>()];
-
-        let page_header = PageHeader { magic: H::MAGIC };
-        buf[..PageHeader::SIZE].copy_from_slice(&page_header.to_bytes());
-        unsafe {
-            buf.as_mut_ptr()
-                .add(PageHeader::SIZE)
-                .cast::<H>()
-                .write_unaligned(header)
-        };
-
-        flash.write(page_id as _, 0, buf).await?;
-        Ok(())
-    }
-
-    pub async fn read_header<H: Header>(&mut self, flash: &mut F, page_id: PageID) -> Result<H, Error<F::Error>> {
-        assert!(size_of::<H>() <= MAX_HEADER_SIZE);
-        let mut buf = [0u8; PageHeader::SIZE + MAX_HEADER_SIZE];
-        let buf = &mut buf[..PageHeader::SIZE + size_of::<H>()];
-
-        flash.read(page_id as _, 0, buf).await.map_err(Error::Flash)?;
-
-        let page_header = PageHeader::from_bytes(buf[..PageHeader::SIZE].try_into().unwrap());
-        if page_header.magic != H::MAGIC {
-            // don't use `corrupted!()` here, this can happen during normal
-            // operation while searching for meta pages, for mount/format.
-            return Err(Error::Corrupted);
-        }
-
-        let header = unsafe { buf.as_ptr().add(PageHeader::SIZE).cast::<H>().read_unaligned() };
-        Ok(header)
-    }
-
-    pub async fn read<H: Header>(
-        &mut self,
-        flash: &mut F,
-        page_id: PageID,
-    ) -> Result<(H, PageReader), Error<F::Error>> {
-        trace!("page: read {:?}", page_id);
-        let header = self.read_header(flash, page_id).await?;
-        let mut r = PageReader {
-            page_id,
-            prev_chunks_len: 0,
-            at_end: false,
-            chunk_offset: PageHeader::SIZE + size_of::<H>(),
-            chunk_len: 0,
-            chunk_pos: 0,
-            buf: [0u8; MAX_CHUNK_SIZE],
-        };
-        r.open_chunk(flash).await?;
-        Ok((header, r))
-    }
-
-    pub async fn write<H: Header>(&mut self, _flash: &mut F, page_id: PageID) -> PageWriter<H> {
-        trace!("page: write {:?}", page_id);
-        PageWriter {
-            _phantom: PhantomData,
-            page_id,
-            needs_erase: true,
-            align_buf: [0; ALIGN],
-            total_pos: 0,
-            chunk_offset: PageHeader::SIZE + size_of::<H>(),
-            chunk_pos: 0,
-        }
-    }
-
-    pub async fn write_append<H: Header>(
-        &mut self,
-        flash: &mut F,
-        page_id: PageID,
-    ) -> Result<(H, PageWriter<H>), Error<F::Error>> {
-        trace!("page: write_append {:?}", page_id);
-        let (header, mut r) = self.read(flash, page_id).await?;
-        while !r.at_end {
-            r.next_chunk(flash).await?;
-        }
-
-        // Check all space after `r.chunk_offset` is erased.
-        if r.chunk_offset != PAGE_SIZE {
-            const CHUNK_LEN: usize = 128;
-            let mut buf = [ERASE_VALUE; CHUNK_LEN];
-
-            let mut ok = true;
-            for start in (r.chunk_offset..PAGE_SIZE).step_by(CHUNK_LEN) {
-                let end = (start + CHUNK_LEN).min(PAGE_SIZE);
-                let len = end - start;
-                flash
-                    .read(page_id as _, start, &mut buf[..len])
-                    .await
-                    .map_err(Error::Flash)?;
-                if !buf[..len].iter().all(|&x| x == ERASE_VALUE) {
-                    ok = false;
-                    break;
-                }
-            }
-
-            if !ok {
-                // setting this will make the writer fail writing as if the page was full.
-                r.chunk_offset = PAGE_SIZE;
-            }
-        }
-
-        let w = PageWriter {
-            _phantom: PhantomData,
-            page_id,
-            needs_erase: false,
-            align_buf: [0; ALIGN],
-            total_pos: r.prev_chunks_len,
-            chunk_offset: r.chunk_offset,
-            chunk_pos: 0,
-        };
-
-        Ok((header, w))
-    }
+    let header = unsafe { buf.as_ptr().add(PageHeader::SIZE).cast::<H>().read_unaligned() };
+    Ok(header)
 }
 
 pub struct PageReader {
@@ -196,12 +104,37 @@ pub struct PageReader {
 }
 
 impl PageReader {
+    pub fn new() -> Self {
+        PageReader {
+            page_id: PageID::from_raw(0).unwrap(),
+            prev_chunks_len: 0,
+            at_end: true,
+            chunk_offset: 0,
+            chunk_len: 0,
+            chunk_pos: 0,
+            buf: [0u8; MAX_CHUNK_SIZE],
+        }
+    }
+
+    pub async fn open<F: Flash, H: Header>(&mut self, flash: &mut F, page_id: PageID) -> Result<H, Error<F::Error>> {
+        trace!("page: read {:?}", page_id);
+        let header = read_header(flash, page_id).await?;
+
+        self.page_id = page_id;
+        self.prev_chunks_len = 0;
+        self.at_end = false;
+        self.chunk_offset = PageHeader::SIZE + size_of::<H>();
+        self.chunk_len = 0;
+        self.chunk_pos = 0;
+        self.buf = [0u8; MAX_CHUNK_SIZE];
+        self.open_chunk(flash).await?;
+        Ok(header)
+    }
+
     pub fn page_id(&self) -> PageID {
         self.page_id
     }
-}
 
-impl PageReader {
     async fn next_chunk<F: Flash>(&mut self, flash: &mut F) -> Result<bool, Error<F::Error>> {
         self.chunk_offset += ChunkHeader::SIZE + align_up(self.chunk_len);
         self.open_chunk(flash).await
@@ -325,6 +258,73 @@ pub struct PageWriter<H: Header> {
 }
 
 impl<H: Header> PageWriter<H> {
+    pub fn new() -> Self {
+        Self {
+            _phantom: PhantomData,
+            page_id: PageID::from_raw(0).unwrap(),
+            needs_erase: true,
+            align_buf: [0; ALIGN],
+            total_pos: 0,
+            chunk_offset: PageHeader::SIZE + size_of::<H>(),
+            chunk_pos: 0,
+        }
+    }
+
+    pub async fn open<F: Flash>(&mut self, flash: &mut F, page_id: PageID) {
+        trace!("page: write {:?}", page_id);
+        self.page_id = page_id;
+        self.needs_erase = true;
+        self.align_buf = [0; ALIGN];
+        self.total_pos = 0;
+        self.chunk_offset = PageHeader::SIZE + size_of::<H>();
+        self.chunk_pos = 0;
+    }
+
+    pub async fn open_append<F: Flash>(&mut self, flash: &mut F, page_id: PageID) -> Result<H, Error<F::Error>> {
+        trace!("page: write_append {:?}", page_id);
+
+        // TODO: don't use a full PageReader, read just the chunk headers.
+        let mut r = PageReader::new();
+        let header = r.open(flash, page_id).await?;
+        while !r.at_end {
+            r.next_chunk(flash).await?;
+        }
+
+        // Check all space after `r.chunk_offset` is erased.
+        if r.chunk_offset != PAGE_SIZE {
+            const CHUNK_LEN: usize = 128;
+            let mut buf = [ERASE_VALUE; CHUNK_LEN];
+
+            let mut ok = true;
+            for start in (r.chunk_offset..PAGE_SIZE).step_by(CHUNK_LEN) {
+                let end = (start + CHUNK_LEN).min(PAGE_SIZE);
+                let len = end - start;
+                flash
+                    .read(page_id as _, start, &mut buf[..len])
+                    .await
+                    .map_err(Error::Flash)?;
+                if !buf[..len].iter().all(|&x| x == ERASE_VALUE) {
+                    ok = false;
+                    break;
+                }
+            }
+
+            if !ok {
+                // setting this will make the writer fail writing as if the page was full.
+                r.chunk_offset = PAGE_SIZE;
+            }
+        }
+
+        self.page_id = page_id;
+        self.needs_erase = false;
+        self.align_buf = [0; ALIGN];
+        self.total_pos = r.prev_chunks_len;
+        self.chunk_offset = r.chunk_offset;
+        self.chunk_pos = 0;
+
+        Ok(header)
+    }
+
     #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.total_pos
@@ -401,7 +401,7 @@ impl<H: Header> PageWriter<H> {
     pub async fn write_header<F: Flash>(&mut self, flash: &mut F, header: H) -> Result<(), F::Error> {
         self.erase_if_needed(flash).await?;
 
-        PageManager::write_header(flash, self.page_id, header).await?;
+        write_header(flash, self.page_id, header).await?;
 
         Ok(())
     }
@@ -478,65 +478,65 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_header() {
         let f = &mut MemFlash::new();
-        let mut m = PageManager::new();
 
-        PageManager::write_header(f, PAGE, HEADER).await.unwrap();
-        let h = m.read_header::<TestHeader>(f, PAGE).await.unwrap();
+        write_header(f, PAGE, HEADER).await.unwrap();
+        let h = read_header::<_, TestHeader>(f, PAGE).await.unwrap();
         assert_eq!(h, HEADER)
     }
 
     #[test_log::test(tokio::test)]
     async fn test_header_read_unwritten() {
         let f = &mut MemFlash::new();
-        let mut m = PageManager::new();
 
-        let res = m.read_header::<TestHeader>(f, PAGE).await;
+        let res = read_header::<_, TestHeader>(f, PAGE).await;
         assert!(matches!(res, Err(Error::Corrupted)))
     }
 
     #[test_log::test(tokio::test)]
     async fn test_read_unwritten() {
         let f = &mut MemFlash::new();
-        let mut b = PageManager::new();
 
         // Read
-        let res = b.read::<TestHeader>(f, PAGE).await;
+        let mut r = PageReader::new();
+        let res = r.open::<_, TestHeader>(f, PAGE).await;
         assert!(matches!(res, Err(Error::Corrupted)));
     }
 
     #[test_log::test(tokio::test)]
     async fn test_read_uncommitted() {
         let f = &mut MemFlash::new();
-        let mut b = PageManager::new();
 
         let data = dummy_data(13);
 
         // Write
-        let mut w = b.write::<TestHeader>(f, PAGE).await;
+        let mut w: PageWriter<TestHeader> = PageWriter::new();
+        w.open(f, PAGE).await;
         w.write(f, &data).await.unwrap();
         // don't commit
 
         // Read
-        let res = b.read::<TestHeader>(f, PAGE).await;
+        let mut r = PageReader::new();
+        let res = r.open::<_, TestHeader>(f, PAGE).await;
         assert!(matches!(res, Err(Error::Corrupted)));
     }
 
     #[test_log::test(tokio::test)]
     async fn test_write_short() {
         let f = &mut MemFlash::new();
-        let mut b = PageManager::new();
 
         let data = dummy_data(13);
 
         // Write
-        let mut w = b.write::<TestHeader>(f, PAGE).await;
+        let mut w = PageWriter::new();
+        w.open(f, PAGE).await;
         let n = w.write(f, &data).await.unwrap();
         assert_eq!(n, 13);
         w.write_header(f, HEADER).await.unwrap();
         w.commit(f).await.unwrap();
 
         // Read
-        let (h, mut r) = b.read::<TestHeader>(f, PAGE).await.unwrap();
+        let mut r = PageReader::new();
+        let h = r.open::<_, TestHeader>(f, PAGE).await.unwrap();
         assert_eq!(h, HEADER);
         let mut buf = vec![0; data.len()];
         let n = r.read(f, &mut buf).await.unwrap();
@@ -544,10 +544,10 @@ mod tests {
         assert_eq!(data, buf);
 
         // Remount
-        let mut b = PageManager::new();
 
         // Read
-        let (h, mut r) = b.read::<TestHeader>(f, PAGE).await.unwrap();
+        let mut r = PageReader::new();
+        let h = r.open::<_, TestHeader>(f, PAGE).await.unwrap();
         assert_eq!(h, HEADER);
         let mut buf = vec![0; data.len()];
         let n = r.read(f, &mut buf).await.unwrap();
@@ -558,18 +558,19 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_overread() {
         let f = &mut MemFlash::new();
-        let mut b = PageManager::new();
 
         let data = dummy_data(13);
 
         // Write
-        let mut w = b.write::<TestHeader>(f, PAGE).await;
+        let mut w = PageWriter::new();
+        w.open(f, PAGE).await;
         w.write(f, &data).await.unwrap();
         w.write_header(f, HEADER).await.unwrap();
         w.commit(f).await.unwrap();
 
         // Read
-        let (h, mut r) = b.read::<TestHeader>(f, PAGE).await.unwrap();
+        let mut r = PageReader::new();
+        let h = r.open::<_, TestHeader>(f, PAGE).await.unwrap();
         assert_eq!(h, HEADER);
         let mut buf = vec![0; 1024];
         let n = r.read(f, &mut buf).await.unwrap();
@@ -580,19 +581,20 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_overwrite() {
         let f = &mut MemFlash::new();
-        let mut b = PageManager::new();
 
         let data = dummy_data(65536);
 
         // Write
-        let mut w = b.write::<TestHeader>(f, PAGE).await;
+        let mut w = PageWriter::new();
+        w.open(f, PAGE).await;
         let n = w.write(f, &data).await.unwrap();
         assert_eq!(n, MAX_PAYLOAD);
         w.write_header(f, HEADER).await.unwrap();
         w.commit(f).await.unwrap();
 
         // Read
-        let (h, mut r) = b.read::<TestHeader>(f, PAGE).await.unwrap();
+        let mut r = PageReader::new();
+        let h = r.open::<_, TestHeader>(f, PAGE).await.unwrap();
         assert_eq!(h, HEADER);
         let mut buf = vec![0; MAX_PAYLOAD];
         let n = r.read(f, &mut buf).await.unwrap();
@@ -603,10 +605,10 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_write_many() {
         let f = &mut MemFlash::new();
-        let mut b = PageManager::new();
 
         // Write
-        let mut w = b.write::<TestHeader>(f, PAGE).await;
+        let mut w = PageWriter::new();
+        w.open(f, PAGE).await;
         let n = w.write(f, &[1, 2, 3]).await.unwrap();
         assert_eq!(n, 3);
         let n = w.write(f, &[4, 5, 6, 7, 8, 9]).await.unwrap();
@@ -615,7 +617,8 @@ mod tests {
         w.commit(f).await.unwrap();
 
         // Read
-        let (h, mut r) = b.read::<TestHeader>(f, PAGE).await.unwrap();
+        let mut r = PageReader::new();
+        let h = r.open::<_, TestHeader>(f, PAGE).await.unwrap();
         assert_eq!(h, HEADER);
         let mut buf = vec![0; MAX_PAYLOAD];
         let n = r.read(f, &mut buf).await.unwrap();
@@ -626,17 +629,18 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_read_many() {
         let f = &mut MemFlash::new();
-        let mut b = PageManager::new();
 
         // Write
-        let mut w = b.write::<TestHeader>(f, PAGE).await;
+        let mut w = PageWriter::new();
+        w.open(f, PAGE).await;
         let n = w.write(f, &[1, 2, 3, 4, 5, 6, 7, 8, 9]).await.unwrap();
         assert_eq!(n, 9);
         w.write_header(f, HEADER).await.unwrap();
         w.commit(f).await.unwrap();
 
         // Read
-        let (h, mut r) = b.read::<TestHeader>(f, PAGE).await.unwrap();
+        let mut r = PageReader::new();
+        let h = r.open::<_, TestHeader>(f, PAGE).await.unwrap();
         assert_eq!(h, HEADER);
         let mut buf = vec![0; MAX_PAYLOAD];
 
@@ -655,10 +659,10 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_multichunk() {
         let f = &mut MemFlash::new();
-        let mut b = PageManager::new();
 
         // Write
-        let mut w = b.write::<TestHeader>(f, PAGE).await;
+        let mut w = PageWriter::new();
+        w.open(f, PAGE).await;
         let n = w.write(f, &[1, 2, 3, 4, 5, 6, 7, 8, 9]).await.unwrap();
         assert_eq!(n, 9);
         w.write_header(f, HEADER).await.unwrap();
@@ -668,7 +672,8 @@ mod tests {
         w.commit(f).await.unwrap();
 
         // Read
-        let (h, mut r) = b.read::<TestHeader>(f, PAGE).await.unwrap();
+        let mut r = PageReader::new();
+        let h = r.open::<_, TestHeader>(f, PAGE).await.unwrap();
         assert_eq!(h, HEADER);
         let mut buf = vec![0; MAX_PAYLOAD];
 
@@ -691,10 +696,10 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_multichunk_no_commit() {
         let f = &mut MemFlash::new();
-        let mut b = PageManager::new();
 
         // Write
-        let mut w = b.write::<TestHeader>(f, PAGE).await;
+        let mut w = PageWriter::new();
+        w.open(f, PAGE).await;
         let n = w.write(f, &[1, 2, 3, 4, 5, 6, 7, 8, 9]).await.unwrap();
         assert_eq!(n, 9);
         w.write_header(f, HEADER).await.unwrap();
@@ -704,7 +709,8 @@ mod tests {
         // no commit!
 
         // Read
-        let (h, mut r) = b.read::<TestHeader>(f, PAGE).await.unwrap();
+        let mut r = PageReader::new();
+        let h = r.open::<_, TestHeader>(f, PAGE).await.unwrap();
         assert_eq!(h, HEADER);
         let mut buf = vec![0; MAX_PAYLOAD];
 
@@ -719,22 +725,23 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_multichunk_append() {
         let f = &mut MemFlash::new();
-        let mut b = PageManager::new();
 
         // Write
-        let mut w = b.write::<TestHeader>(f, PAGE).await;
+        let mut w = PageWriter::new();
+        w.open(f, PAGE).await;
         let n = w.write(f, &[1, 2, 3, 4, 5, 6, 7, 8, 9]).await.unwrap();
         assert_eq!(n, 9);
         w.write_header(f, HEADER).await.unwrap();
         w.commit(f).await.unwrap();
 
-        let (_, mut w) = b.write_append::<TestHeader>(f, PAGE).await.unwrap();
+        w.open_append(f, PAGE).await.unwrap();
         let n = w.write(f, &[10, 11, 12]).await.unwrap();
         assert_eq!(n, 3);
         w.commit(f).await.unwrap();
 
         // Read
-        let (h, mut r) = b.read::<TestHeader>(f, PAGE).await.unwrap();
+        let mut r = PageReader::new();
+        let h = r.open::<_, TestHeader>(f, PAGE).await.unwrap();
         assert_eq!(h, HEADER);
         let mut buf = vec![0; MAX_PAYLOAD];
 
@@ -753,22 +760,23 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_multichunk_append_no_commit() {
         let f = &mut MemFlash::new();
-        let mut b = PageManager::new();
 
         // Write
-        let mut w = b.write::<TestHeader>(f, PAGE).await;
+        let mut w = PageWriter::new();
+        w.open(f, PAGE).await;
         let n = w.write(f, &[1, 2, 3, 4, 5, 6, 7, 8, 9]).await.unwrap();
         assert_eq!(n, 9);
         w.write_header(f, HEADER).await.unwrap();
         w.commit(f).await.unwrap();
 
-        let (_, mut w) = b.write_append::<TestHeader>(f, PAGE).await.unwrap();
+        w.open_append(f, PAGE).await.unwrap();
         let n = w.write(f, &[10, 11, 12]).await.unwrap();
         assert_eq!(n, 3);
         // no commit!
 
         // Read
-        let (h, mut r) = b.read::<TestHeader>(f, PAGE).await.unwrap();
+        let mut r = PageReader::new();
+        let h = r.open::<_, TestHeader>(f, PAGE).await.unwrap();
         assert_eq!(h, HEADER);
         let mut buf = vec![0; MAX_PAYLOAD];
 
@@ -783,17 +791,17 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_multichunk_append_no_commit_then_retry() {
         let f = &mut MemFlash::new();
-        let mut b = PageManager::new();
 
         // Write
-        let mut w = b.write::<TestHeader>(f, PAGE).await;
+        let mut w = PageWriter::new();
+        w.open(f, PAGE).await;
         let n = w.write(f, &[1, 2, 3, 4, 5, 6, 7, 8, 9]).await.unwrap();
         assert_eq!(n, 9);
         w.write_header(f, HEADER).await.unwrap();
         w.commit(f).await.unwrap();
 
         // Append but don't commit
-        let (_, mut w) = b.write_append::<TestHeader>(f, PAGE).await.unwrap();
+        w.open_append(f, PAGE).await.unwrap();
         let n = w.write(f, &[10, 11, 12, 13, 14, 15]).await.unwrap();
         assert_eq!(n, 6);
         // no commit!
@@ -801,12 +809,13 @@ mod tests {
         // Even though we didn't commit the appended stuff, it did get written to flash.
         // If there's "left over garbage" we can non longer append to this page. It must
         // behave as if it was full.
-        let (_, mut w) = b.write_append::<TestHeader>(f, PAGE).await.unwrap();
+        w.open_append(f, PAGE).await.unwrap();
         let n = w.write(f, &[13, 14, 15]).await.unwrap();
         assert_eq!(n, 0);
 
         // Read
-        let (h, mut r) = b.read::<TestHeader>(f, PAGE).await.unwrap();
+        let mut r = PageReader::new();
+        let h = r.open::<_, TestHeader>(f, PAGE).await.unwrap();
         assert_eq!(h, HEADER);
         let mut buf = vec![0; MAX_PAYLOAD];
 

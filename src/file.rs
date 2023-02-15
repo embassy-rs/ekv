@@ -7,7 +7,7 @@ use crate::errors::*;
 use crate::flash::Flash;
 use crate::page;
 pub use crate::page::ReadError;
-use crate::page::{ChunkHeader, Header, PageHeader, PageManager, PageReader, PageWriter};
+use crate::page::{ChunkHeader, Header, PageHeader, PageReader, PageWriter};
 use crate::types::{OptionPageID, PageID};
 
 pub const PAGE_MAX_PAYLOAD_SIZE: usize = PAGE_SIZE - PageHeader::SIZE - size_of::<DataHeader>() - ChunkHeader::SIZE;
@@ -80,7 +80,6 @@ impl FileState {
 
 pub struct FileManager<F: Flash> {
     flash: F,
-    pages: PageManager<F>,
     files: [FileState; FILE_COUNT],
     meta_page_id: PageID,
     meta_seq: Seq,
@@ -95,7 +94,6 @@ impl<F: Flash> FileManager<F> {
             flash,
             meta_page_id: PageID::from_raw(0).unwrap(),
             meta_seq: Seq::ZERO,
-            pages: PageManager::new(),
             files: [FileState::EMPTY; FILE_COUNT],
             dirty: false,
             alloc: Allocator::new(page_count, random_seed),
@@ -342,15 +340,19 @@ impl<F: Flash> FileManager<F> {
     }
 
     async fn read_page<H: Header>(&mut self, page_id: PageID) -> Result<(H, PageReader), Error<F::Error>> {
-        self.pages.read(&mut self.flash, page_id).await
+        let mut r = PageReader::new();
+        let header = r.open(&mut self.flash, page_id).await?;
+        Ok((header, r))
     }
 
     async fn read_header<H: Header>(&mut self, page_id: PageID) -> Result<H, Error<F::Error>> {
-        self.pages.read_header(&mut self.flash, page_id).await
+        page::read_header(&mut self.flash, page_id).await
     }
 
     async fn write_page<H: Header>(&mut self, page_id: PageID) -> PageWriter<H> {
-        self.pages.write(&mut self.flash, page_id).await
+        let mut w = PageWriter::new();
+        w.open(&mut self.flash, page_id).await;
+        w
     }
 
     fn free_page(&mut self, page_id: PageID) {
@@ -529,11 +531,8 @@ impl<'a, F: Flash> Transaction<'a, F> {
 
         // Try appending to the existing meta page.
         let res: Result<(), WriteError<F::Error>> = try {
-            let (_, mut mw) = self
-                .m
-                .pages
-                .write_append(&mut self.m.flash, self.m.meta_page_id)
-                .await?;
+            let mut mw = PageWriter::new();
+            mw.open_append(&mut self.m.flash, self.m.meta_page_id).await?;
             for file_id in 0..FILE_COUNT {
                 if self.m.files[file_id].dirty {
                     self.write_file_meta(&mut mw, file_id as FileID).await?;
