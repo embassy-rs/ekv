@@ -73,7 +73,7 @@ async fn fuzz_inner(ops: Input, logging: bool) {
                 // Open file if not open already.
                 let w = match &mut w {
                     Some(w) => w,
-                    None => w.insert(m.write(FILE_ID).await.unwrap()),
+                    None => w.insert(m.write(&mut pr, FILE_ID).await.unwrap()),
                 };
 
                 let id = (records.len() * 2 + 1) as u32;

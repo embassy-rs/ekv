@@ -390,7 +390,7 @@ impl<F: Flash> Inner<F> {
         };
 
         debug!("write_transaction: writing file {}", file_id);
-        let w = self.files.write(file_id).await?;
+        let w = self.files.write(&mut self.readers[0], file_id).await?;
 
         self.write_tx = Some(WriteTransactionInner { w, last_key: None });
 
@@ -575,7 +575,7 @@ impl<F: Flash> Inner<F> {
             return Ok(());
         }
 
-        let mut w = self.files.write(dst).await?;
+        let mut w = self.files.write(&mut self.readers[0], dst).await?;
 
         // Open all files in level for reading.
         // TODO: maybe use a bit less unsafe?

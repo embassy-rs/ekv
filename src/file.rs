@@ -130,9 +130,9 @@ impl<F: Flash> FileManager<F> {
         FileReader::new(self, r, file_id)
     }
 
-    pub async fn write(&mut self, file_id: FileID) -> Result<FileWriter, Error<F::Error>> {
+    pub async fn write(&mut self, r: &mut PageReader, file_id: FileID) -> Result<FileWriter, Error<F::Error>> {
         assert!(!self.dirty);
-        FileWriter::new(self, file_id).await
+        FileWriter::new(self, r, file_id).await
     }
 
     pub fn file_flags(&self, file_id: FileID) -> u8 {
@@ -1097,7 +1097,11 @@ pub struct FileWriter {
 }
 
 impl FileWriter {
-    async fn new<F: Flash>(m: &mut FileManager<F>, file_id: FileID) -> Result<Self, Error<F::Error>> {
+    async fn new<F: Flash>(
+        m: &mut FileManager<F>,
+        r: &mut PageReader,
+        file_id: FileID,
+    ) -> Result<Self, Error<F::Error>> {
         let f = m.files[file_id as usize];
 
         let mut this = Self {
@@ -1114,8 +1118,6 @@ impl FileWriter {
         // This is needed to ensure progressive compaction does not actually un-compact
         // the data, due to leaving pages not full in the middle of the file.
         if let Some(pp) = f.last_page {
-            // TODO: don't use a full PageReader, check chunk headers only.
-            let mut r = PageReader::new();
             r.open::<_, DataHeader>(&mut m.flash, pp.page_id).await?;
 
             // Measure total page len.
@@ -1426,7 +1428,7 @@ mod tests {
 
         let data = dummy_data(24);
 
-        let mut w = m.write(0).await.unwrap();
+        let mut w = m.write(&mut pr, 0).await.unwrap();
         w.write(&mut m, &data).await.unwrap();
         m.commit(&mut w).await.unwrap();
 
@@ -1454,7 +1456,7 @@ mod tests {
 
         let data = dummy_data(23456);
 
-        let mut w = m.write(0).await.unwrap();
+        let mut w = m.write(&mut pr, 0).await.unwrap();
         w.write(&mut m, &data).await.unwrap();
         m.commit(&mut w).await.unwrap();
         w.discard(&mut m).await.unwrap();
@@ -1481,11 +1483,11 @@ mod tests {
         m.format().await.unwrap();
         m.mount(&mut pr).await.unwrap();
 
-        let mut w = m.write(0).await.unwrap();
+        let mut w = m.write(&mut pr, 0).await.unwrap();
         w.write(&mut m, &[1, 2, 3, 4, 5]).await.unwrap();
         m.commit(&mut w).await.unwrap();
 
-        let mut w = m.write(0).await.unwrap();
+        let mut w = m.write(&mut pr, 0).await.unwrap();
         w.write(&mut m, &[6, 7, 8, 9]).await.unwrap();
         m.commit(&mut w).await.unwrap();
 
@@ -1510,7 +1512,7 @@ mod tests {
         m.format().await.unwrap();
         m.mount(&mut pr).await.unwrap();
 
-        let mut w = m.write(0).await.unwrap();
+        let mut w = m.write(&mut pr, 0).await.unwrap();
         w.write(&mut m, &[1, 2, 3, 4, 5]).await.unwrap();
         m.commit(&mut w).await.unwrap();
 
@@ -1545,11 +1547,11 @@ mod tests {
         m.format().await.unwrap();
         m.mount(&mut pr).await.unwrap();
 
-        let mut w = m.write(0).await.unwrap();
+        let mut w = m.write(&mut pr, 0).await.unwrap();
         w.write(&mut m, &[1, 2, 3, 4, 5]).await.unwrap();
         m.commit(&mut w).await.unwrap();
 
-        let mut w = m.write(0).await.unwrap();
+        let mut w = m.write(&mut pr, 0).await.unwrap();
         w.write(&mut m, &[6, 7, 8, 9]).await.unwrap();
 
         let mut tx = m.transaction();
@@ -1584,7 +1586,7 @@ mod tests {
         r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(buf, [9]);
 
-        let mut w = m.write(0).await.unwrap();
+        let mut w = m.write(&mut pr, 0).await.unwrap();
         w.write(&mut m, &[10, 11, 12]).await.unwrap();
         m.commit(&mut w).await.unwrap();
 
@@ -1602,7 +1604,7 @@ mod tests {
         m.format().await.unwrap();
         m.mount(&mut pr).await.unwrap();
 
-        let mut w = m.write(0).await.unwrap();
+        let mut w = m.write(&mut pr, 0).await.unwrap();
         w.write(&mut m, &[1, 2, 3, 4, 5]).await.unwrap();
 
         let mut tx = m.transaction();
@@ -1627,7 +1629,7 @@ mod tests {
         m.format().await.unwrap();
         m.mount(&mut pr).await.unwrap();
 
-        let mut w = m.write(0).await.unwrap();
+        let mut w = m.write(&mut pr, 0).await.unwrap();
         w.write(&mut m, &[1, 2, 3, 4, 5]).await.unwrap();
         m.commit(&mut w).await.unwrap();
 
@@ -1658,7 +1660,7 @@ mod tests {
 
         assert_eq!(m.alloc.is_used(page(1)), false);
 
-        let mut w = m.write(0).await.unwrap();
+        let mut w = m.write(&mut pr, 0).await.unwrap();
         w.write(&mut m, &[1, 2, 3, 4, 5]).await.unwrap();
         m.commit(&mut w).await.unwrap();
 
@@ -1691,7 +1693,7 @@ mod tests {
 
         let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE);
 
-        let mut w = m.write(0).await.unwrap();
+        let mut w = m.write(&mut pr, 0).await.unwrap();
         w.write(&mut m, &data).await.unwrap();
         w.write(&mut m, &data).await.unwrap();
         m.commit(&mut w).await.unwrap();
@@ -1727,11 +1729,11 @@ mod tests {
         m.format().await.unwrap();
         m.mount(&mut pr).await.unwrap();
 
-        let mut w = m.write(0).await.unwrap();
+        let mut w = m.write(&mut pr, 0).await.unwrap();
         w.write(&mut m, &[1, 2, 3, 4, 5]).await.unwrap();
         m.commit(&mut w).await.unwrap();
 
-        let mut w = m.write(0).await.unwrap();
+        let mut w = m.write(&mut pr, 0).await.unwrap();
         w.write(&mut m, &[6, 7, 8, 9]).await.unwrap();
         w.discard(&mut m).await.unwrap();
 
@@ -1743,7 +1745,7 @@ mod tests {
         let res = r.read(&mut m, &mut buf).await;
         assert!(matches!(res, Err(ReadError::Eof)));
 
-        let mut w = m.write(0).await.unwrap();
+        let mut w = m.write(&mut pr, 0).await.unwrap();
         w.write(&mut m, &[10, 11]).await.unwrap();
         m.commit(&mut w).await.unwrap();
 
@@ -1777,7 +1779,7 @@ mod tests {
 
         let data = dummy_data(1234);
 
-        let mut w = m.write(0).await.unwrap();
+        let mut w = m.write(&mut pr, 0).await.unwrap();
         w.write(&mut m, &data).await.unwrap();
         w.discard(&mut m).await.unwrap(); // don't commit
 
@@ -1799,7 +1801,7 @@ mod tests {
         assert_eq!(m.alloc.is_used(page(2)), false);
 
         let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE);
-        let mut w = m.write(0).await.unwrap();
+        let mut w = m.write(&mut pr, 0).await.unwrap();
 
         w.write(&mut m, &data).await.unwrap();
         assert_eq!(m.alloc.is_used(page(0)), true); // old meta
@@ -1840,7 +1842,7 @@ mod tests {
         assert_eq!(m.alloc.is_used(page(2)), false);
 
         let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE);
-        let mut w = m.write(0).await.unwrap();
+        let mut w = m.write(&mut pr, 0).await.unwrap();
 
         w.write(&mut m, &data).await.unwrap();
         assert_eq!(m.alloc.is_used(page(0)), true);
@@ -1871,7 +1873,7 @@ mod tests {
         assert_eq!(m.alloc.is_used(page(1)), false);
 
         let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE);
-        let mut w = m.write(0).await.unwrap();
+        let mut w = m.write(&mut pr, 0).await.unwrap();
 
         w.write(&mut m, &data).await.unwrap();
         assert_eq!(m.alloc.is_used(page(0)), true);
@@ -1912,7 +1914,7 @@ mod tests {
         assert_eq!(m.alloc.is_used(page(3)), false);
 
         let data = dummy_data(PAGE_MAX_PAYLOAD_SIZE * 3);
-        let mut w = m.write(0).await.unwrap();
+        let mut w = m.write(&mut pr, 0).await.unwrap();
         w.write(&mut m, &data).await.unwrap();
         assert_eq!(m.alloc.is_used(page(0)), true);
         assert_eq!(m.alloc.is_used(page(1)), true);
@@ -1948,7 +1950,7 @@ mod tests {
         assert_eq!(m.alloc.is_used(page(1)), false);
 
         let data = dummy_data(24);
-        let mut w = m.write(0).await.unwrap();
+        let mut w = m.write(&mut pr, 0).await.unwrap();
         w.write(&mut m, &data).await.unwrap();
         m.commit(&mut w).await.unwrap();
         assert_eq!(m.alloc.is_used(page(0)), true); // old meta, appended in-place.
@@ -1956,7 +1958,7 @@ mod tests {
         assert_eq!(m.alloc.is_used(page(2)), false);
         assert_eq!(m.alloc.is_used(page(3)), false);
 
-        let mut w = m.write(0).await.unwrap();
+        let mut w = m.write(&mut pr, 0).await.unwrap();
         w.write(&mut m, &data).await.unwrap();
         assert_eq!(m.alloc.is_used(page(0)), true);
         assert_eq!(m.alloc.is_used(page(1)), true);
@@ -1987,10 +1989,10 @@ mod tests {
 
         let data = dummy_data(32);
 
-        let mut w1 = m.write(1).await.unwrap();
+        let mut w1 = m.write(&mut pr, 1).await.unwrap();
         w1.write(&mut m, &data).await.unwrap();
 
-        let mut w2 = m.write(2).await.unwrap();
+        let mut w2 = m.write(&mut pr, 2).await.unwrap();
         w2.write(&mut m, &data).await.unwrap();
 
         m.commit(&mut w2).await.unwrap();
@@ -2037,7 +2039,7 @@ mod tests {
         assert_eq!(m.file_flags(1), 0x00);
 
         // flags for nonempty files get set properly.
-        let mut w = m.write(1).await.unwrap();
+        let mut w = m.write(&mut pr, 1).await.unwrap();
         w.write(&mut m, &[0x00]).await.unwrap();
         let mut tx = m.transaction();
         w.commit(&mut tx).await.unwrap();
@@ -2046,7 +2048,7 @@ mod tests {
         assert_eq!(m.file_flags(1), 0x42);
 
         // when writing to a file, old flags are kept if we don't `.set_flags()`
-        let mut w = m.write(1).await.unwrap();
+        let mut w = m.write(&mut pr, 1).await.unwrap();
         w.write(&mut m, &[0x00]).await.unwrap();
         m.commit(&mut w).await.unwrap();
         assert_eq!(m.file_flags(1), 0x42);
@@ -2076,7 +2078,7 @@ mod tests {
         m.format().await.unwrap();
         m.mount(&mut pr).await.unwrap();
 
-        let mut w = m.write(1).await.unwrap();
+        let mut w = m.write(&mut pr, 1).await.unwrap();
         w.write(&mut m, &[0x00]).await.unwrap();
         w.record_end();
         m.commit(&mut w).await.unwrap();
@@ -2094,7 +2096,7 @@ mod tests {
         m.format().await.unwrap();
         m.mount(&mut pr).await.unwrap();
 
-        let mut w = m.write(1).await.unwrap();
+        let mut w = m.write(&mut pr, 1).await.unwrap();
         w.write(&mut m, &[0x00]).await.unwrap();
         w.record_end();
         w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE + 1]).await.unwrap();
@@ -2118,7 +2120,7 @@ mod tests {
         m.format().await.unwrap();
         m.mount(&mut pr).await.unwrap();
 
-        let mut w = m.write(1).await.unwrap();
+        let mut w = m.write(&mut pr, 1).await.unwrap();
         w.write(&mut m, &[0x00]).await.unwrap();
         w.record_end();
         w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE + 1]).await.unwrap();
@@ -2144,7 +2146,7 @@ mod tests {
         m.format().await.unwrap();
         m.mount(&mut pr).await.unwrap();
 
-        let mut w = m.write(1).await.unwrap();
+        let mut w = m.write(&mut pr, 1).await.unwrap();
         w.write(&mut m, &[0x00]).await.unwrap();
         w.record_end();
         w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE * 2 + 1]).await.unwrap();
@@ -2172,7 +2174,7 @@ mod tests {
         m.format().await.unwrap();
         m.mount(&mut pr).await.unwrap();
 
-        let mut w = m.write(1).await.unwrap();
+        let mut w = m.write(&mut pr, 1).await.unwrap();
         w.write(&mut m, &[0x00]).await.unwrap();
         w.record_end();
         w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE * 2 + 1]).await.unwrap();
@@ -2210,7 +2212,7 @@ mod tests {
         m.format().await.unwrap();
         m.mount(&mut pr).await.unwrap();
 
-        let mut w = m.write(1).await.unwrap();
+        let mut w = m.write(&mut pr, 1).await.unwrap();
         w.write(&mut m, &[0x00]).await.unwrap();
         w.record_end();
         w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE * 2 + 1]).await.unwrap();
@@ -2255,7 +2257,7 @@ mod tests {
         m.format().await.unwrap();
         m.mount(&mut pr).await.unwrap();
 
-        let mut w = m.write(1).await.unwrap();
+        let mut w = m.write(&mut pr, 1).await.unwrap();
         w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE]).await.unwrap();
         w.record_end();
         w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE]).await.unwrap();
@@ -2298,7 +2300,7 @@ mod tests {
         m.format().await.unwrap();
         m.mount(&mut pr).await.unwrap();
 
-        let mut w = m.write(1).await.unwrap();
+        let mut w = m.write(&mut pr, 1).await.unwrap();
         w.write(&mut m, &[0x00]).await.unwrap();
         m.commit(&mut w).await.unwrap();
 
@@ -2317,7 +2319,7 @@ mod tests {
         m.format().await.unwrap();
         m.mount(&mut pr).await.unwrap();
 
-        let mut w = m.write(1).await.unwrap();
+        let mut w = m.write(&mut pr, 1).await.unwrap();
         for _ in 0..2 {
             w.write(&mut m, &[0x00; PAGE_MAX_PAYLOAD_SIZE]).await.unwrap();
             w.record_end();
@@ -2345,7 +2347,7 @@ mod tests {
         m.format().await.unwrap();
         m.mount(&mut pr).await.unwrap();
 
-        let mut w = m.write(1).await.unwrap();
+        let mut w = m.write(&mut pr, 1).await.unwrap();
         w.write(&mut m, &[0x00; 238]).await.unwrap();
         w.record_end();
         m.commit(&mut w).await.unwrap();
@@ -2365,7 +2367,7 @@ mod tests {
         m.format().await.unwrap();
         m.mount(&mut pr).await.unwrap();
 
-        let mut w = m.write(1).await.unwrap();
+        let mut w = m.write(&mut pr, 1).await.unwrap();
         w.write(&mut m, &[0x00; 4348]).await.unwrap();
         w.record_end();
         m.commit(&mut w).await.unwrap();
@@ -2385,7 +2387,7 @@ mod tests {
         m.format().await.unwrap();
         m.mount(&mut pr).await.unwrap();
 
-        let mut w = m.write(1).await.unwrap();
+        let mut w = m.write(&mut pr, 1).await.unwrap();
         w.write(&mut m, &[0x00; 4348]).await.unwrap();
         w.record_end();
         w.write(&mut m, &[0x00; 4348]).await.unwrap();
@@ -2418,7 +2420,7 @@ mod tests {
         m.format().await.unwrap();
         m.mount(&mut pr).await.unwrap();
 
-        let mut w = m.write(1).await.unwrap();
+        let mut w = m.write(&mut pr, 1).await.unwrap();
         w.write(&mut m, &[0x00; 4348]).await.unwrap();
         w.record_end();
         w.write(&mut m, &[0x00; 4348]).await.unwrap();
@@ -2479,7 +2481,7 @@ mod tests {
         m.mount(&mut pr).await.unwrap();
 
         const N: usize = PAGE_MAX_PAYLOAD_SIZE + 3;
-        let mut w = m.write(1).await.unwrap();
+        let mut w = m.write(&mut pr, 1).await.unwrap();
         w.write(&mut m, &[0x00; N]).await.unwrap();
         w.record_end();
         w.write(&mut m, &[0x00; N]).await.unwrap();
@@ -2530,7 +2532,7 @@ mod tests {
 
         let count: u32 = 20000 / 4;
 
-        let mut w = m.write(1).await.unwrap();
+        let mut w = m.write(&mut pr, 1).await.unwrap();
         for i in 1..=count {
             w.write(&mut m, &i.to_le_bytes()).await.unwrap();
             // make records not line up with page boundaries.
@@ -2622,7 +2624,7 @@ mod tests {
 
                     let data: Vec<_> = (0..n).map(|i| (seq_max + i) as u8).collect();
 
-                    let mut w = m.write(file_id).await.unwrap();
+                    let mut w = m.write(&mut pr, file_id).await.unwrap();
                     w.write(&mut m, &data).await.unwrap();
                     m.commit(&mut w).await.unwrap();
 
