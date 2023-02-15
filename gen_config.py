@@ -41,6 +41,7 @@ feature("max_key_size", default=64, min=1, max=1024, pow2=True)
 feature("max_value_size", default=1024, min=1, max=65536, pow2=True)
 
 feature("scratch_page_count", default=4, min=0, max=65536, pow2=True)
+feature("branching_factor", default=2, min=2, max=4)
 
 # ========= Update Cargo.toml
 

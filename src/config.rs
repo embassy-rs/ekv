@@ -39,7 +39,7 @@ pub(crate) const SKIPLIST_LEN: usize = MAX_PAGE_COUNT.ilog2() as usize - 2;
 pub(crate) const SKIPLIST_SHIFT: usize = PAGE_MAX_PAYLOAD_SIZE.ilog2() as usize + 1;
 
 // ======== File tree parameters
-pub(crate) const BRANCHING_FACTOR: usize = 2; // must be 2 or higher
+pub(crate) const BRANCHING_FACTOR: usize = raw::BRANCHING_FACTOR; // must be 2 or higher
 pub(crate) const LEVEL_COUNT: usize = MAX_PAGE_COUNT.ilog(BRANCHING_FACTOR) as usize;
 pub(crate) const FILE_COUNT: usize = BRANCHING_FACTOR * LEVEL_COUNT + 1;
 
@@ -69,6 +69,8 @@ pub type FileID = u8;
 #[allow(clippy::assertions_on_constants)]
 const _CHECKS: () = {
     // using core::assert to avoid using defmt, because it doesn't work in const.
+
+    core::assert!(BRANCHING_FACTOR >= 2 && BRANCHING_FACTOR <= 4);
 
     // Only align 1, 2, 4 is supported for now.
     // We only align data. Header sizes are aligned to 4 but not 8.
