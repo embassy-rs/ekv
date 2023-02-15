@@ -39,7 +39,7 @@ pub(crate) const SKIPLIST_LEN: usize = MAX_PAGE_COUNT.ilog2() as usize - 2;
 pub(crate) const SKIPLIST_SHIFT: usize = PAGE_MAX_PAYLOAD_SIZE.ilog2() as usize + 1;
 
 // ======== File tree parameters
-pub(crate) const BRANCHING_FACTOR: usize = 3; // must be 2 or higher
+pub(crate) const BRANCHING_FACTOR: usize = 2; // must be 2 or higher
 pub(crate) const LEVEL_COUNT: usize = MAX_PAGE_COUNT.ilog(BRANCHING_FACTOR) as usize;
 pub(crate) const FILE_COUNT: usize = BRANCHING_FACTOR * LEVEL_COUNT + 1;
 
