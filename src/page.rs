@@ -86,58 +86,20 @@ pub async fn read_header<F: Flash, H: Header>(flash: &mut F, page_id: PageID) ->
     Ok(header)
 }
 
-pub struct PageReader {
+pub struct ChunkIter {
     page_id: PageID,
-
-    /// sum of lengths of all previous chunks (not counting current one)
-    prev_chunks_len: usize,
 
     /// true if we've reached the end of the page.
     at_end: bool,
-
+    /// sum of lengths of all previous chunks (not counting current one)
+    prev_chunks_len: usize,
     /// Offset where the chunk we're currently writing starts.
     chunk_offset: usize,
-    /// pos within the current chunk.
-    chunk_pos: usize,
-    /// Data bytes in the chunk we're currently writing.
+    /// Data bytes in the curremtchunk.
     chunk_len: usize,
-
-    /// Data in the current chunk.
-    buf: [u8; MAX_CHUNK_SIZE],
 }
 
-impl PageReader {
-    pub const fn new() -> Self {
-        PageReader {
-            page_id: PageID::zero(),
-            prev_chunks_len: 0,
-            at_end: true,
-            chunk_offset: 0,
-            chunk_len: 0,
-            chunk_pos: 0,
-            buf: [0u8; MAX_CHUNK_SIZE],
-        }
-    }
-
-    pub async fn open<F: Flash, H: Header>(&mut self, flash: &mut F, page_id: PageID) -> Result<H, Error<F::Error>> {
-        trace!("page: read {:?}", page_id);
-        let header = read_header(flash, page_id).await?;
-
-        self.page_id = page_id;
-        self.prev_chunks_len = 0;
-        self.at_end = false;
-        self.chunk_offset = PageHeader::SIZE + size_of::<H>();
-        self.chunk_len = 0;
-        self.chunk_pos = 0;
-        self.buf = [0u8; MAX_CHUNK_SIZE];
-        self.open_chunk(flash).await?;
-        Ok(header)
-    }
-
-    pub fn page_id(&self) -> PageID {
-        self.page_id
-    }
-
+impl ChunkIter {
     async fn next_chunk<F: Flash>(&mut self, flash: &mut F) -> Result<bool, Error<F::Error>> {
         self.chunk_offset += ChunkHeader::SIZE + align_up(self.chunk_len);
         self.open_chunk(flash).await
@@ -171,30 +133,85 @@ impl PageReader {
 
         trace!("open chunk at offs={} len={}", self.chunk_offset, header.len);
 
-        self.chunk_pos = 0;
         self.chunk_len = header.len as usize;
 
-        let n = align_up(self.chunk_len);
+        Ok(true)
+    }
+}
+
+pub struct PageReader {
+    ch: ChunkIter,
+    /// pos within the current chunk.
+    chunk_pos: usize,
+
+    /// Data in the current chunk.
+    buf: [u8; MAX_CHUNK_SIZE],
+}
+
+impl PageReader {
+    pub const fn new() -> Self {
+        PageReader {
+            ch: ChunkIter {
+                page_id: PageID::zero(),
+                prev_chunks_len: 0,
+                at_end: true,
+                chunk_offset: 0,
+                chunk_len: 0,
+            },
+            chunk_pos: 0,
+            buf: [0u8; MAX_CHUNK_SIZE],
+        }
+    }
+
+    pub async fn open<F: Flash, H: Header>(&mut self, flash: &mut F, page_id: PageID) -> Result<H, Error<F::Error>> {
+        trace!("page: read {:?}", page_id);
+        let header = read_header(flash, page_id).await?;
+
+        self.ch.page_id = page_id;
+        self.ch.prev_chunks_len = 0;
+        self.ch.at_end = false;
+        self.ch.chunk_offset = PageHeader::SIZE + size_of::<H>();
+        self.ch.chunk_len = 0;
+        self.chunk_pos = 0;
+        self.ch.open_chunk(flash).await?;
+        self.load_chunk(flash).await?;
+        Ok(header)
+    }
+
+    async fn load_chunk<F: Flash>(&mut self, flash: &mut F) -> Result<(), Error<F::Error>> {
+        self.chunk_pos = 0;
+        let n = align_up(self.ch.chunk_len);
         flash
             .read(
-                self.page_id as _,
-                self.chunk_offset + ChunkHeader::SIZE,
+                self.ch.page_id as _,
+                self.ch.chunk_offset + ChunkHeader::SIZE,
                 &mut self.buf[..n],
             )
             .await
             .map_err(Error::Flash)?;
+        Ok(())
+    }
 
+    async fn next_chunk<F: Flash>(&mut self, flash: &mut F) -> Result<bool, Error<F::Error>> {
+        if !self.ch.next_chunk(flash).await? {
+            return Ok(false);
+        }
+        self.load_chunk(flash).await?;
         Ok(true)
     }
 
+    pub fn page_id(&self) -> PageID {
+        self.ch.page_id
+    }
+
     pub async fn read<F: Flash>(&mut self, flash: &mut F, data: &mut [u8]) -> Result<usize, Error<F::Error>> {
-        trace!("PageReader({:?}): read({})", self.page_id, data.len());
-        if self.at_end || data.is_empty() {
+        trace!("PageReader({:?}): read({})", self.ch.page_id, data.len());
+        if self.ch.at_end || data.is_empty() {
             trace!("read: at end or zero len");
             return Ok(0);
         }
 
-        if self.chunk_pos == self.chunk_len {
+        if self.chunk_pos == self.ch.chunk_len {
             trace!("read: at end of chunk");
             if !self.next_chunk(flash).await? {
                 trace!("read: no next chunk, we're at end.");
@@ -202,7 +219,7 @@ impl PageReader {
             }
         }
 
-        let n = data.len().min(self.chunk_len - self.chunk_pos);
+        let n = data.len().min(self.ch.chunk_len - self.chunk_pos);
         data[..n].copy_from_slice(&self.buf[self.chunk_pos..][..n]);
         self.chunk_pos += n;
         trace!("read: done, n={}", n);
@@ -210,13 +227,13 @@ impl PageReader {
     }
 
     pub async fn skip<F: Flash>(&mut self, flash: &mut F, len: usize) -> Result<usize, Error<F::Error>> {
-        trace!("PageReader({:?}): skip({})", self.page_id, len);
-        if self.at_end || len == 0 {
+        trace!("PageReader({:?}): skip({})", self.ch.page_id, len);
+        if self.ch.at_end || len == 0 {
             trace!("skip: at end or zero len");
             return Ok(0);
         }
 
-        if self.chunk_pos == self.chunk_len {
+        if self.chunk_pos == self.ch.chunk_len {
             trace!("skip: at end of chunk");
             if !self.next_chunk(flash).await? {
                 trace!("skip: no next chunk, we're at end.");
@@ -224,18 +241,18 @@ impl PageReader {
             }
         }
 
-        let n = len.min(self.chunk_len - self.chunk_pos);
-        self.prev_chunks_len += n;
+        let n = len.min(self.ch.chunk_len - self.chunk_pos);
+        self.ch.prev_chunks_len += n;
         self.chunk_pos += n;
         trace!("skip: done, n={}", n);
         Ok(n)
     }
 
     pub async fn is_at_eof<F: Flash>(&mut self, flash: &mut F) -> Result<bool, Error<F::Error>> {
-        if self.at_end {
+        if self.ch.at_end {
             return Ok(true);
         }
-        if self.chunk_pos == self.chunk_len && !self.next_chunk(flash).await? {
+        if self.chunk_pos == self.ch.chunk_len && !self.next_chunk(flash).await? {
             return Ok(true);
         }
         Ok(false)
@@ -282,12 +299,17 @@ impl<H: Header> PageWriter<H> {
         self.chunk_pos = 0;
     }
 
-    pub async fn open_append<F: Flash>(&mut self, flash: &mut F, page_id: PageID) -> Result<H, Error<F::Error>> {
+    pub async fn open_append<F: Flash>(&mut self, flash: &mut F, page_id: PageID) -> Result<(), Error<F::Error>> {
         trace!("page: write_append {:?}", page_id);
 
-        // TODO: don't use a full PageReader, read just the chunk headers.
-        let mut r = PageReader::new();
-        let header = r.open(flash, page_id).await?;
+        let mut r = ChunkIter {
+            page_id,
+            prev_chunks_len: 0,
+            at_end: false,
+            chunk_offset: PageHeader::SIZE + size_of::<H>(),
+            chunk_len: 0,
+        };
+        r.open_chunk(flash).await?;
         while !r.at_end {
             r.next_chunk(flash).await?;
         }
@@ -324,7 +346,7 @@ impl<H: Header> PageWriter<H> {
         self.chunk_offset = r.chunk_offset;
         self.chunk_pos = 0;
 
-        Ok(header)
+        Ok(())
     }
 
     #[allow(clippy::len_without_is_empty)]
