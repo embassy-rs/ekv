@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use ekv::config::{MAX_PAGE_COUNT, PAGE_SIZE};
 use ekv::flash::MemFlash;
-use ekv::{Config, Database};
+use ekv::{Config, Database, ReadError};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use rand::Rng;
 
@@ -91,9 +91,12 @@ async fn main() {
         for key in &keys {
             log::debug!("read {:02x?}", key);
             let mut rtx = db.read_transaction().await;
-            let n = rtx.read(key, &mut buf).await.unwrap();
-            let got_val = &buf[..n];
-            let val = m.get(key).map(|v| &v[..]).unwrap_or(&[]);
+            let got_val = match rtx.read(key, &mut buf).await {
+                Ok(n) => Some(&buf[..n]),
+                Err(ReadError::KeyNotFound) => None,
+                Err(e) => panic!("{:?}", e),
+            };
+            let val = m.get(key).map(|v| &v[..]);
 
             if val != got_val {
                 panic!(
@@ -110,9 +113,12 @@ async fn main() {
 
     for key in &keys {
         let mut rtx = db.read_transaction().await;
-        let n = rtx.read(key, &mut buf).await.unwrap();
-        let got_val = &buf[..n];
-        let val = m.get(key).map(|v| &v[..]).unwrap_or(&[]);
+        let got_val = match rtx.read(key, &mut buf).await {
+            Ok(n) => Some(&buf[..n]),
+            Err(ReadError::KeyNotFound) => None,
+            Err(e) => panic!("{:?}", e),
+        };
+        let val = m.get(key).map(|v| &v[..]);
 
         if val != got_val {
             panic!(

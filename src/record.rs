@@ -221,6 +221,14 @@ impl<'a, F: Flash + 'a, M: RawMutex + 'a> Drop for WriteTransaction<'a, F, M> {
 
 impl<'a, F: Flash + 'a, M: RawMutex + 'a> WriteTransaction<'a, F, M> {
     pub async fn write(&mut self, key: &[u8], value: &[u8]) -> Result<(), WriteError<F::Error>> {
+        self.write_inner(key, value, false).await
+    }
+
+    pub async fn delete(&mut self, key: &[u8]) -> Result<(), WriteError<F::Error>> {
+        self.write_inner(key, &[], true).await
+    }
+
+    pub async fn write_inner(&mut self, key: &[u8], value: &[u8], is_delete: bool) -> Result<(), WriteError<F::Error>> {
         let is_first_write = match self.state {
             WriteTransactionState::Canceled => return Err(WriteError::TransactionCanceled),
             WriteTransactionState::Created => true,
@@ -245,7 +253,7 @@ impl<'a, F: Flash + 'a, M: RawMutex + 'a> WriteTransaction<'a, F, M> {
         if is_first_write {
             db.rollback_if_any().await?;
         }
-        db.write(key, value).await?;
+        db.write(key, value, is_delete).await?;
 
         self.state = WriteTransactionState::InProgress;
 
@@ -325,7 +333,7 @@ impl<F: Flash> Inner<F> {
                 return Ok(res);
             }
         }
-        Ok(0)
+        Err(ReadError::KeyNotFound)
     }
 
     async fn read_in_file(
@@ -364,6 +372,9 @@ impl<F: Flash> Inner<F> {
             // Found?
             let dir = match got_key[..].cmp(key) {
                 Ordering::Equal => {
+                    if header.is_delete {
+                        return Err(ReadError::KeyNotFound);
+                    }
                     if header.value_len > value.len() {
                         return Err(ReadError::BufferTooSmall);
                     }
@@ -406,6 +417,9 @@ impl<F: Flash> Inner<F> {
             // Found?
             match got_key[..].cmp(key) {
                 Ordering::Equal => {
+                    if header.is_delete {
+                        return Err(ReadError::KeyNotFound);
+                    }
                     if header.value_len > value.len() {
                         return Err(ReadError::BufferTooSmall);
                     }
@@ -449,7 +463,7 @@ impl<F: Flash> Inner<F> {
         Ok(())
     }
 
-    async fn write(&mut self, key: &[u8], value: &[u8]) -> Result<(), WriteError<F::Error>> {
+    async fn write(&mut self, key: &[u8], value: &[u8], is_delete: bool) -> Result<(), WriteError<F::Error>> {
         self.ensure_write_transaction_started().await?;
         let tx = self.write_tx.as_mut().unwrap();
 
@@ -461,7 +475,7 @@ impl<F: Flash> Inner<F> {
         tx.last_key = Some(Vec::from_slice(key).unwrap());
 
         let header = RecordHeader {
-            is_delete: false,
+            is_delete,
             key_len: key.len(),
             value_len: value.len(),
         };
@@ -763,9 +777,8 @@ impl<F: Flash> Inner<F> {
 
                     progress = true;
 
-                    // if we're compacting to the topmost level, do not write tombstone
-                    // records (records for deleted keys, ie val_len=0)
-                    if topmost && k[i].header.value_len == 0 {
+                    // if we're compacting to the topmost level, do not write tombstone records
+                    if topmost && k[i].header.is_delete {
                         trace!("do_compact: skipping tombstone.");
                     } else {
                         w.write(m, &k[i].header.encode()).await?;
@@ -999,6 +1012,22 @@ mod tests {
         assert_eq!(&buf[..n], value);
     }
 
+    async fn check_not_found<F: Flash>(db: &Database<F, NoopRawMutex>, key: &[u8])
+    where
+        F::Error: PartialEq,
+    {
+        let mut rtx = db.read_transaction().await;
+        assert_eq!(rtx.read(key, &mut []).await, Err(ReadError::KeyNotFound));
+    }
+
+    async fn compact(db: &Database<impl Flash, NoopRawMutex>) -> bool {
+        let mut work = false;
+        while db.inner.lock().await.compact().await.unwrap() {
+            work = true
+        }
+        work
+    }
+
     #[test_log::test(tokio::test)]
     async fn test() {
         let mut f = MemFlash::new();
@@ -1012,7 +1041,7 @@ mod tests {
 
         check_read(&db, b"foo", b"1234").await;
         check_read(&db, b"bar", b"4321").await;
-        check_read(&db, b"baz", b"").await;
+        check_not_found(&db, b"baz").await;
 
         let mut wtx = db.write_transaction().await;
         wtx.write(b"bar", b"8765").await.unwrap();
@@ -1051,11 +1080,61 @@ mod tests {
         wtx.commit().await.unwrap();
 
         // force compact, to check it handles empty key fine.
-        assert_eq!(db.inner.lock().await.compact().await.unwrap(), true);
+        compact(&db).await;
 
         check_read(&db, b"", b"bbbb").await;
         check_read(&db, b"foo", b"1234").await;
+        check_not_found(&db, b"baz").await;
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_empty_value() {
+        let mut f = MemFlash::new();
+        let db = Database::new(&mut f, Config::default());
+        db.format().await.unwrap();
+
+        let mut wtx = db.write_transaction().await;
+        wtx.write(b"", b"aaaa").await.unwrap();
+        wtx.write(b"bar", b"barbar").await.unwrap();
+        wtx.write(b"foo", b"").await.unwrap();
+        wtx.commit().await.unwrap();
+
+        let mut wtx = db.write_transaction().await;
+        wtx.write(b"", b"").await.unwrap();
+        wtx.write(b"baz", b"").await.unwrap();
+        wtx.commit().await.unwrap();
+
+        // force compact, to check it handles empty values fine.
+        compact(&db).await;
+
+        check_read(&db, b"", b"").await;
+        check_read(&db, b"foo", b"").await;
+        check_read(&db, b"bar", b"barbar").await;
         check_read(&db, b"baz", b"").await;
+        check_not_found(&db, b"lol").await;
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_delete() {
+        let mut f = MemFlash::new();
+        let db = Database::new(&mut f, Config::default());
+        db.format().await.unwrap();
+
+        let mut wtx = db.write_transaction().await;
+        wtx.write(b"", b"").await.unwrap();
+        wtx.commit().await.unwrap();
+
+        check_read(&db, b"", b"").await;
+
+        let mut wtx = db.write_transaction().await;
+        wtx.delete(b"").await.unwrap();
+        wtx.commit().await.unwrap();
+
+        check_not_found(&db, b"").await;
+
+        compact(&db).await;
+
+        check_not_found(&db, b"").await;
     }
 
     #[test_log::test(tokio::test)]
@@ -1064,18 +1143,18 @@ mod tests {
         let db = Database::new(&mut f, Config::default());
         db.format().await.unwrap();
 
-        check_read(&db, b"foo", b"").await;
-        check_read(&db, b"bar", b"").await;
+        check_not_found(&db, b"foo").await;
+        check_not_found(&db, b"bar").await;
 
         let mut wtx = db.write_transaction().await;
 
         wtx.write(b"bar", b"1234").await.unwrap();
-        check_read(&db, b"foo", b"").await;
-        check_read(&db, b"bar", b"").await;
+        check_not_found(&db, b"foo").await;
+        check_not_found(&db, b"bar").await;
 
         wtx.write(b"foo", b"4321").await.unwrap();
-        check_read(&db, b"foo", b"").await;
-        check_read(&db, b"bar", b"").await;
+        check_not_found(&db, b"foo").await;
+        check_not_found(&db, b"bar").await;
 
         wtx.commit().await.unwrap();
 
@@ -1093,13 +1172,13 @@ mod tests {
         wtx.write(b"foo", b"4321").await.unwrap();
         drop(wtx);
 
-        check_read(&db, b"foo", b"").await;
+        check_not_found(&db, b"foo").await;
 
         let mut wtx = db.write_transaction().await;
         wtx.write(b"bar", b"4321").await.unwrap();
         wtx.commit().await.unwrap();
 
-        check_read(&db, b"foo", b"").await;
+        check_not_found(&db, b"foo").await;
         check_read(&db, b"bar", b"4321").await;
     }
 
@@ -1345,7 +1424,7 @@ mod tests {
 
             check_read(&db, b"foo", b"1234").await;
             check_read(&db, b"bar", b"4321").await;
-            check_read(&db, b"baz", b"").await;
+            check_not_found(&db, b"baz").await;
 
             let mut wtx = db.write_transaction().await;
             wtx.write(b"bar", b"8765").await.unwrap();
@@ -1379,6 +1458,33 @@ mod tests {
     }
 
     #[test_log::test(tokio::test)]
+    async fn test_compact() {
+        let mut f = MemFlash::new();
+        let db = Database::<_, NoopRawMutex>::new(&mut f, Config::default());
+        db.format().await.unwrap();
+
+        // Write the key
+        let mut wtx = db.write_transaction().await;
+        wtx.write(b"foo", b"4321").await.unwrap();
+        wtx.commit().await.unwrap();
+
+        // force compact all the way.
+        compact(&db).await;
+
+        // Then erase it.
+        let mut wtx = db.write_transaction().await;
+        wtx.write(b"bar", b"6666").await.unwrap();
+        wtx.write(b"foo", b"5555").await.unwrap();
+        wtx.commit().await.unwrap();
+
+        // force compact all the way.
+        compact(&db).await;
+
+        check_read(&db, b"foo", b"5555").await;
+        check_read(&db, b"bar", b"6666").await;
+    }
+
+    #[test_log::test(tokio::test)]
     async fn test_compact_removes_tombstones() {
         let mut f = MemFlash::new();
         let db = Database::<_, NoopRawMutex>::new(&mut f, Config::default());
@@ -1390,15 +1496,15 @@ mod tests {
         wtx.commit().await.unwrap();
 
         // force compact all the way.
-        while db.inner.lock().await.compact().await.unwrap() {}
+        compact(&db).await;
 
         // Then erase it.
         let mut wtx = db.write_transaction().await;
-        wtx.write(b"foo", b"").await.unwrap();
+        wtx.delete(b"foo").await.unwrap();
         wtx.commit().await.unwrap();
 
         // force compact all the way.
-        while db.inner.lock().await.compact().await.unwrap() {}
+        compact(&db).await;
 
         let dbi = db.inner.lock().await;
         assert!((0..FILE_COUNT).all(|i| dbi.files.is_empty(i as _)));

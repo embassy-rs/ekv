@@ -41,6 +41,7 @@ impl<E> From<Error<E>> for MountError<E> {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum ReadError<E> {
+    KeyNotFound,
     KeyTooBig,
     BufferTooSmall,
     Corrupted,
