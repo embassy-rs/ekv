@@ -49,6 +49,8 @@ pub const MAX_VALUE_SIZE: usize = raw::MAX_VALUE_SIZE;
 
 pub(crate) const KEY_SIZE_BITS: u32 = (MAX_KEY_SIZE + 1).next_power_of_two().ilog2();
 pub(crate) const VALUE_SIZE_BITS: u32 = (MAX_VALUE_SIZE + 1).next_power_of_two().ilog2();
+const RECORD_HEADER_BITS: u32 = 1 + KEY_SIZE_BITS + VALUE_SIZE_BITS;
+pub(crate) const RECORD_HEADER_SIZE: usize = (RECORD_HEADER_BITS as usize + 7) / 8;
 
 pub const SCRATCH_PAGE_COUNT: usize = raw::SCRATCH_PAGE_COUNT;
 
@@ -95,7 +97,7 @@ const _CHECKS: () = {
     core::assert!(MAX_KEY_SIZE > 0);
     core::assert!(MAX_VALUE_SIZE > 0);
 
-    core::assert!(1 + VALUE_SIZE_BITS + KEY_SIZE_BITS <= 32);
+    core::assert!(RECORD_HEADER_SIZE <= 4);
 };
 
 pub fn dump() {
@@ -119,10 +121,11 @@ pub fn dump() {
         BRANCHING_FACTOR, LEVEL_COUNT, FILE_COUNT
     );
     debug!(
-        "max_key_size={}, max_value_size={}, max_record_size={} ({} pages)",
+        "max_key_size={}, max_value_size={}, record_header_size={}, max_record_size={} ({} pages)",
         MAX_KEY_SIZE,
         MAX_VALUE_SIZE,
         MAX_RECORD_SIZE,
+        RECORD_HEADER_SIZE,
         (MAX_RECORD_SIZE + PAGE_MAX_PAYLOAD_SIZE - 1) / PAGE_MAX_PAYLOAD_SIZE
     );
     debug!(

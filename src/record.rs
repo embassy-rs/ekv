@@ -343,7 +343,7 @@ impl<F: Flash> Inner<F> {
         // Binary search
         let mut ok = s.start(m).await?;
         while ok {
-            let mut header = [0; 4];
+            let mut header = [0; RECORD_HEADER_SIZE];
             match s.reader().read(m, &mut header).await {
                 Ok(()) => {}
                 Err(PageReadError::Eof) => return Ok(None), // key not present.
@@ -385,7 +385,7 @@ impl<F: Flash> Inner<F> {
 
         // Linear search
         loop {
-            let mut header = [0; 4];
+            let mut header = [0; RECORD_HEADER_SIZE];
             match r.read(m, &mut header).await {
                 Ok(()) => {}
                 Err(PageReadError::Eof) => return Ok(None), // key not present.
@@ -666,7 +666,7 @@ impl<F: Flash> Inner<F> {
             r: &mut FileReader<'_>,
             buf: &mut KeySlot,
         ) -> Result<(), Error<F::Error>> {
-            let mut header = [0; 4];
+            let mut header = [0; RECORD_HEADER_SIZE];
             match r.read(m, &mut header).await {
                 Ok(()) => {}
                 Err(PageReadError::Flash(e)) => return Err(Error::Flash(e)),
@@ -851,7 +851,7 @@ impl<F: Flash> Inner<F> {
         loop {
             let seq = r.curr_seq(&mut self.files);
 
-            let mut header = [0; 4];
+            let mut header = [0; RECORD_HEADER_SIZE];
             match r.read(&mut self.files, &mut header).await {
                 Ok(()) => {}
                 Err(PageReadError::Flash(e)) => return Err(Error::Flash(e)),
@@ -912,11 +912,13 @@ pub(crate) struct RecordHeader {
 }
 
 impl RecordHeader {
-    pub fn decode(raw: [u8; 4]) -> Self {
-        let raw = u32::from_le_bytes(raw);
+    pub fn decode(raw: [u8; RECORD_HEADER_SIZE]) -> Self {
+        let mut raw2 = [0u8; 4];
+        raw2[..RECORD_HEADER_SIZE].copy_from_slice(&raw);
+        let raw = u32::from_le_bytes(raw2);
         let key_len = raw & ((1 << KEY_SIZE_BITS) - 1);
         let value_len = (raw >> KEY_SIZE_BITS) & ((1 << VALUE_SIZE_BITS) - 1);
-        let is_delete = (raw >> 31) & 1 != 0;
+        let is_delete = (raw >> (KEY_SIZE_BITS + VALUE_SIZE_BITS)) & 1 != 0;
         Self {
             is_delete,
             key_len: key_len as usize,
@@ -924,11 +926,13 @@ impl RecordHeader {
         }
     }
 
-    pub fn encode(self) -> [u8; 4] {
+    pub fn encode(self) -> [u8; RECORD_HEADER_SIZE] {
         assert!(self.key_len <= MAX_KEY_SIZE);
         assert!(self.value_len <= MAX_VALUE_SIZE);
-        let res = (self.key_len as u32) | ((self.value_len as u32) << KEY_SIZE_BITS) | ((self.is_delete as u32) << 31);
-        res.to_le_bytes()
+        let res = (self.key_len as u32)
+            | ((self.value_len as u32) << KEY_SIZE_BITS)
+            | ((self.is_delete as u32) << (KEY_SIZE_BITS + VALUE_SIZE_BITS));
+        res.to_le_bytes()[..RECORD_HEADER_SIZE].try_into().unwrap()
     }
 
     pub const fn record_size(self) -> usize {
