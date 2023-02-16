@@ -2,13 +2,12 @@
 
 use std::collections::HashMap;
 
+use ekv::config::MAX_VALUE_SIZE;
 use ekv::flash::MemFlash;
 use ekv::{Config, Database, WriteError};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-
-const VAL_MAX_LEN: usize = 2500;
 
 fuzz_target!(|data: Input| { fuzz(data) });
 
@@ -49,14 +48,14 @@ async fn fuzz_inner(ops: Input) {
     // Mirror hashmap. Should always match F
     let mut m = HashMap::new();
 
-    let mut buf = [0; VAL_MAX_LEN];
+    let mut buf = [0; MAX_VALUE_SIZE];
 
     for (i, op) in ops.ops.into_iter().enumerate() {
         log::info!("==================================================== op: {:?}", op);
 
         match op {
             Op::Insert(op) => {
-                if op.value_len > VAL_MAX_LEN {
+                if op.value_len > MAX_VALUE_SIZE {
                     continue;
                 }
                 let key = op.key.to_be_bytes();

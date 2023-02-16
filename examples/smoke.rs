@@ -73,11 +73,11 @@ async fn main() {
             tx.insert(key, value);
         }
 
-        //println!("write {:?} = {:?}", key, value);
-
         // Write to DB
         let mut wtx = db.write_transaction().await;
+        log::debug!("start tx");
         for (key, value) in &tx {
+            log::debug!("write {:02x?} = {:02x?}", key, value);
             wtx.write(key, value).await.unwrap();
         }
         wtx.commit().await.unwrap();
@@ -89,12 +89,18 @@ async fn main() {
 
         // Check everything
         for key in &keys {
+            log::debug!("read {:02x?}", key);
             let mut rtx = db.read_transaction().await;
             let n = rtx.read(key, &mut buf).await.unwrap();
-            let val1 = &buf[..n];
-            let val2 = m.get(key).map(|v| &v[..]).unwrap_or(&[]);
+            let got_val = &buf[..n];
+            let val = m.get(key).map(|v| &v[..]).unwrap_or(&[]);
 
-            assert_eq!(val1, val2);
+            if val != got_val {
+                panic!(
+                    "mismatch found!\nkey={:02x?}\nwant val={:02x?}\ngot val={:02x?}",
+                    key, val, got_val
+                );
+            }
         }
     }
 
@@ -105,10 +111,15 @@ async fn main() {
     for key in &keys {
         let mut rtx = db.read_transaction().await;
         let n = rtx.read(key, &mut buf).await.unwrap();
-        let val1 = &buf[..n];
-        let val2 = m.get(key).map(|v| &v[..]).unwrap_or(&[]);
+        let got_val = &buf[..n];
+        let val = m.get(key).map(|v| &v[..]).unwrap_or(&[]);
 
-        assert_eq!(val1, val2);
+        if val != got_val {
+            panic!(
+                "mismatch found!\nkey={:02x?}\nwant val={:02x?}\ngot val={:02x?}",
+                key, val, got_val
+            );
+        }
     }
 
     std::fs::write("out.bin", &f.data).unwrap();

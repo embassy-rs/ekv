@@ -1,7 +1,7 @@
 use core::mem::size_of;
 
 use crate::file::{DataHeader, MetaHeader, PAGE_MAX_PAYLOAD_SIZE};
-use crate::record::record_size;
+use crate::record::RecordHeader;
 
 mod raw {
     #![allow(unused)]
@@ -47,6 +47,9 @@ pub(crate) const FILE_COUNT: usize = BRANCHING_FACTOR * LEVEL_COUNT + 1;
 pub const MAX_KEY_SIZE: usize = raw::MAX_KEY_SIZE;
 pub const MAX_VALUE_SIZE: usize = raw::MAX_VALUE_SIZE;
 
+pub(crate) const KEY_SIZE_BITS: u32 = (MAX_KEY_SIZE + 1).next_power_of_two().ilog2();
+pub(crate) const VALUE_SIZE_BITS: u32 = (MAX_VALUE_SIZE + 1).next_power_of_two().ilog2();
+
 pub const SCRATCH_PAGE_COUNT: usize = raw::SCRATCH_PAGE_COUNT;
 
 // Compaction will be stopped when there's this amount of free pages left.
@@ -54,15 +57,20 @@ pub const SCRATCH_PAGE_COUNT: usize = raw::SCRATCH_PAGE_COUNT;
 // There's no point in leaving more pages.
 pub(crate) const MIN_FREE_PAGE_COUNT_COMPACT: usize = 1;
 
-// Compaction will be triggered when there's thisamount of free pages left or less.
-// there's some lower bound to this that guarantees progressive compaction will never get stuck. it's something like:
-// FREE_PAGE_BUFFER_COMMIT + BRANCHING_FACTOR + ceil(max_record_size / page_max_payload_size)
-// TODO: figure out exact formula, prove it
+const MAX_RECORD_SIZE: usize = RecordHeader {
+    is_delete: false,
+    key_len: MAX_KEY_SIZE,
+    value_len: MAX_VALUE_SIZE,
+}
+.record_size();
+
+// Compaction will be triggered when there's this amount of free pages left or less.
+// The calculation here guarantees progressive compaction will never get stuck.
 pub(crate) const MIN_FREE_PAGE_COUNT: usize = 1
     + SCRATCH_PAGE_COUNT
     + MIN_FREE_PAGE_COUNT_COMPACT
     + BRANCHING_FACTOR
-    + (record_size(MAX_KEY_SIZE, MAX_VALUE_SIZE) + PAGE_MAX_PAYLOAD_SIZE - 1) / PAGE_MAX_PAYLOAD_SIZE;
+    + (MAX_RECORD_SIZE + PAGE_MAX_PAYLOAD_SIZE - 1) / PAGE_MAX_PAYLOAD_SIZE; // ceil(MAX_RECORD_SIZE/PAGE_MAX_PAYLOAD_SIZE)
 
 pub type FileID = u8;
 
@@ -83,6 +91,11 @@ const _CHECKS: () = {
 
     // We use u16 for chunk sizes.
     core::assert!(PAGE_MAX_PAYLOAD_SIZE <= u16::MAX as _);
+
+    core::assert!(MAX_KEY_SIZE > 0);
+    core::assert!(MAX_VALUE_SIZE > 0);
+
+    core::assert!(1 + VALUE_SIZE_BITS + KEY_SIZE_BITS <= 32);
 };
 
 pub fn dump() {
@@ -105,13 +118,12 @@ pub fn dump() {
         "branching_factor={}, level_count={}, file_count={}",
         BRANCHING_FACTOR, LEVEL_COUNT, FILE_COUNT
     );
-    let max_record_size = record_size(MAX_KEY_SIZE, MAX_VALUE_SIZE);
     debug!(
         "max_key_size={}, max_value_size={}, max_record_size={} ({} pages)",
         MAX_KEY_SIZE,
         MAX_VALUE_SIZE,
-        max_record_size,
-        (max_record_size + PAGE_MAX_PAYLOAD_SIZE - 1) / PAGE_MAX_PAYLOAD_SIZE
+        MAX_RECORD_SIZE,
+        (MAX_RECORD_SIZE + PAGE_MAX_PAYLOAD_SIZE - 1) / PAGE_MAX_PAYLOAD_SIZE
     );
     debug!(
         "scratch_page_count={}, min_free_page_count={}, min_free_page_count_compact={}",

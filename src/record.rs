@@ -320,6 +320,7 @@ impl<F: Flash> Inner<F> {
         self.files.remount_if_dirty(&mut self.readers[0]).await?;
 
         for file_id in (0..FILE_COUNT).rev() {
+            trace!("read: checking file {}", file_id);
             if let Some(res) = self.read_in_file(file_id as _, key, value).await? {
                 return Ok(res);
             }
@@ -337,19 +338,41 @@ impl<F: Flash> Inner<F> {
         let m = &mut self.files;
         let mut s = FileSearcher::new(r);
 
-        let mut key_buf = Vec::new();
+        let mut key_buf = [0u8; MAX_KEY_SIZE];
 
         // Binary search
         let mut ok = s.start(m).await?;
         while ok {
-            match read_key(m, s.reader(), &mut key_buf).await {
+            let mut header = [0; 4];
+            match s.reader().read(m, &mut header).await {
+                Ok(()) => {}
                 Err(PageReadError::Eof) => return Ok(None), // key not present.
-                x => x?,
+                Err(e) => return Err(no_eof(e).into()),
             };
+            let header = RecordHeader::decode(header);
+
+            // Read key
+            let got_key = &mut key_buf[..header.key_len];
+            s.reader().read(m, got_key).await.map_err(no_eof)?;
+
+            trace!(
+                "read_in_file, binary search: key={:02x?} val_len={}",
+                got_key,
+                header.value_len,
+            );
 
             // Found?
-            let dir = match key_buf[..].cmp(key) {
-                Ordering::Equal => return Ok(Some(read_value(m, s.reader(), value).await?)),
+            let dir = match got_key[..].cmp(key) {
+                Ordering::Equal => {
+                    if header.value_len > value.len() {
+                        return Err(ReadError::BufferTooSmall);
+                    }
+                    s.reader()
+                        .read(m, &mut value[..header.value_len])
+                        .await
+                        .map_err(no_eof)?;
+                    return Ok(Some(header.value_len));
+                }
                 Ordering::Less => SeekDirection::Right,
                 Ordering::Greater => SeekDirection::Left,
             };
@@ -362,19 +385,38 @@ impl<F: Flash> Inner<F> {
 
         // Linear search
         loop {
-            match read_key(m, r, &mut key_buf).await {
+            let mut header = [0; 4];
+            match r.read(m, &mut header).await {
+                Ok(()) => {}
                 Err(PageReadError::Eof) => return Ok(None), // key not present.
-                x => x?,
-            }
+                Err(e) => return Err(no_eof(e).into()),
+            };
+            let header = RecordHeader::decode(header);
+
+            // Read key
+            let got_key = &mut key_buf[..header.key_len];
+            r.read(m, got_key).await.map_err(no_eof)?;
+
+            trace!(
+                "read_in_file, linear search: key={:02x?} val_len={}",
+                got_key,
+                header.value_len,
+            );
 
             // Found?
-            match key_buf[..].cmp(key) {
-                Ordering::Equal => return Ok(Some(read_value(m, r, value).await?)),
+            match got_key[..].cmp(key) {
+                Ordering::Equal => {
+                    if header.value_len > value.len() {
+                        return Err(ReadError::BufferTooSmall);
+                    }
+                    r.read(m, &mut value[..header.value_len]).await.map_err(no_eof)?;
+                    return Ok(Some(header.value_len));
+                }
                 Ordering::Less => {}                  // keep going
                 Ordering::Greater => return Ok(None), // not present.
             }
 
-            skip_value(m, r).await?;
+            r.skip(m, header.value_len).await.map_err(no_eof)?;
         }
     }
 
@@ -418,11 +460,16 @@ impl<F: Flash> Inner<F> {
         }
         tx.last_key = Some(Vec::from_slice(key).unwrap());
 
+        let header = RecordHeader {
+            is_delete: false,
+            key_len: key.len(),
+            value_len: value.len(),
+        };
+
         loop {
             let tx = self.write_tx.as_mut().unwrap();
 
-            let record_size = record_size(key.len(), value.len());
-            let need_size = record_size + MIN_FREE_PAGE_COUNT * PAGE_MAX_PAYLOAD_SIZE;
+            let need_size = header.record_size() + MIN_FREE_PAGE_COUNT * PAGE_MAX_PAYLOAD_SIZE;
             let available_size = tx.w.space_left_on_current_page() + self.files.free_pages() * PAGE_MAX_PAYLOAD_SIZE;
             if need_size <= available_size {
                 break;
@@ -437,7 +484,11 @@ impl<F: Flash> Inner<F> {
         }
 
         let tx = self.write_tx.as_mut().unwrap();
-        write_record(&mut self.files, &mut tx.w, key, value).await?;
+
+        tx.w.write(&mut self.files, &header.encode()).await?;
+        tx.w.write(&mut self.files, key).await?;
+        tx.w.write(&mut self.files, value).await?;
+        tx.w.record_end();
 
         Ok(())
     }
@@ -600,7 +651,14 @@ impl<F: Flash> Inner<F> {
 
         struct KeySlot {
             valid: bool,
-            key: Vec<u8, MAX_KEY_SIZE>,
+            header: RecordHeader,
+            key_buf: [u8; MAX_KEY_SIZE],
+        }
+
+        impl KeySlot {
+            fn key(&self) -> &[u8] {
+                &self.key_buf[..self.header.key_len]
+            }
         }
 
         async fn read_key_slot<F: Flash>(
@@ -608,23 +666,37 @@ impl<F: Flash> Inner<F> {
             r: &mut FileReader<'_>,
             buf: &mut KeySlot,
         ) -> Result<(), Error<F::Error>> {
-            match read_key(m, r, &mut buf.key).await {
-                Ok(()) => {
-                    buf.valid = true;
-                    Ok(())
-                }
-                Err(PageReadError::Flash(e)) => Err(Error::Flash(e)),
+            let mut header = [0; 4];
+            match r.read(m, &mut header).await {
+                Ok(()) => {}
+                Err(PageReadError::Flash(e)) => return Err(Error::Flash(e)),
                 Err(PageReadError::Eof) => {
                     buf.valid = false;
-                    Ok(())
+                    return Ok(());
                 }
+                Err(PageReadError::Corrupted) => corrupted!(),
+            }
+
+            buf.valid = true;
+            buf.header = RecordHeader::decode(header);
+
+            // Read key
+            match r.read(m, &mut buf.key_buf[..buf.header.key_len]).await {
+                Ok(()) => Ok(()),
+                Err(PageReadError::Flash(e)) => Err(Error::Flash(e)),
+                Err(PageReadError::Eof) => corrupted!(),
                 Err(PageReadError::Corrupted) => corrupted!(),
             }
         }
 
         const NEW_SLOT: KeySlot = KeySlot {
-            key: Vec::new(),
             valid: false,
+            header: RecordHeader {
+                key_len: 0,
+                value_len: 0,
+                is_delete: false,
+            },
+            key_buf: [0; MAX_KEY_SIZE],
         };
         let mut k = [NEW_SLOT; BRANCHING_FACTOR];
         let mut trunc = [0; BRANCHING_FACTOR];
@@ -652,7 +724,7 @@ impl<F: Flash> Inner<F> {
                 match highest_bit(bits) {
                     // If we haven't found any nonempty key yet, take the current one.
                     None => bits = 1 << i,
-                    Some(j) => match k[j].key.cmp(&k[i].key) {
+                    Some(j) => match k[j].key().cmp(k[i].key()) {
                         Ordering::Greater => bits = 1 << i,
                         Ordering::Equal => bits |= 1 << i,
                         Ordering::Less => {}
@@ -666,16 +738,13 @@ impl<F: Flash> Inner<F> {
                 None => break true,
                 // Copy value from the highest bit (so newest file)
                 Some(i) => {
-                    let val_len = check_corrupted!(read_leb128(m, &mut r[i]).await);
-
-                    let record_size = record_size(k[i].key.len(), val_len as usize);
-                    let need_size = record_size + MIN_FREE_PAGE_COUNT_COMPACT * PAGE_MAX_PAYLOAD_SIZE;
+                    let need_size = k[i].header.record_size() + MIN_FREE_PAGE_COUNT_COMPACT * PAGE_MAX_PAYLOAD_SIZE;
                     let available_size = w.space_left_on_current_page() + m.free_pages() * PAGE_MAX_PAYLOAD_SIZE;
 
                     trace!(
                         "do_compact: key_len={} val_len={} space_left={} free_pages={} size={} available_size={}",
-                        k[i].key.len(),
-                        val_len,
+                        k[i].header.key_len,
+                        k[i].header.value_len,
                         w.space_left_on_current_page(),
                         m.free_pages(),
                         need_size,
@@ -688,21 +757,20 @@ impl<F: Flash> Inner<F> {
                     }
 
                     #[cfg(feature = "defmt")]
-                    trace!("do_compact: copying key from file {:?}: {:02x}", src[i], &k[i].key[..]);
+                    trace!("do_compact: copying key from file {:?}: {:02x}", src[i], &k[i].key());
                     #[cfg(not(feature = "defmt"))]
-                    trace!("do_compact: copying key from file {:?}: {:02x?}", src[i], &k[i].key[..]);
+                    trace!("do_compact: copying key from file {:?}: {:02x?}", src[i], &k[i].key());
 
                     progress = true;
 
                     // if we're compacting to the topmost level, do not write tombstone
                     // records (records for deleted keys, ie val_len=0)
-                    if topmost && val_len == 0 {
+                    if topmost && k[i].header.value_len == 0 {
                         trace!("do_compact: skipping tombstone.");
-                        check_corrupted!(r[i].skip(m, val_len as usize).await);
                     } else {
-                        write_key(m, &mut w, &k[i].key).await?;
-                        write_leb128(m, &mut w, val_len).await?;
-                        copy(m, &mut r[i], &mut w, val_len as usize).await?;
+                        w.write(m, &k[i].header.encode()).await?;
+                        w.write(m, k[i].key()).await?;
+                        copy(m, &mut r[i], &mut w, k[i].header.value_len).await?;
                         w.record_end();
                     }
 
@@ -710,7 +778,7 @@ impl<F: Flash> Inner<F> {
                     for j in 0..BRANCHING_FACTOR {
                         if (bits & 1 << j) != 0 {
                             if j != i {
-                                check_corrupted!(skip_value(m, &mut r[j]).await);
+                                r[j].skip(m, k[j].header.value_len).await.map_err(no_eof)?;
                             }
                             trunc[j] = r[j].offset(m);
                             read_key_slot(m, &mut r[j], &mut k[j]).await?;
@@ -778,22 +846,32 @@ impl<F: Flash> Inner<F> {
         self.files.dump_file(&mut self.readers[0], file_id).await?;
 
         let mut r = self.files.read(&mut self.readers[0], file_id).await;
-        let mut key = Vec::new();
-        let mut value = [0u8; 32 * 1024];
+        let mut key = [0u8; MAX_KEY_SIZE];
+        let mut value = [0u8; MAX_VALUE_SIZE];
         loop {
             let seq = r.curr_seq(&mut self.files);
-            match read_key(&mut self.files, &mut r, &mut key).await {
+
+            let mut header = [0; 4];
+            match r.read(&mut self.files, &mut header).await {
                 Ok(()) => {}
                 Err(PageReadError::Flash(e)) => return Err(Error::Flash(e)),
                 Err(PageReadError::Eof) => break,
                 Err(PageReadError::Corrupted) => corrupted!(),
-            }
-            let n = check_corrupted!(read_value(&mut self.files, &mut r, &mut value).await);
-            let value = &value[..n];
+            };
+            let header = RecordHeader::decode(header);
+
+            // Read key
+            let key = &mut key[..header.key_len];
+            r.read(&mut self.files, key).await.map_err(no_eof)?;
+
+            // read value
+            let value = &mut value[..header.value_len];
+            r.read(&mut self.files, value).await.map_err(no_eof)?;
 
             debug!(
-                "record at seq={:?}: key={:02x?} value_len={} value={:02x?}",
+                "record at seq={:?}: key_len={} key={:02x?} value_len={} value={:02x?}",
                 seq,
+                key.len(),
                 key,
                 value.len(),
                 value
@@ -809,36 +887,6 @@ pub struct WriteTransactionInner {
     last_key: Option<Vec<u8, MAX_KEY_SIZE>>,
 }
 
-async fn write_record<F: Flash>(
-    m: &mut FileManager<F>,
-    w: &mut FileWriter,
-    key: &[u8],
-    value: &[u8],
-) -> Result<(), Error<F::Error>> {
-    write_key(m, w, key).await?;
-    write_value(m, w, value).await?;
-    Ok(())
-}
-
-async fn write_key<F: Flash>(m: &mut FileManager<F>, w: &mut FileWriter, key: &[u8]) -> Result<(), Error<F::Error>> {
-    let key_len: u32 = key.len().try_into().unwrap();
-    write_leb128(m, w, key_len).await?;
-    w.write(m, key).await?;
-    Ok(())
-}
-
-async fn write_value<F: Flash>(
-    m: &mut FileManager<F>,
-    w: &mut FileWriter,
-    value: &[u8],
-) -> Result<(), Error<F::Error>> {
-    let value_len: u32 = value.len().try_into().unwrap();
-    write_leb128(m, w, value_len).await?;
-    w.write(m, value).await?;
-    w.record_end();
-    Ok(())
-}
-
 async fn copy<F: Flash>(
     m: &mut FileManager<F>,
     r: &mut FileReader<'_>,
@@ -850,107 +898,42 @@ async fn copy<F: Flash>(
         let n = len.min(buf.len());
         len -= n;
 
-        check_corrupted!(r.read(m, &mut buf[..n]).await);
+        r.read(m, &mut buf[..n]).await.map_err(no_eof)?;
         w.write(m, &buf[..n]).await?;
     }
     Ok(())
 }
 
-async fn write_leb128<F: Flash>(
-    m: &mut FileManager<F>,
-    w: &mut FileWriter,
-    mut val: u32,
-) -> Result<(), Error<F::Error>> {
-    loop {
-        let mut part = val & 0x7F;
-        let rest = val >> 7;
-        if rest != 0 {
-            part |= 0x80
+#[derive(Debug, Copy, Clone)]
+pub(crate) struct RecordHeader {
+    pub key_len: usize,
+    pub value_len: usize,
+    pub is_delete: bool,
+}
+
+impl RecordHeader {
+    pub fn decode(raw: [u8; 4]) -> Self {
+        let raw = u32::from_le_bytes(raw);
+        let key_len = raw & ((1 << KEY_SIZE_BITS) - 1);
+        let value_len = (raw >> KEY_SIZE_BITS) & ((1 << VALUE_SIZE_BITS) - 1);
+        let is_delete = (raw >> 31) & 1 != 0;
+        Self {
+            is_delete,
+            key_len: key_len as usize,
+            value_len: value_len as usize,
         }
-
-        w.write(m, &[part as u8]).await?;
-
-        if rest == 0 {
-            break;
-        }
-        val = rest
     }
-    Ok(())
-}
 
-const fn leb128_size(mut val: usize) -> usize {
-    let mut size = 0;
-    loop {
-        let rest = val >> 7;
-
-        size += 1;
-
-        if rest == 0 {
-            break;
-        }
-        val = rest
+    pub fn encode(self) -> [u8; 4] {
+        assert!(self.key_len <= MAX_KEY_SIZE);
+        assert!(self.value_len <= MAX_VALUE_SIZE);
+        let res = (self.key_len as u32) | ((self.value_len as u32) << KEY_SIZE_BITS) | ((self.is_delete as u32) << 31);
+        res.to_le_bytes()
     }
-    size
-}
 
-pub(crate) const fn record_size(key_len: usize, val_len: usize) -> usize {
-    leb128_size(key_len) + key_len + leb128_size(val_len) + val_len
-}
-
-async fn read_key<F: Flash>(
-    m: &mut FileManager<F>,
-    r: &mut FileReader<'_>,
-    buf: &mut Vec<u8, MAX_KEY_SIZE>,
-) -> Result<(), PageReadError<F::Error>> {
-    let len = read_leb128(m, r).await? as usize;
-    if len > MAX_KEY_SIZE {
-        info!("key too long: {}", len);
-        corrupted!();
+    pub const fn record_size(self) -> usize {
+        4 + self.key_len + self.value_len
     }
-    unsafe { buf.set_len(len) };
-    r.read(m, buf).await
-}
-
-async fn read_value<F: Flash>(
-    m: &mut FileManager<F>,
-    r: &mut FileReader<'_>,
-    value: &mut [u8],
-) -> Result<usize, ReadError<F::Error>> {
-    let len = check_corrupted!(read_leb128(m, r).await) as usize;
-    if len > value.len() {
-        return Err(ReadError::BufferTooSmall);
-    }
-    r.read(m, &mut value[..len]).await?;
-    Ok(len)
-}
-
-async fn skip_value<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader<'_>) -> Result<(), PageReadError<F::Error>> {
-    let len = read_leb128(m, r).await? as usize;
-    r.skip(m, len).await?;
-    Ok(())
-}
-
-async fn read_u8<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader<'_>) -> Result<u8, PageReadError<F::Error>> {
-    let mut buf = [0u8; 1];
-    r.read(m, &mut buf).await?;
-    Ok(buf[0])
-}
-
-async fn read_leb128<F: Flash>(m: &mut FileManager<F>, r: &mut FileReader<'_>) -> Result<u32, PageReadError<F::Error>> {
-    let mut res = 0;
-    let mut shift = 0;
-    loop {
-        let x = read_u8(m, r).await?;
-        if shift >= 32 {
-            corrupted!()
-        }
-        res |= (x as u32 & 0x7F) << shift;
-        if x & 0x80 == 0 {
-            break;
-        }
-        shift += 7;
-    }
-    Ok(res)
 }
 
 pub trait Single: Iterator {
@@ -977,6 +960,17 @@ impl<I: Iterator> Single for I {
                 Some(_) => Err(SingleError::MultipleElements),
             },
         }
+    }
+}
+
+fn no_eof<T>(e: PageReadError<T>) -> Error<T> {
+    match e {
+        PageReadError::Corrupted => Error::Corrupted,
+        #[cfg(not(feature = "_panic-on-corrupted"))]
+        PageReadError::Eof => Error::Corrupted,
+        #[cfg(feature = "_panic-on-corrupted")]
+        PageReadError::Eof => panic!("corrupted"),
+        PageReadError::Flash(x) => Error::Flash(x),
     }
 }
 

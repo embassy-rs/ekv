@@ -56,16 +56,6 @@ impl<E> From<Error<E>> for ReadError<E> {
     }
 }
 
-impl<E> From<PageReadError<E>> for ReadError<E> {
-    fn from(e: PageReadError<E>) -> Self {
-        match e {
-            PageReadError::Flash(e) => Self::Flash(e),
-            PageReadError::Eof => Self::Corrupted,
-            PageReadError::Corrupted => Self::Corrupted,
-        }
-    }
-}
-
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum WriteError<E> {
