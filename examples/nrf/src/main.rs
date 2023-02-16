@@ -121,6 +121,12 @@ async fn main(_spawner: Spawner) -> ! {
     config.random_seed = random_seed;
     let db = Database::<_, NoopRawMutex>::new(&mut f, config);
 
+    info!("Formatting...");
+    let start = Instant::now();
+    unwrap!(db.format().await);
+    let ms = Instant::now().duration_since(start).as_millis();
+    info!("Done in {} ms!", ms);
+
     const KEY_COUNT: usize = 100;
     const TX_SIZE: usize = 10;
 
