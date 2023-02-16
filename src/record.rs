@@ -363,12 +363,6 @@ impl<F: Flash> Inner<F> {
             let got_key = &mut key_buf[..header.key_len];
             s.reader().read(m, got_key).await.map_err(no_eof)?;
 
-            trace!(
-                "read_in_file, binary search: key={:02x?} val_len={}",
-                got_key,
-                header.value_len,
-            );
-
             // Found?
             let dir = match got_key[..].cmp(key) {
                 Ordering::Equal => {
@@ -407,12 +401,6 @@ impl<F: Flash> Inner<F> {
             // Read key
             let got_key = &mut key_buf[..header.key_len];
             r.read(m, got_key).await.map_err(no_eof)?;
-
-            trace!(
-                "read_in_file, linear search: key={:02x?} val_len={}",
-                got_key,
-                header.value_len,
-            );
 
             // Found?
             match got_key[..].cmp(key) {
