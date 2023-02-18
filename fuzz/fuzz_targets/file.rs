@@ -33,17 +33,18 @@ struct Record {
 }
 
 fn fuzz(ops: Input) {
-    let logging = std::env::var_os("RUST_LOG").is_some();
-    if logging {
+    if std::env::var_os("RUST_LOG").is_some() {
         env_logger::init();
     }
+    let dump = std::env::var("DUMP") == Ok("1".to_string());
+
     tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap()
-        .block_on(fuzz_inner(ops, logging))
+        .block_on(fuzz_inner(ops, dump))
 }
 
-async fn fuzz_inner(ops: Input, logging: bool) {
+async fn fuzz_inner(ops: Input, dump: bool) {
     let mut f = MemFlash::new();
     let mut m = FileManager::new(&mut f, 0);
     let mut pr = PageReader::new();
@@ -102,7 +103,7 @@ async fn fuzz_inner(ops: Input, logging: bool) {
                 }
                 w = None;
 
-                if logging {
+                if dump {
                     m.dump(&mut pr).await;
                 }
 

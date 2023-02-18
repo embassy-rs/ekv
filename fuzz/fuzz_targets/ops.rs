@@ -28,18 +28,18 @@ struct InsertOp {
 }
 
 fn fuzz(ops: Input) {
-    let logging = std::env::var_os("RUST_LOG").is_some();
-    if logging {
+    if std::env::var_os("RUST_LOG").is_some() {
         env_logger::init();
     }
+    let dump = std::env::var("DUMP") == Ok("1".to_string());
 
     tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap()
-        .block_on(fuzz_inner(ops))
+        .block_on(fuzz_inner(ops, dump))
 }
 
-async fn fuzz_inner(ops: Input) {
+async fn fuzz_inner(ops: Input, dump: bool) {
     let mut f = MemFlash::new();
     let config = Config::default();
     let db = Database::<_, NoopRawMutex>::new(&mut f, config);
@@ -54,10 +54,9 @@ async fn fuzz_inner(ops: Input) {
         log::info!("==================================================== op: {:?}", op);
 
         match op {
-            Op::Insert(op) => {
-                if op.value_len > MAX_VALUE_SIZE {
-                    continue;
-                }
+            Op::Insert(mut op) => {
+                op.value_len %= MAX_VALUE_SIZE + 1;
+
                 let key = op.key.to_be_bytes();
                 let mut val = vec![0; op.value_len];
                 let val_num = i.to_be_bytes();
@@ -78,7 +77,9 @@ async fn fuzz_inner(ops: Input) {
             }
         }
 
-        db.dump().await;
+        if dump {
+            db.dump().await;
+        }
 
         // Check everything
         for (key, val) in &m {

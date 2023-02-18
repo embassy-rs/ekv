@@ -7,18 +7,18 @@ use libfuzzer_sys::fuzz_target;
 fuzz_target!(|data: &[u8]| { fuzz(data) });
 
 fn fuzz(data: &[u8]) {
-    let logging = std::env::var_os("RUST_LOG").is_some();
-    if logging {
+    if std::env::var_os("RUST_LOG").is_some() {
         env_logger::init();
     }
+    let dump = std::env::var("DUMP") == Ok("1".to_string());
 
     tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap()
-        .block_on(fuzz_inner(data, logging))
+        .block_on(fuzz_inner(data, dump))
 }
 
-async fn fuzz_inner(data: &[u8], logging: bool) {
+async fn fuzz_inner(data: &[u8], dump: bool) {
     let mut f = MemFlash::new();
     let n = f.data.len().min(data.len());
     f.data[..n].copy_from_slice(&data[..n]);
@@ -26,7 +26,7 @@ async fn fuzz_inner(data: &[u8], logging: bool) {
     let config = Config::default();
     let db = Database::<_, NoopRawMutex>::new(&mut f, config);
 
-    if logging {
+    if dump {
         db.dump().await;
     }
 
