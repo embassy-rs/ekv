@@ -1139,7 +1139,7 @@ impl FileWriter {
                 r.open::<_, DataHeader>(&mut m.flash, pp.page_id).await?;
 
                 // open new page
-                let page_id = m.alloc.allocate();
+                let page_id = m.alloc.try_allocate().ok_or(CorruptedError)?;
                 trace!("writer: last page is not full. Copying it to new page {:?}", page_id);
                 let mut w = m.write_page(page_id).await;
 

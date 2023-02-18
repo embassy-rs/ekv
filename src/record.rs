@@ -357,7 +357,7 @@ impl<F: Flash> Inner<F> {
                 Err(PageReadError::Eof) => return Ok(None), // key not present.
                 Err(e) => return Err(no_eof(e).into()),
             };
-            let header = RecordHeader::decode(header);
+            let header = RecordHeader::decode(header)?;
 
             // Read key
             let got_key = &mut key_buf[..header.key_len];
@@ -396,7 +396,7 @@ impl<F: Flash> Inner<F> {
                 Err(PageReadError::Eof) => return Ok(None), // key not present.
                 Err(e) => return Err(no_eof(e).into()),
             };
-            let header = RecordHeader::decode(header);
+            let header = RecordHeader::decode(header)?;
 
             // Read key
             let got_key = &mut key_buf[..header.key_len];
@@ -574,6 +574,9 @@ impl<F: Flash> Inner<F> {
                         corrupted!()
                     }
                 }
+                if src.is_empty() {
+                    corrupted!()
+                }
                 return Ok(Some((src, dst)));
             }
             Err(SingleError::MultipleElements) => corrupted!(), // should never happen
@@ -601,7 +604,13 @@ impl<F: Flash> Inner<F> {
         let dst = if lv == 0 {
             0
         } else {
-            self.new_file_in_level(lv - 1).unwrap()
+            match self.new_file_in_level(lv - 1) {
+                Some(dst) => dst,
+                // This can happen if the level is not full, but the only free slots
+                // are "in the middle". This shouldn't happen in normal operation,
+                // it signals corruption.
+                None => corrupted!(),
+            }
         };
 
         // source files
@@ -680,7 +689,7 @@ impl<F: Flash> Inner<F> {
             }
 
             buf.valid = true;
-            buf.header = RecordHeader::decode(header);
+            buf.header = RecordHeader::decode(header)?;
 
             // Read key
             match r.read(m, &mut buf.key_buf[..buf.header.key_len]).await {
@@ -792,8 +801,9 @@ impl<F: Flash> Inner<F> {
         debug!("do_compact: stopped. done={:?} progress={:?}", done, progress);
 
         // We should've made some progress, as long as the free page margins were respected.
-        // TODO maybe return corrupted error instead.
-        assert!(progress);
+        if !progress {
+            return Err(Error::Corrupted);
+        }
 
         let (src_flag, dst_flag) = match done {
             true => (0, 0),
@@ -859,7 +869,7 @@ impl<F: Flash> Inner<F> {
                 Err(PageReadError::Eof) => break,
                 Err(PageReadError::Corrupted) => corrupted!(),
             };
-            let header = RecordHeader::decode(header);
+            let header = RecordHeader::decode(header)?;
 
             // Read key
             let key = &mut key[..header.key_len];
@@ -913,23 +923,29 @@ pub(crate) struct RecordHeader {
 }
 
 impl RecordHeader {
-    pub fn decode(raw: [u8; RECORD_HEADER_SIZE]) -> Self {
+    pub fn decode(raw: [u8; RECORD_HEADER_SIZE]) -> Result<Self, CorruptedError> {
         let mut raw2 = [0u8; 4];
         raw2[..RECORD_HEADER_SIZE].copy_from_slice(&raw);
         let raw = u32::from_le_bytes(raw2);
         let key_len = raw & ((1 << KEY_SIZE_BITS) - 1);
         let value_len = (raw >> KEY_SIZE_BITS) & ((1 << VALUE_SIZE_BITS) - 1);
         let is_delete = (raw >> (KEY_SIZE_BITS + VALUE_SIZE_BITS)) & 1 != 0;
-        Self {
+        let this = Self {
             is_delete,
             key_len: key_len as usize,
             value_len: value_len as usize,
+        };
+
+        if !this.valid() {
+            corrupted!();
         }
+
+        Ok(this)
     }
 
     pub fn encode(self) -> [u8; RECORD_HEADER_SIZE] {
-        assert!(self.key_len <= MAX_KEY_SIZE);
-        assert!(self.value_len <= MAX_VALUE_SIZE);
+        assert!(self.valid());
+
         let res = (self.key_len as u32)
             | ((self.value_len as u32) << KEY_SIZE_BITS)
             | ((self.is_delete as u32) << (KEY_SIZE_BITS + VALUE_SIZE_BITS));
@@ -938,6 +954,10 @@ impl RecordHeader {
 
     pub const fn record_size(self) -> usize {
         4 + self.key_len + self.value_len
+    }
+
+    fn valid(self) -> bool {
+        self.key_len <= MAX_KEY_SIZE && self.value_len <= MAX_VALUE_SIZE && !(self.is_delete && self.value_len != 0)
     }
 }
 
