@@ -2,17 +2,14 @@ use std::collections::{BTreeMap, HashMap};
 
 use ekv::config::{MAX_PAGE_COUNT, PAGE_SIZE};
 use ekv::flash::MemFlash;
-use ekv::{Config, Database, ReadError};
+use ekv::{Config, Database, ReadError, WriteError};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use rand::Rng;
 
-const KEY_COUNT: usize = 1000;
 const KEY_MIN_LEN: usize = 1;
 const KEY_MAX_LEN: usize = 10;
 const VAL_MIN_LEN: usize = 1;
 const VAL_MAX_LEN: usize = 10;
-const TX_MIN_COUNT: usize = 1;
-const TX_MAX_COUNT: usize = 100;
 
 fn rand(max: usize) -> usize {
     rand::thread_rng().gen_range(0..max)
@@ -32,21 +29,26 @@ fn rand_data(len: usize) -> Vec<u8> {
 async fn main() {
     env_logger::init();
 
+    let key_count = (PAGE_SIZE * MAX_PAGE_COUNT) / ((KEY_MIN_LEN + KEY_MAX_LEN + VAL_MIN_LEN + VAL_MAX_LEN) / 2);
+    let tx_count = key_count / 10;
+
     println!("Hi there!");
     println!("flash size: {}", PAGE_SIZE * MAX_PAGE_COUNT);
+    println!("key count: {}", key_count);
+
     println!(
         "avg data size: {}",
-        (KEY_COUNT + TX_MAX_COUNT) * (KEY_MIN_LEN + KEY_MAX_LEN + VAL_MIN_LEN + VAL_MAX_LEN) / 2
+        (key_count + tx_count) * (KEY_MIN_LEN + KEY_MAX_LEN + VAL_MIN_LEN + VAL_MAX_LEN) / 2
     );
     println!(
         "max data size: {}",
-        (KEY_COUNT + TX_MAX_COUNT) * (KEY_MAX_LEN + VAL_MAX_LEN)
+        (key_count + tx_count) * (KEY_MAX_LEN + VAL_MAX_LEN)
     );
 
     // Generate keys
     let mut keys = Vec::new();
     keys.push(b"foo".to_vec());
-    while keys.len() < KEY_COUNT {
+    while keys.len() < key_count {
         let key = rand_data(rand_between(KEY_MIN_LEN, KEY_MAX_LEN));
         if !keys.contains(&key) {
             keys.push(key)
@@ -63,12 +65,12 @@ async fn main() {
 
     let mut buf = [0; VAL_MAX_LEN];
 
-    for _ in 0..10000 {
-        let tx_count = rand_between(TX_MIN_COUNT, TX_MAX_COUNT);
+    'out: for _ in 0..10000 {
+        let tx_count = rand_between(1, tx_count);
         let mut tx = BTreeMap::new();
 
         for _ in 0..tx_count {
-            let key = &keys[rand(KEY_COUNT)];
+            let key = &keys[rand(key_count)];
             let value = rand_data(rand_between(VAL_MIN_LEN, VAL_MAX_LEN));
             tx.insert(key, value);
         }
@@ -78,7 +80,14 @@ async fn main() {
         log::debug!("start tx");
         for (key, value) in &tx {
             log::debug!("write {:02x?} = {:02x?}", key, value);
-            wtx.write(key, value).await.unwrap();
+            match wtx.write(key, value).await {
+                Ok(()) => {}
+                Err(WriteError::Full) => {
+                    log::debug!("full, aborting tx");
+                    continue 'out;
+                }
+                Err(e) => panic!("write error: {:?}", e),
+            }
         }
         wtx.commit().await.unwrap();
 
