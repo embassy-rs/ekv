@@ -1,3 +1,4 @@
+#![doc = include_str!("../README.md")]
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(unused_must_use)]
 #![feature(result_option_inspect)]
@@ -7,6 +8,7 @@
 #![allow(incomplete_features)]
 #![allow(clippy::large_enum_variant)]
 #![allow(clippy::new_without_default)]
+#![warn(missing_docs)]
 
 // MUST go first.
 mod fmt;

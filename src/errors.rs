@@ -16,16 +16,21 @@ impl<E> From<FormatError<E>> for Error<E> {
     }
 }
 
+/// Error returned by [`Database::format`](crate::Database::format).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum FormatError<E> {
+    /// Some operation on the underlying [`Flash`](crate::flash::Flash) failed.
     Flash(E),
 }
 
+/// Error returned by [`Database::mount`](crate::Database::mount).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum MountError<E> {
+    /// Database is corrupted, or not formatted yet.
     Corrupted,
+    /// Some operation on the underlying [`Flash`](crate::flash::Flash) failed.
     Flash(E),
 }
 
@@ -38,13 +43,19 @@ impl<E> From<Error<E>> for MountError<E> {
     }
 }
 
+/// Error returned by [`ReadTransaction::read`](crate::ReadTransaction::read).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum ReadError<E> {
+    /// The requested key is not present in the database.
     KeyNotFound,
+    /// The requested key is larger than [`MAX_KEY_SIZE`](crate::config::MAX_KEY_SIZE)
     KeyTooBig,
+    /// The requested key was found, but the value was larger than the provided buffer.
     BufferTooSmall,
+    /// Database is corrupted, or not formatted yet.
     Corrupted,
+    /// Some operation on the underlying [`Flash`](crate::flash::Flash) failed.
     Flash(E),
 }
 
@@ -57,15 +68,26 @@ impl<E> From<Error<E>> for ReadError<E> {
     }
 }
 
+/// Error returned by [`WriteTransaction::write`](crate::WriteTransaction::write).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum WriteError<E> {
+    /// The key is not lexicographically larger than the last written key in this transaction.
+    ///
+    /// Writes in a transaction must be sorted in ascending order, and you may not write the same
+    /// key twice.
     NotSorted,
+    /// The key is larger than [`MAX_KEY_SIZE`](crate::config::MAX_KEY_SIZE)
     KeyTooBig,
+    /// The value is larger than [`MAX_VALUE_SIZE`](crate::config::MAX_VALUE_SIZE)
     ValueTooBig,
+    /// Transaction is canceled. See [`WriteTransaction`](crate::WriteTransaction) for details.
     TransactionCanceled,
+    /// The database storage is full.
     Full,
+    /// Database is corrupted, or not formatted yet.
     Corrupted,
+    /// Some operation on the underlying [`Flash`](crate::flash::Flash) failed.
     Flash(E),
 }
 
@@ -78,11 +100,15 @@ impl<E> From<Error<E>> for WriteError<E> {
     }
 }
 
+/// Error returned by [`WriteTransaction::commit`](crate::WriteTransaction::commit).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum CommitError<E> {
+    /// Transaction is canceled. See [`WriteTransaction`](crate::WriteTransaction) for details.
     TransactionCanceled,
+    /// Database is corrupted, or not formatted yet.
     Corrupted,
+    /// Some operation on the underlying [`Flash`](crate::flash::Flash) failed.
     Flash(E),
 }
 
@@ -95,6 +121,7 @@ impl<E> From<Error<E>> for CommitError<E> {
     }
 }
 
+/// Database is corrupted, or not formatted yet.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct CorruptedError;

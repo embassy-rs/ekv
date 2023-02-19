@@ -1,17 +1,49 @@
+//! Flash storage trait.
+//!
+//! You must implement this trait for your flash storage to use it with `ekv`.
+
 use core::fmt::Debug;
 
 #[cfg(feature = "std")]
 use crate::config::*;
 pub use crate::types::PageID;
 
-/// NOR flash memory trait
-/// TODO use embedded-storage
+// TODO: use embedded-storage instead
+// or make an adapter instead?
+
+/// Flash storage trait
 pub trait Flash {
+    /// Error type for the flash operations.
     type Error: Debug;
 
+    /// Get the page count of the flash storage.
     fn page_count(&self) -> usize;
+
+    /// Erase a page.
+    ///
+    /// If power is lost during an erase, the resulting data is allowed to be
+    /// anything, but data on other pages must stay unaffected.
+    ///
+    /// After erasing, all bytes in the page must be equal to [`ERASE_VALUE`](crate::config::ERASE_VALUE).
     async fn erase(&mut self, page_id: PageID) -> Result<(), Self::Error>;
+
+    /// Read data.
+    ///
+    /// `offset` and `data.len()` are guaranteed to be a multiple of [`ALIGN`](crate::config::ALIGN).
     async fn read(&mut self, page_id: PageID, offset: usize, data: &mut [u8]) -> Result<(), Self::Error>;
+
+    /// Write data.
+    ///
+    /// If power is lost during a write, the resulting data in the written bytes
+    /// is allowed to be anything, but data on other bytes within the page must
+    /// stay unaffected. This means it is NOT okay to implement this with underlying
+    /// "read-erase-modify-write" strategies.
+    ///
+    /// `offset` and `data.len()` are guaranteed to be a multiple of [`ALIGN`](crate::config::ALIGN).
+    ///
+    /// It is guaranteed that each byte will be written only once after each erase.
+    /// This ensures maximum compatibility with different flash hardware, in particular
+    /// flash memory with ECC.
     async fn write(&mut self, page_id: PageID, offset: usize, data: &[u8]) -> Result<(), Self::Error>;
 }
 
@@ -34,17 +66,25 @@ impl<T: Flash> Flash for &mut T {
 /// Fake in-memory flash
 #[cfg(feature = "std")]
 pub struct MemFlash {
+    /// Data. Length must equal `PAGE_SIZE * MAX_PAGE_COUNT`
     pub data: Vec<u8>,
+    /// Count of read operations.
     pub read_count: usize,
+    /// Count of read bytes (sum of all operations)
     pub read_bytes: usize,
+    /// Count of write operations.
     pub write_count: usize,
+    /// Count of written bytes (sum of all operations)
     pub write_bytes: usize,
+    /// Count of erase operations.
     pub erase_count: usize,
+    /// Count of erased bytes (sum of all operations)
     pub erase_bytes: usize,
 }
 
 #[cfg(feature = "std")]
 impl MemFlash {
+    /// Create a new MemFlash
     pub fn new() -> Self {
         Self {
             data: vec![ERASE_VALUE; PAGE_SIZE * MAX_PAGE_COUNT],
@@ -57,6 +97,7 @@ impl MemFlash {
         }
     }
 
+    /// Reset statistics counters.
     pub fn reset_counters(&mut self) {
         self.read_count = 0;
         self.read_bytes = 0;

@@ -14,7 +14,7 @@ use heapless::Vec;
 
 use crate::config::*;
 use crate::errors::{CorruptedError, Error, MountError, ReadError, WriteError};
-use crate::file::{FileManager, FileReader, FileSearcher, FileWriter, SeekDirection, PAGE_MAX_PAYLOAD_SIZE};
+use crate::file::{FileID, FileManager, FileReader, FileSearcher, FileWriter, SeekDirection, PAGE_MAX_PAYLOAD_SIZE};
 use crate::flash::Flash;
 use crate::page::{PageReader, ReadError as PageReadError};
 use crate::{CommitError, FormatError};
@@ -22,10 +22,15 @@ use crate::{CommitError, FormatError};
 const FILE_FLAG_COMPACT_DEST: u8 = 0x01;
 const FILE_FLAG_COMPACT_SRC: u8 = 0x02;
 
+/// Run-time configuration.
 #[derive(Debug, Clone, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[non_exhaustive]
 pub struct Config {
+    /// Random seed, used for wear leveling.
+    ///
+    /// This should be different every boot, and "random enough". It does not
+    /// need to be cryptographically secure.
     pub random_seed: u32,
 }
 
@@ -56,6 +61,7 @@ struct State {
     waker: WakerRegistration,
 }
 
+/// The main database struct.
 pub struct Database<F: Flash, M: RawMutex> {
     state: BlockingMutex<M, RefCell<State>>,
 
@@ -63,6 +69,16 @@ pub struct Database<F: Flash, M: RawMutex> {
 }
 
 impl<F: Flash, M: RawMutex> Database<F, M> {
+    /// Create a new database.
+    ///
+    /// This does no flash operations, and always succeeds. Actually mounting the database
+    /// is done lazily, when the first operation (read or write) is done.
+    ///
+    /// If the storage is not formatted, you have to call [`format`](Self::format) before first use.
+    ///
+    /// You can call [`mount`](Self::mount) to force eagerly mounting the database. This can be
+    /// useful to detect whether the storage is formatted or not, so that you can format it if it isn't
+    /// before first use.
     pub fn new(flash: F, config: Config) -> Self {
         Self {
             inner: Mutex::new(Inner::new(flash, config.random_seed)),
@@ -74,23 +90,52 @@ impl<F: Flash, M: RawMutex> Database<F, M> {
         }
     }
 
+    /// Get an exclusive lock for the underlying flash.
+    ///
+    /// This returns a "mutex guard"-like object that gives exclusive access to
+    /// the flash. All other concurrent operations on the database will wait on
+    /// this object to be dropped.
+    ///
+    /// Note that actually writing to the flash behind `ekv`'s back will result
+    /// in corruption. This is intended for other tasks, for example
+    /// reading the flash memory's serial number, or statistics.
     pub async fn lock_flash(&self) -> impl Deref<Target = F> + DerefMut + '_ {
         FlashLockGuard(self.inner.lock().await)
     }
 
+    /// Format the database storage.
+    ///
+    /// This will format the underlying storage into an empty key-value database.
+    /// If the storage was already formatted, all data will be lost.
     pub async fn format(&self) -> Result<(), FormatError<F::Error>> {
         self.inner.lock().await.format().await
     }
 
+    /// Force eagerly mounting the database storage.
+    ///
+    /// You don't have to call this method, mounting is done lazily on first operation.
+    ///
+    /// Eagerly mounting can still be useful, to detect whether the storage is
+    /// formatted or not, so that you can format it if it isn't before first use.
     pub async fn mount(&self) -> Result<(), MountError<F::Error>> {
         self.inner.lock().await.mount().await
     }
 
+    /// Dump the on-disk database structures.
+    ///
+    /// Intended for debugging only.
     #[cfg(feature = "std")]
     pub async fn dump(&self) {
         self.inner.lock().await.dump().await
     }
 
+    /// Open a read transaction.
+    ///
+    /// This will wait if there's a write transaction either being currently committed, or
+    /// waiting to be committed because there are other read transactions open.
+    ///
+    /// Dropping the `ReadTransaction` closes the transaction. Make sure to drop it as soon
+    /// as possible, to not delay write transaction commits.
     pub async fn read_transaction(&self) -> ReadTransaction<'_, F, M> {
         poll_fn(|cx| {
             self.state.lock(|s| {
@@ -118,6 +163,13 @@ impl<F: Flash, M: RawMutex> Database<F, M> {
         ReadTransaction { db: self }
     }
 
+    /// Open a write transaction.
+    ///
+    /// This will wait if there's another write transaction already open.
+    ///
+    /// To make all the writes permanent, call [`commit`](WriteTransaction::commit).
+    /// Dropping the `WriteTransaction` without committing closes the transaction
+    /// and discards all written data.
     pub async fn write_transaction(&self) -> WriteTransaction<'_, F, M> {
         poll_fn(|cx| {
             self.state.lock(|s| {
@@ -165,6 +217,7 @@ where
     }
 }
 
+/// In-progress read transaction.
 pub struct ReadTransaction<'a, F: Flash + 'a, M: RawMutex + 'a> {
     db: &'a Database<F, M>,
 }
@@ -185,6 +238,9 @@ impl<'a, F: Flash + 'a, M: RawMutex + 'a> Drop for ReadTransaction<'a, F, M> {
 }
 
 impl<'a, F: Flash + 'a, M: RawMutex + 'a> ReadTransaction<'a, F, M> {
+    /// Read a key from the database.
+    ///
+    /// The value is stored in the `value` buffer, and the length is returned.
     pub async fn read(&mut self, key: &[u8], value: &mut [u8]) -> Result<usize, ReadError<F::Error>> {
         if key.len() > MAX_KEY_SIZE {
             return Err(ReadError::KeyTooBig);
@@ -202,6 +258,16 @@ enum WriteTransactionState {
     Canceled,
 }
 
+/// In-progress write transaction.
+///
+/// ## Cancelation
+///
+/// If any operation within the transaction (`write` or `delete`) either fails, or is canceled (due
+/// to dropping its `Future` before completion), the entire write transaction is canceled.
+///
+/// When the transaction is canceled, all operations will return `TransactionCanceled` errors.
+/// To recover, you must drop the entire `WriteTransaction`, and (if desired) open a new one to retry
+/// the writes.
 pub struct WriteTransaction<'a, F: Flash + 'a, M: RawMutex + 'a> {
     db: &'a Database<F, M>,
     state: WriteTransactionState,
@@ -220,15 +286,21 @@ impl<'a, F: Flash + 'a, M: RawMutex + 'a> Drop for WriteTransaction<'a, F, M> {
 }
 
 impl<'a, F: Flash + 'a, M: RawMutex + 'a> WriteTransaction<'a, F, M> {
+    /// Write a key to the database.
+    ///
+    /// If the key was already present, the previous value is overwritten.
     pub async fn write(&mut self, key: &[u8], value: &[u8]) -> Result<(), WriteError<F::Error>> {
         self.write_inner(key, value, false).await
     }
 
+    /// Delete a key from the database.
+    ///
+    /// If the key was not present, this is a no-op.
     pub async fn delete(&mut self, key: &[u8]) -> Result<(), WriteError<F::Error>> {
         self.write_inner(key, &[], true).await
     }
 
-    pub async fn write_inner(&mut self, key: &[u8], value: &[u8], is_delete: bool) -> Result<(), WriteError<F::Error>> {
+    async fn write_inner(&mut self, key: &[u8], value: &[u8], is_delete: bool) -> Result<(), WriteError<F::Error>> {
         let is_first_write = match self.state {
             WriteTransactionState::Canceled => return Err(WriteError::TransactionCanceled),
             WriteTransactionState::Created => true,
@@ -260,6 +332,16 @@ impl<'a, F: Flash + 'a, M: RawMutex + 'a> WriteTransaction<'a, F, M> {
         Ok(())
     }
 
+    /// Commit the transaction.
+    ///
+    /// This will wait until no read transaction is open. While waiting, opening new read transactions
+    /// is blocked, to prevent readers from starving writers.
+    ///
+    /// This makes all the writes permanent on the underlyling database. When it returns, the writes are
+    /// guaranteed to be fully safely written to flash, so they can't get lost by a crash or a power failure anymore.
+    ///
+    /// Committing is atomic: if commit is interrupted (due to power loss, crash, or canceling the future), it is
+    /// guaranteed that either all or none of the writes in the transaction are committed.
     pub async fn commit(self) -> Result<(), CommitError<F::Error>> {
         match self.state {
             WriteTransactionState::Canceled => return Err(CommitError::TransactionCanceled),

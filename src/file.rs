@@ -12,6 +12,8 @@ use crate::types::{OptionPageID, PageID};
 
 pub const PAGE_MAX_PAYLOAD_SIZE: usize = PAGE_SIZE - PageHeader::SIZE - size_of::<DataHeader>() - ChunkHeader::SIZE;
 
+pub type FileID = u8;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SeekDirection {
     Left,

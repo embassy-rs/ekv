@@ -2,8 +2,8 @@
 
 use std::cmp::Ordering;
 
-use ekv::config::{FileID, MAX_PAGE_COUNT, PAGE_SIZE};
-use ekv::file::{FileManager, FileSearcher, ReadError, SeekDirection};
+use ekv::config::{MAX_PAGE_COUNT, PAGE_SIZE};
+use ekv::file::{FileID, FileManager, FileSearcher, ReadError, SeekDirection};
 use ekv::flash::MemFlash;
 use ekv::page::PageReader;
 use libfuzzer_sys::arbitrary::Arbitrary;

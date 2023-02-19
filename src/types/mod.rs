@@ -1,7 +1,11 @@
 use core::fmt;
 
+/// Raw page ID.
+///
+/// The "max"
 pub type RawPageID = u16;
 
+/// Guaranteed valid Page ID.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PageID {
     raw: RawPageID,
@@ -12,17 +16,17 @@ impl PageID {
         Self { raw: 0 }
     }
 
-    pub const fn from_raw(raw: RawPageID) -> Option<Self> {
+    /// Convert from raw.
+    ///
+    /// Returns `None` if raw is `0xFFFF`
+    pub(crate) const fn from_raw(raw: RawPageID) -> Option<Self> {
         match raw {
             RawPageID::MAX => None,
             _ => Some(Self { raw }),
         }
     }
 
-    pub const fn into_raw(self) -> RawPageID {
-        self.raw
-    }
-
+    /// Get the 0-based index of the page.
     pub const fn index(self) -> usize {
         self.raw as usize
     }
@@ -41,6 +45,11 @@ impl defmt::Format for PageID {
     }
 }
 
+/// Optional Page ID.
+///
+/// This is equivalent to `Option<PageID>`, but fits in a single `u16`
+/// and is suitable for transmuting into raw bytes, for writing to disk.
+/// `None` is represented by `0xFFFF`.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
 pub struct OptionPageID {
