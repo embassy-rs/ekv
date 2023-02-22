@@ -7,7 +7,7 @@ os.chdir(dname)
 features = []
 
 
-def feature(name, default, min=None, max=None, pow2=None, vals=None):
+def feature(name, default, min=None, max=None, pow2=None, vals=None, factors=[]):
     if vals is None:
         assert min is not None
         assert max is not None
@@ -16,6 +16,9 @@ def feature(name, default, min=None, max=None, pow2=None, vals=None):
         val = min
         while val <= max:
             vals.add(val)
+            for f in factors:
+                if val*f <= max:
+                    vals.add(val*f)
             if (pow2 == True or (isinstance(pow2, int) and val >= pow2)) and val > 0:
                 val *= 2
             else:
@@ -34,7 +37,8 @@ def feature(name, default, min=None, max=None, pow2=None, vals=None):
 
 feature("align", default=4, vals=[1, 2, 4])
 feature("page_size", default=4096, min=128, max=65536, pow2=True)
-feature("max_page_count", default=256, min=1, max=65536, pow2=True)
+feature("max_page_count", default=256, min=1,
+        max=65536, pow2=True, factors=[3, 5, 9])
 feature("erase_value", default=0xFF, vals=[0x00, 0xFF])
 
 feature("max_key_size", default=64, min=1, max=1024, pow2=True)
