@@ -528,11 +528,13 @@ fn align_up(n: usize) -> usize {
     }
 }
 
+#[allow(unused)]
 #[derive(Clone, Copy)]
 struct Crc32 {
     crc: u32,
 }
 
+#[allow(unused)]
 impl Crc32 {
     fn new() -> Self {
         Self { crc: 0xffffffff }
@@ -564,6 +566,7 @@ impl Crc32 {
     }
 }
 
+#[allow(unused)]
 fn crc32(data: &[u8]) -> u32 {
     let mut crc = Crc32::new();
     crc.update(data);
