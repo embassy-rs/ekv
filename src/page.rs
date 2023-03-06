@@ -12,6 +12,8 @@ const CHUNK_MAGIC: u16 = 0x58A4;
 #[repr(C)]
 pub struct PageHeader {
     magic: u32,
+    #[cfg(feature = "crc")]
+    crc: u32,
 }
 impl_bytes!(PageHeader);
 
@@ -20,6 +22,8 @@ impl_bytes!(PageHeader);
 pub struct ChunkHeader {
     magic: u16,
     len: u16,
+    #[cfg(feature = "crc")]
+    crc: u32,
 }
 impl_bytes!(ChunkHeader);
 
@@ -55,14 +59,19 @@ async fn write_header<F: Flash, H: Header>(flash: &mut F, page_id: PageID, heade
     let mut buf = [0u8; PageHeader::SIZE + MAX_HEADER_SIZE];
     let buf = &mut buf[..PageHeader::SIZE + size_of::<H>()];
 
-    let page_header = PageHeader { magic: H::MAGIC };
-    buf[..PageHeader::SIZE].copy_from_slice(&page_header.to_bytes());
     unsafe {
         buf.as_mut_ptr()
             .add(PageHeader::SIZE)
             .cast::<H>()
             .write_unaligned(header)
     };
+
+    let page_header = PageHeader {
+        magic: H::MAGIC,
+        #[cfg(feature = "crc")]
+        crc: crc32(&buf[PageHeader::SIZE..]),
+    };
+    buf[..PageHeader::SIZE].copy_from_slice(&page_header.to_bytes());
 
     flash.write(page_id as _, 0, buf).await?;
     Ok(())
@@ -82,6 +91,14 @@ pub async fn read_header<F: Flash, H: Header>(flash: &mut F, page_id: PageID) ->
         return Err(Error::Corrupted);
     }
 
+    #[cfg(feature = "crc")]
+    {
+        let got_crc = crc32(&buf[PageHeader::SIZE..]);
+        if got_crc != page_header.crc {
+            return Err(Error::Corrupted);
+        }
+    }
+
     let header = unsafe { buf.as_ptr().add(PageHeader::SIZE).cast::<H>().read_unaligned() };
     Ok(header)
 }
@@ -95,8 +112,11 @@ pub struct ChunkIter {
     prev_chunks_len: usize,
     /// Offset where the chunk we're currently writing starts.
     chunk_offset: usize,
-    /// Data bytes in the curremtchunk.
+    /// Data bytes in the current chunk.
     chunk_len: usize,
+    /// CRC
+    #[cfg(feature = "crc")]
+    chunk_crc: u32,
 }
 
 impl ChunkIter {
@@ -134,6 +154,10 @@ impl ChunkIter {
         trace!("open chunk at offs={} len={}", self.chunk_offset, header.len);
 
         self.chunk_len = header.len as usize;
+        #[cfg(feature = "crc")]
+        {
+            self.chunk_crc = header.crc;
+        }
 
         Ok(true)
     }
@@ -157,6 +181,8 @@ impl PageReader {
                 at_end: false,
                 chunk_offset: 0,
                 chunk_len: 0,
+                #[cfg(feature = "crc")]
+                chunk_crc: 0,
             },
             chunk_pos: 0,
             buf: [0u8; MAX_CHUNK_SIZE],
@@ -189,6 +215,15 @@ impl PageReader {
             )
             .await
             .map_err(Error::Flash)?;
+
+        #[cfg(feature = "crc")]
+        {
+            let got_crc = crc32(&self.buf[..self.ch.chunk_len]);
+            if got_crc != self.ch.chunk_crc {
+                return Err(Error::Corrupted);
+            }
+        }
+
         Ok(())
     }
 
@@ -265,6 +300,8 @@ pub struct PageWriter<H: Header> {
     page_id: PageID,
     needs_erase: bool,
 
+    #[cfg(feature = "crc")]
+    crc: Crc32,
     align_buf: [u8; ALIGN],
 
     /// Total data bytes in page (all chunks)
@@ -286,6 +323,8 @@ impl<H: Header> PageWriter<H> {
             total_pos: 0,
             chunk_offset: PageHeader::SIZE + size_of::<H>(),
             chunk_pos: 0,
+            #[cfg(feature = "crc")]
+            crc: Crc32::new(),
         }
     }
 
@@ -297,6 +336,8 @@ impl<H: Header> PageWriter<H> {
         self.total_pos = 0;
         self.chunk_offset = PageHeader::SIZE + size_of::<H>();
         self.chunk_pos = 0;
+        #[cfg(feature = "crc")]
+        self.crc.reset();
     }
 
     pub async fn open_append<F: Flash>(&mut self, flash: &mut F, page_id: PageID) -> Result<(), Error<F::Error>> {
@@ -308,6 +349,8 @@ impl<H: Header> PageWriter<H> {
             at_end: false,
             chunk_offset: PageHeader::SIZE + size_of::<H>(),
             chunk_len: 0,
+            #[cfg(feature = "crc")]
+            chunk_crc: 0,
         };
         r.open_chunk(flash).await?;
         while !r.at_end {
@@ -345,6 +388,8 @@ impl<H: Header> PageWriter<H> {
         self.total_pos = r.prev_chunks_len;
         self.chunk_offset = r.chunk_offset;
         self.chunk_pos = 0;
+        #[cfg(feature = "crc")]
+        self.crc.reset();
 
         Ok(())
     }
@@ -365,6 +410,9 @@ impl<H: Header> PageWriter<H> {
             return Ok(0);
         }
         let mut data = &data[..total_n];
+
+        #[cfg(feature = "crc")]
+        self.crc.update(data);
 
         self.erase_if_needed(flash).await.map_err(Error::Flash)?;
 
@@ -454,6 +502,8 @@ impl<H: Header> PageWriter<H> {
         let h = ChunkHeader {
             magic: CHUNK_MAGIC,
             len: self.chunk_pos as u16,
+            #[cfg(feature = "crc")]
+            crc: self.crc.finish(),
         };
         flash
             .write(self.page_id as _, self.chunk_offset, &h.to_bytes())
@@ -463,6 +513,8 @@ impl<H: Header> PageWriter<H> {
         // Prepare for next chunk.
         self.chunk_offset += ChunkHeader::SIZE + align_up(self.chunk_pos);
         self.chunk_pos = 0;
+        #[cfg(feature = "crc")]
+        self.crc.reset();
 
         Ok(())
     }
@@ -474,6 +526,48 @@ fn align_up(n: usize) -> usize {
     } else {
         n
     }
+}
+
+#[derive(Clone, Copy)]
+struct Crc32 {
+    crc: u32,
+}
+
+impl Crc32 {
+    fn new() -> Self {
+        Self { crc: 0xffffffff }
+    }
+
+    fn reset(&mut self) {
+        self.crc = 0xffffffff;
+    }
+
+    // TODO: use a faster implementation. Probably a 4-bit lookup table (16 entries),
+    // because the usual 8-bit look up table (256 entries) is quite big (1kb).
+    fn update(&mut self, data: &[u8]) {
+        let mut crc = self.crc;
+        for &b in data {
+            crc ^= b as u32;
+            for _ in 0..8 {
+                if crc & 1 != 0 {
+                    crc = crc >> 1 ^ 0xedb88320;
+                } else {
+                    crc >>= 1;
+                }
+            }
+        }
+        self.crc = crc
+    }
+
+    fn finish(self) -> u32 {
+        !self.crc
+    }
+}
+
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = Crc32::new();
+    crc.update(data);
+    crc.finish()
 }
 
 #[cfg(test)]
@@ -499,6 +593,13 @@ mod tests {
 
     const HEADER: TestHeader = TestHeader { foo: 123456 };
     const MAX_PAYLOAD: usize = PAGE_SIZE - PageHeader::SIZE - size_of::<TestHeader>() - ChunkHeader::SIZE;
+
+    #[test_log::test]
+    fn test_crc32() {
+        assert_eq!(crc32(b""), 0x00000000);
+        assert_eq!(crc32(b"a"), 0xE8B7BE43);
+        assert_eq!(crc32(b"Hello World!"), 0x1C291CA3);
+    }
 
     #[test_log::test(tokio::test)]
     async fn test_header() {

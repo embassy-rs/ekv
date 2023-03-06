@@ -31,9 +31,20 @@ use crate::record::RecordHeader;
 mod raw {
     #![allow(unused)]
     include!(concat!(env!("OUT_DIR"), "/config.rs"));
+
+    #[cfg(feature = "crc")]
+    pub const CRC: bool = true;
+    #[cfg(not(feature = "crc"))]
+    pub const CRC: bool = false;
 }
 
 // ======== Flash parameters
+
+/// Protect integrity of the data in flash with CRCs.
+///
+/// If enabled, CRCs are appended to page and chunk headers, calculated
+/// on write and verified on read. Verification failures are returned as `Corrupted` errors.
+pub const CRC: bool = raw::CRC;
 
 /// Flash alignment for reads and writes.
 ///

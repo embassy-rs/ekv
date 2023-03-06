@@ -41,6 +41,8 @@ std = []
 log = ["dep:log", "std"]
 defmt = ["dep:defmt"]
 
+crc = []
+
 ### FEATURES FOR TESTING ONLY. NOT COVERED BY SEMVER.
 
 # Panic on corrupted, instead of returning Error::Corrupted.

@@ -15,7 +15,8 @@ Key-value database for embedded systems, for raw NOR flash, using an LSM-Tree.
   - Unlimited read transactions and one write transaction are allowed concurrently.
   - Read transactions are only blocked by a write transaction commit, not by the whole write transaction. Commit is fast, `O(1)`.
 - Wear leveling: erase cycles are spread out evenly between all flash pages. Pages are allocated cyclically. At boot, a random seed is required to decide which is the first.
-- Corruption-resistant: A corrupted or deliberately manipulated flash image should not cause crashes, panics or infinite loops, only `Err(Corrupted)` errors.
+- Corruption-resistant: A corrupted or deliberately manipulated flash image cannot cause crashes, panics or infinite loops, only `Err(Corrupted)` errors.
+- Optional CRC32 protection of headers and data on flash.
 - Extensively tested, using unit tests and fuzzing.
 
 ## Current status
@@ -31,7 +32,6 @@ The on-disk format is **not stable** yet.
 
 - Optimize tiny write transactions: append to the last file if possible, instead of starting a new one. Currently each write transaction opens a new file, which will have to erase at least one full page, even if the transaction writes just one small key. It is recommended to batch multiple writes in a single transaction
 for performance.
-- Add a compile-time flag to use CRCs to check data integrity. Both headers and data.
 - Support access align higher than 4. Currently reads/writes are (optionally) aligned up to 4 bytes. Some flash out there can only be written in 8-byte words or higher.
 - Add a max chunk size, to reduce the RAM requirement in PageReader.
 - Allow writes within a transaction to be unsorted.

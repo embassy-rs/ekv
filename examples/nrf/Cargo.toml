@@ -23,6 +23,7 @@ defmt = [
 
 [dependencies]
 ekv = { path = "../../", features = [
+    "crc",
     "page-size-4096",
     "align-4",
     "max-page-count-2048",
