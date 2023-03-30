@@ -21,7 +21,7 @@ Key-value database for embedded systems, for raw NOR flash, using an LSM-Tree.
 
 ## Current status
 
-The project is in **beta** stage. It is fully functional and has no known bugs. It has not yet been used in production, but I intend to do so in the next month. This does not mean it's feature-complete, see the limitations below.
+The project is in **production ready** stage. The author is using it in production, it is fully functional and has no known bugs. This does not mean it's feature-complete, see the limitations below.
 
 The on-disk format is **not stable** yet. 
 - Major releases can do fully breaking changes to the on-disk format. New code won't be able to read old databases and vice-versa. No code to upgrade in-place will be provided. You'll have to either format and lose all data, or read out the data and write it back in the newer format.
