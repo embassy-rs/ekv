@@ -1,4 +1,7 @@
 {
+    "[toml]": {
+        "editor.formatOnSave": false,
+    },
     "rust-analyzer.runnableEnv": {
         "RUST_LOG": "trace"
     }
