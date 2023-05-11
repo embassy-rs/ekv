@@ -16,7 +16,7 @@ use ekv::flash::PageID;
 use ekv::{config, Config, Database};
 use embassy_executor::Spawner;
 use embassy_nrf::rng::Rng;
-use embassy_nrf::{pac, peripherals, qspi, bind_interrupts, rng};
+use embassy_nrf::{bind_interrupts, pac, peripherals, qspi, rng};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_time::Instant;
 use heapless::Vec;
@@ -46,7 +46,10 @@ impl<'a> ekv::flash::Flash for Flash<'a> {
     }
 
     async fn erase(&mut self, page_id: PageID) -> Result<(), Self::Error> {
-        self.qspi.erase((page_id.index() * config::PAGE_SIZE) as u32).await.unwrap();
+        self.qspi
+            .erase((page_id.index() * config::PAGE_SIZE) as u32)
+            .await
+            .unwrap();
         Ok(())
     }
 
