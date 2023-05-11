@@ -22,6 +22,7 @@ panic-probe = { version = "0.3", features = ["print-defmt"] }
 futures = { version = "0.3.17", default-features = false, features = ["async-await", "cfg-target-has-atomic", "unstable"] }
 
 ekv = { path = "../../", features = ["crc", "align-4", "page-size-4096", "max-page-count-32"] }
+embedded-storage = { version = "0.3" }
 
 [patch.crates-io]
 embassy-executor = { git = "https://github.com/embassy-rs/embassy", rev = "e179e7cf85810f0aa7ef8027d8d48f6d21f64dac" }
