@@ -4,5 +4,6 @@
 channel = "nightly-2023-02-07"
 components = [ "rust-src", "rustfmt", "clippy" ]
 targets = [
-    "thumbv7em-none-eabi",
+    "thumbv6m-none-eabi",
+    "thumbv7em-none-eabi",    
 ]
