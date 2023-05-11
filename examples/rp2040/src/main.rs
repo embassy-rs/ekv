@@ -20,14 +20,14 @@ extern "C" {
     static __config_start: u32;
 }
 
+// Workaround for alignment requirements.
+#[repr(C, align(4))]
+struct AlignedBuf([u8; ERASE_SIZE]);
+
 struct DbFlash<'a> {
     start: usize,
     flash: Flash<'a, FLASH, FLASH_SIZE>,
 }
-
-// Workaround for alignment requirements.
-#[repr(C, align(4))]
-struct AlignedBuf([u8; ERASE_SIZE]);
 
 impl<'a> flash::Flash for DbFlash<'a> {
     type Error = embassy_rp::flash::Error;
@@ -95,6 +95,7 @@ async fn main(_spawner: Spawner) {
         info!("HELLO: {:a}", s);
     }
 
+    info!("Bye!");
     embassy_time::Timer::after(Duration::from_secs(1)).await;
     cortex_m::asm::bkpt();
 }
