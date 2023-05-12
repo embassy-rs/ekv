@@ -4,8 +4,5 @@
     },
     "rust-analyzer.runnableEnv": {
         "RUST_LOG": "trace"
-    },
-    "rust-analyzer.linkedProjects": [
-        ".\\examples\\rp2040\\Cargo.toml"
-    ]
+    }
 }
