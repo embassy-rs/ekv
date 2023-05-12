@@ -29,8 +29,8 @@ ekv = { path = "../../", features = [
     "max-page-count-2048",
 ]}
 embassy-futures = { version = "0.1.0" }
-embassy-sync = { version = "0.1.0" }
-embassy-executor = { version = "0.1.0", features = ["nightly", "integrated-timers"] }
+embassy-sync = { version = "0.2.0" }
+embassy-executor = { version = "0.2.0", features = ["nightly", "integrated-timers", "executor-thread", "arch-cortex-m"] }
 embassy-time = { version = "0.1.0" }
 embassy-nrf = { version = "0.1.0", features = ["nightly", "nrf52840", "time-driver-rtc1", "gpiote", "unstable-pac"] }
 
@@ -54,8 +54,8 @@ opt-level = 's'
 overflow-checks = false
 
 [patch.crates-io]
-embassy-futures = { git = "https://github.com/embassy-rs/embassy", rev = "41a563aae3e474955892b27487e185f5f486f525" }
-embassy-sync = { git = "https://github.com/embassy-rs/embassy", rev = "41a563aae3e474955892b27487e185f5f486f525" }
-embassy-executor = { git = "https://github.com/embassy-rs/embassy", rev = "41a563aae3e474955892b27487e185f5f486f525" }
-embassy-time = { git = "https://github.com/embassy-rs/embassy", rev = "41a563aae3e474955892b27487e185f5f486f525" }
-embassy-nrf = { git = "https://github.com/embassy-rs/embassy", rev = "41a563aae3e474955892b27487e185f5f486f525" }
+embassy-executor = { git = "https://github.com/embassy-rs/embassy", rev = "e179e7cf85810f0aa7ef8027d8d48f6d21f64dac" }
+embassy-time = { git = "https://github.com/embassy-rs/embassy", rev = "e179e7cf85810f0aa7ef8027d8d48f6d21f64dac" }
+embassy-futures = { git = "https://github.com/embassy-rs/embassy", rev = "e179e7cf85810f0aa7ef8027d8d48f6d21f64dac" }
+embassy-sync = { git = "https://github.com/embassy-rs/embassy", rev = "e179e7cf85810f0aa7ef8027d8d48f6d21f64dac" }
+embassy-nrf = { git = "https://github.com/embassy-rs/embassy", rev = "e179e7cf85810f0aa7ef8027d8d48f6d21f64dac" }

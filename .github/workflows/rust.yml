@@ -2,9 +2,10 @@ name: Rust
 
 on:
   push:
-    branches: [staging, trying, master]
+    branches: [master]
   pull_request:
     branches: [master]
+  merge_group:
 
 jobs:
   test:

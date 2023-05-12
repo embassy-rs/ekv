@@ -16,17 +16,20 @@ use ekv::flash::PageID;
 use ekv::{config, Config, Database};
 use embassy_executor::Spawner;
 use embassy_nrf::rng::Rng;
-use embassy_nrf::{interrupt, pac, peripherals, qspi};
+use embassy_nrf::{bind_interrupts, pac, peripherals, qspi, rng};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_time::Instant;
 use heapless::Vec;
 use panic_probe as _;
 use rand_core::RngCore;
 
-const FLASH_SIZE: usize = config::PAGE_SIZE * config::MAX_PAGE_COUNT;
+bind_interrupts!(struct Irqs {
+    QSPI => qspi::InterruptHandler<peripherals::QSPI>;
+    RNG => rng::InterruptHandler<peripherals::RNG>;
+});
 
 struct Flash<'a> {
-    qspi: qspi::Qspi<'a, peripherals::QSPI, FLASH_SIZE>,
+    qspi: qspi::Qspi<'a, peripherals::QSPI>,
 }
 
 // Workaround for alignment requirements.
@@ -43,14 +46,17 @@ impl<'a> ekv::flash::Flash for Flash<'a> {
     }
 
     async fn erase(&mut self, page_id: PageID) -> Result<(), Self::Error> {
-        self.qspi.erase(page_id.index() * config::PAGE_SIZE).await.unwrap();
+        self.qspi
+            .erase((page_id.index() * config::PAGE_SIZE) as u32)
+            .await
+            .unwrap();
         Ok(())
     }
 
     async fn read(&mut self, page_id: PageID, offset: usize, data: &mut [u8]) -> Result<(), Self::Error> {
         let address = page_id.index() * config::PAGE_SIZE + offset;
         unsafe {
-            self.qspi.read(address, &mut BUF.0[..data.len()]).await.unwrap();
+            self.qspi.read(address as u32, &mut BUF.0[..data.len()]).await.unwrap();
             data.copy_from_slice(&BUF.0[..data.len()])
         }
         Ok(())
@@ -60,7 +66,7 @@ impl<'a> ekv::flash::Flash for Flash<'a> {
         let address = page_id.index() * config::PAGE_SIZE + offset;
         unsafe {
             BUF.0[..data.len()].copy_from_slice(data);
-            self.qspi.write(address, &BUF.0[..data.len()]).await.unwrap();
+            self.qspi.write(address as u32, &BUF.0[..data.len()]).await.unwrap();
         }
         Ok(())
     }
@@ -82,7 +88,7 @@ async fn main(_spawner: Spawner) -> ! {
     let p = embassy_nrf::init(Default::default());
 
     // Generate random seed.
-    let mut rng = Rng::new(p.RNG, interrupt::take!(RNG));
+    let mut rng = Rng::new(p.RNG, Irqs);
     let random_seed = rng.next_u32();
 
     // Config for the MX25R64 present in the nRF52840 DK
@@ -92,9 +98,8 @@ async fn main(_spawner: Spawner) -> ! {
     config.write_page_size = qspi::WritePageSize::_256BYTES;
     config.frequency = qspi::Frequency::M32;
 
-    let irq = interrupt::take!(QSPI);
-    let mut q: qspi::Qspi<_, FLASH_SIZE> = qspi::Qspi::new(
-        p.QSPI, irq, p.P0_19, p.P0_17, p.P0_20, p.P0_21, p.P0_22, p.P0_23, config,
+    let mut q: qspi::Qspi<_> = qspi::Qspi::new(
+        p.QSPI, Irqs, p.P0_19, p.P0_17, p.P0_20, p.P0_21, p.P0_22, p.P0_23, config,
     );
 
     let mut id = [1; 3];

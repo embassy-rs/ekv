@@ -1,5 +1,5 @@
+use core::fmt;
 use core::mem::size_of;
-use core::{fmt, mem};
 
 use crate::alloc::Allocator;
 use crate::config::*;
@@ -1234,7 +1234,7 @@ impl FileWriter {
     }
 
     async fn next_page<F: Flash>(&mut self, m: &mut FileManager<F>) -> Result<(), Error<F::Error>> {
-        if let Some(w) = mem::replace(&mut self.writer, None) {
+        if let Some(w) = self.writer.take() {
             self.flush_header(m, w).await?;
         }
 
@@ -1267,7 +1267,7 @@ impl FileWriter {
     }
 
     pub async fn commit<F: Flash>(&mut self, tx: &mut Transaction<'_, F>) -> Result<(), Error<F::Error>> {
-        if let Some(w) = mem::replace(&mut self.writer, None) {
+        if let Some(w) = self.writer.take() {
             self.flush_header(tx.m, w).await?;
 
             tx.m.dirty = true;
