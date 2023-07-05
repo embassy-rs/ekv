@@ -4,6 +4,7 @@
 #![feature(async_fn_in_trait)]
 #![feature(impl_trait_projections)]
 #![allow(incomplete_features)]
+#![recursion_limit = "256"]
 
 // must go first
 mod fmt;
@@ -72,71 +73,68 @@ impl<'a> ekv::flash::Flash for Flash<'a> {
     }
 }
 
+
+pub struct FakeFlash {}
+
+impl ekv::flash::Flash for FakeFlash {
+    type Error = core::convert::Infallible;
+
+    fn page_count(&self) -> usize {
+        ekv::config::MAX_PAGE_COUNT
+    }
+
+    async fn erase(&mut self, page_id: PageID) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn read(&mut self, page_id: PageID, offset: usize, data: &mut [u8]) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn write(&mut self, page_id: PageID, offset: usize, data: &[u8]) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+
+
 #[embassy_executor::main]
-async fn main(_spawner: Spawner) -> ! {
-    unsafe {
-        let nvmc = &*pac::NVMC::ptr();
-        let power = &*pac::POWER::ptr();
+async fn main(_spawner: Spawner) { main0(_spawner).await; main1(_spawner).await; }
+async fn main0(_spawner: Spawner) { main1(_spawner).await; main2(_spawner).await; }
+async fn main1(_spawner: Spawner) { main2(_spawner).await; main3(_spawner).await; }
+async fn main2(_spawner: Spawner) { main3(_spawner).await; main4(_spawner).await; }
+async fn main3(_spawner: Spawner) { main4(_spawner).await; main5(_spawner).await; }
+async fn main4(_spawner: Spawner) { main5(_spawner).await; main6(_spawner).await; }
+async fn main5(_spawner: Spawner) { main6(_spawner).await; main7(_spawner).await; }
+async fn main6(_spawner: Spawner) { main7(_spawner).await; main8(_spawner).await; }
+async fn main7(_spawner: Spawner) { main8(_spawner).await; main9(_spawner).await; }
+async fn main8(_spawner: Spawner) { main9(_spawner).await; main10(_spawner).await; }
+async fn main9(_spawner: Spawner) { main10(_spawner).await; main11(_spawner).await; }
+async fn main10(_spawner: Spawner) { main11(_spawner).await; main12(_spawner).await; }
+async fn main11(_spawner: Spawner) { main12(_spawner).await; main13(_spawner).await; }
+async fn main12(_spawner: Spawner) { main13(_spawner).await; main14(_spawner).await; }
+async fn main13(_spawner: Spawner) { main14(_spawner).await; main15(_spawner).await; }
+async fn main14(_spawner: Spawner) { main15(_spawner).await; main16(_spawner).await; }
+async fn main15(_spawner: Spawner) { main16(_spawner).await; main17(_spawner).await; }
+async fn main16(_spawner: Spawner) { main17(_spawner).await; main18(_spawner).await; }
+async fn main17(_spawner: Spawner) { main18(_spawner).await; main19(_spawner).await; }
+async fn main18(_spawner: Spawner) { main19(_spawner).await; main20(_spawner).await; }
+async fn main19(_spawner: Spawner) { main20(_spawner).await; }
+async fn main20(_spawner: Spawner) {
+    let random_seed = 0;
 
-        // Enable DC-DC
-        power.dcdcen.write(|w| w.dcdcen().enabled());
-
-        // Enable flash cache
-        nvmc.icachecnf.write(|w| w.cacheen().enabled());
-    }
-
-    let p = embassy_nrf::init(Default::default());
-
-    // Generate random seed.
-    let mut rng = Rng::new(p.RNG, Irqs);
-    let random_seed = rng.next_u32();
-
-    // Config for the MX25R64 present in the nRF52840 DK
-    let mut config = qspi::Config::default();
-    config.read_opcode = qspi::ReadOpcode::READ4IO;
-    config.write_opcode = qspi::WriteOpcode::PP4IO;
-    config.write_page_size = qspi::WritePageSize::_256BYTES;
-    config.frequency = qspi::Frequency::M32;
-
-    let mut q: qspi::Qspi<_> = qspi::Qspi::new(
-        p.QSPI, Irqs, p.P0_19, p.P0_17, p.P0_20, p.P0_21, p.P0_22, p.P0_23, config,
-    );
-
-    let mut id = [1; 3];
-    unwrap!(q.custom_instruction(0x9F, &[], &mut id).await);
-    info!("id: {}", id);
-
-    // Read status register
-    let mut status = [4; 1];
-    unwrap!(q.custom_instruction(0x05, &[], &mut status).await);
-
-    info!("status: {:?}", status[0]);
-
-    if status[0] & 0x40 == 0 {
-        status[0] |= 0x40;
-
-        unwrap!(q.custom_instruction(0x01, &status, &mut []).await);
-
-        info!("enabled quad in status");
-    }
-
-    let mut f = Flash { qspi: q };
+    let mut f = FakeFlash{};
 
     let mut config = Config::default();
     config.random_seed = random_seed;
     let db = Database::<_, NoopRawMutex>::new(&mut f, config);
 
-    info!("Formatting...");
-    let start = Instant::now();
     unwrap!(db.format().await);
-    let ms = Instant::now().duration_since(start).as_millis();
-    info!("Done in {} ms!", ms);
 
     const KEY_COUNT: usize = 100;
     const TX_SIZE: usize = 10;
 
     info!("Writing {} keys...", KEY_COUNT);
-    let start = Instant::now();
     for k in 0..KEY_COUNT / TX_SIZE {
         let mut wtx = db.write_transaction().await;
         for j in 0..TX_SIZE {
@@ -148,27 +146,6 @@ async fn main(_spawner: Spawner) -> ! {
         }
         wtx.commit().await.unwrap();
     }
-    let ms = Instant::now().duration_since(start).as_millis();
-    info!("Done in {} ms! {}ms/key", ms, ms / KEY_COUNT as u64);
-
-    info!("Reading {} keys...", KEY_COUNT);
-    let mut buf = [0u8; 32];
-    let start = Instant::now();
-    for i in 0..KEY_COUNT {
-        let key = make_key(i);
-        let val = make_value(i);
-
-        let mut rtx = db.read_transaction().await;
-        let n = rtx.read(&key, &mut buf).await.unwrap();
-        assert_eq!(&buf[..n], &val[..]);
-    }
-    let ms = Instant::now().duration_since(start).as_millis();
-    info!("Done in {} ms! {}ms/key", ms, ms / KEY_COUNT as u64);
-
-    info!("ALL DONE");
-
-    cortex_m::asm::bkpt();
-    loop {}
 }
 
 fn make_key(i: usize) -> [u8; 2] {
