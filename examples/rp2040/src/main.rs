@@ -9,7 +9,6 @@ use ekv::flash::{self, PageID};
 use ekv::{config, Database};
 use embassy_executor::Spawner;
 use embassy_rp::flash::Flash;
-use embassy_rp::peripherals::FLASH;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_time::Duration;
 use embedded_storage::nor_flash::{NorFlash, ReadNorFlash};
@@ -74,8 +73,8 @@ impl<T: NorFlash + ReadNorFlash> flash::Flash for DbFlash<T> {
 async fn main(_spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
 
-    let flash: DbFlash<Flash<FLASH, FLASH_SIZE>> = DbFlash {
-        flash: Flash::new(p.FLASH),
+    let flash: DbFlash<Flash<_, _, FLASH_SIZE>> = DbFlash {
+        flash: Flash::new_blocking(p.FLASH),
         start: unsafe { &__config_start as *const u32 as usize },
     };
     let db = Database::<_, NoopRawMutex>::new(flash, ekv::Config::default());

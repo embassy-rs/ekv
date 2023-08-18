@@ -6,7 +6,6 @@
     ],
     "settings": {
         "rust-analyzer.check.allTargets": false,
-        "rust-analyzer.procMacro.enable": true,
         "rust-analyzer.cargo.target": "thumbv7em-none-eabi",
         "rust-analyzer.cargo.features": [],
         "rust-analyzer.linkedProjects": [
@@ -14,7 +13,5 @@
         ],
         "rust-analyzer.imports.granularity.enforce": true,
         "rust-analyzer.imports.granularity.group": "module",
-        "rust-analyzer.cargo.buildScripts.enable": true,
-        "rust-analyzer.procMacro.attributes.enable": false,
     }
 }
