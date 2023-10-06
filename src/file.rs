@@ -322,9 +322,7 @@ impl<F: Flash> FileManager<F> {
 
     async fn get_file_page(&mut self, file_id: FileID, seq: Seq) -> Result<Option<PagePointer>, Error<F::Error>> {
         let f = &self.files[file_id as usize];
-        let Some(last) = f.last_page else {
-            return Ok(None)
-        };
+        let Some(last) = f.last_page else { return Ok(None) };
         if seq < f.first_seq || seq >= f.last_seq {
             Ok(None)
         } else {
@@ -682,7 +680,7 @@ impl<'a> FileReader<'a> {
         }
     }
 
-    pub fn curr_seq<F: Flash>(&mut self, m: &mut FileManager<F>) -> Seq {
+    pub fn curr_seq<F: Flash>(&mut self, m: &FileManager<F>) -> Seq {
         match &self.state {
             ReaderState::Created => m.files[self.file_id as usize].first_seq,
             ReaderState::Reading(s) => s.seq,
@@ -794,7 +792,7 @@ impl<'a> FileReader<'a> {
         Ok(())
     }
 
-    pub fn offset<F: Flash>(&mut self, m: &mut FileManager<F>) -> usize {
+    pub fn offset<F: Flash>(&mut self, m: &FileManager<F>) -> usize {
         let first_seq = m.files[self.file_id as usize].first_seq;
         self.curr_seq(m).sub(first_seq)
     }

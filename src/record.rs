@@ -911,8 +911,8 @@ impl<F: Flash> Inner<F> {
     }
 
     async fn compact(&mut self) -> Result<bool, Error<F::Error>> {
-        let Some((src, dst)) = self.compact_find_work()? else{
-            return Ok(false)
+        let Some((src, dst)) = self.compact_find_work()? else {
+            return Ok(false);
         };
 
         self.do_compact(src, dst).await?;

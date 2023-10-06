@@ -4,8 +4,6 @@
 #![feature(result_option_inspect)]
 #![feature(try_blocks)]
 #![feature(async_fn_in_trait)]
-#![feature(impl_trait_projections)]
-#![allow(incomplete_features)]
 #![allow(clippy::large_enum_variant)]
 #![allow(clippy::new_without_default)]
 #![warn(missing_docs)]
