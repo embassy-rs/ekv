@@ -87,19 +87,26 @@ pub struct FileManager<F: Flash> {
     meta_seq: Seq,
     dirty: bool,
     alloc: Allocator,
+    random: u32,
 }
 
 impl<F: Flash> FileManager<F> {
     pub fn new(flash: F, random_seed: u32) -> Self {
-        let page_count = flash.page_count();
         Self {
             flash,
+            random: random_seed,
             meta_page_id: PageID::zero(),
             meta_seq: Seq::ZERO,
             files: [FileState::EMPTY; FILE_COUNT],
             dirty: true,
-            alloc: Allocator::new(page_count, random_seed),
+            alloc: Allocator::new(),
         }
+    }
+
+    fn random(&mut self) -> u32 {
+        const SOME_PRIME: u32 = 1750509587;
+        self.random = self.random.wrapping_mul(SOME_PRIME);
+        self.random
     }
 
     fn page_count(&self) -> usize {
@@ -148,7 +155,10 @@ impl<F: Flash> FileManager<F> {
     pub async fn format(&mut self) -> Result<(), FormatError<F::Error>> {
         self.dirty = true;
 
-        self.alloc.reset();
+        let page_count = self.flash.page_count();
+
+        let random_seed = self.random();
+        self.alloc.reset(page_count, random_seed);
         self.files.fill(FileState::EMPTY);
         self.meta_page_id = self.alloc.allocate();
         self.meta_seq = Seq(1);
@@ -173,7 +183,8 @@ impl<F: Flash> FileManager<F> {
 
     pub async fn mount(&mut self, r: &mut PageReader) -> Result<(), Error<F::Error>> {
         self.dirty = true;
-        self.alloc.reset();
+        let random_seed = self.random();
+        self.alloc.reset(self.flash.page_count(), random_seed);
         self.files.fill(FileState::EMPTY);
 
         let mut meta_page_id = None;

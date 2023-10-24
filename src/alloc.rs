@@ -17,13 +17,12 @@ pub struct Allocator {
 }
 
 impl Allocator {
-    pub fn new(page_count: usize, random_seed: u32) -> Self {
-        assert!(page_count <= MAX_PAGE_COUNT);
+    pub fn new() -> Self {
         Self {
-            page_count,
+            page_count: 0,
             pages: [0u8; (MAX_PAGE_COUNT + 7) / 8],
             used: 0,
-            next_page_id: random_seed as usize % page_count,
+            next_page_id: 0,
         }
     }
 
@@ -42,7 +41,9 @@ impl Allocator {
         }
     }
 
-    pub fn reset(&mut self) {
+    pub fn reset(&mut self, page_count: usize, random_seed: u32) {
+        self.page_count = page_count;
+        self.next_page_id = random_seed as usize % page_count;
         self.used = 0;
         self.pages.fill(0x00);
     }
@@ -52,6 +53,10 @@ impl Allocator {
     }
 
     pub fn try_allocate(&mut self) -> Option<PageID> {
+        if self.page_count == 0 {
+            return None;
+        }
+
         let start = self.next_page_id;
         loop {
             let p = self.next_page_id;
@@ -117,8 +122,15 @@ mod tests {
     }
 
     #[test_log::test]
+    fn test_alloc_empty() {
+        let mut a = Allocator::new();
+        assert_eq!(a.try_allocate(), None);
+    }
+
+    #[test_log::test]
     fn test_alloc() {
-        let mut a = Allocator::new(5, 0);
+        let mut a = Allocator::new();
+        a.reset(5, 0);
         assert_eq!(a.try_allocate(), Some(page(0)));
         assert_eq!(a.try_allocate(), Some(page(1)));
         assert_eq!(a.try_allocate(), Some(page(2)));
@@ -129,7 +141,8 @@ mod tests {
 
     #[test_log::test]
     fn test_alloc_wraparound() {
-        let mut a = Allocator::new(5, 0);
+        let mut a = Allocator::new();
+        a.reset(5, 0);
         assert_eq!(a.try_allocate(), Some(page(0)));
         assert_eq!(a.try_allocate(), Some(page(1)));
         assert_eq!(a.try_allocate(), Some(page(2)));
@@ -145,13 +158,15 @@ mod tests {
     #[test_log::test]
     #[should_panic]
     fn test_double_free() {
-        let mut a = Allocator::new(5, 0);
+        let mut a = Allocator::new();
+        a.reset(5, 0);
         a.free(page(2));
     }
 
     #[test_log::test]
     fn test_mark_used() {
-        let mut a = Allocator::new(5, 0);
+        let mut a = Allocator::new();
+        a.reset(5, 0);
         a.mark_used(page(2));
         a.free(page(2));
         a.mark_used(page(2));
@@ -164,7 +179,8 @@ mod tests {
 
     #[test_log::test]
     fn test_is_used() {
-        let mut a = Allocator::new(5, 0);
+        let mut a = Allocator::new();
+        a.reset(5, 0);
         assert_eq!(a.is_used(page(2)), false);
         a.mark_used(page(2));
         assert_eq!(a.is_used(page(2)), true);
@@ -175,7 +191,8 @@ mod tests {
     #[test_log::test]
     #[should_panic(expected = "double mark_used")]
     fn test_mark_used_double() {
-        let mut a = Allocator::new(5, 0);
+        let mut a = Allocator::new();
+        a.reset(5, 0);
         a.mark_used(page(2));
         a.mark_used(page(2));
     }
@@ -183,21 +200,24 @@ mod tests {
     #[test_log::test]
     #[should_panic(expected = "out of bounds")]
     fn test_is_used_out_of_bounds() {
-        let a = Allocator::new(5, 0);
+        let mut a = Allocator::new();
+        a.reset(5, 0);
         a.is_used(page(10));
     }
 
     #[test_log::test]
     #[should_panic(expected = "out of bounds")]
     fn test_mark_used_out_of_bounds() {
-        let mut a = Allocator::new(5, 0);
+        let mut a = Allocator::new();
+        a.reset(5, 0);
         a.mark_used(page(10));
     }
 
     #[test_log::test]
     #[should_panic(expected = "out of bounds")]
     fn test_free_out_of_bounds() {
-        let mut a = Allocator::new(5, 0);
+        let mut a = Allocator::new();
+        a.reset(5, 0);
         a.free(page(10));
     }
 }
