@@ -23,6 +23,7 @@ pub enum SeekDirection {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(C)]
 pub struct MetaHeader {
+    page_count: u32,
     seq: Seq,
 }
 
@@ -173,9 +174,11 @@ impl<F: Flash> FileManager<F> {
 
         // Write initial meta page.
         let mut w = self.write_page(self.meta_page_id).await;
-        w.write_header(&mut self.flash, MetaHeader { seq: self.meta_seq })
-            .await
-            .map_err(FormatError::Flash)?;
+        let h = MetaHeader {
+            page_count: self.page_count() as u32,
+            seq: self.meta_seq,
+        };
+        w.write_header(&mut self.flash, h).await.map_err(FormatError::Flash)?;
 
         self.dirty = false;
         Ok(())
@@ -183,18 +186,18 @@ impl<F: Flash> FileManager<F> {
 
     pub async fn mount(&mut self, r: &mut PageReader) -> Result<(), Error<F::Error>> {
         self.dirty = true;
-        let random_seed = self.random();
-        self.alloc.reset(self.flash.page_count(), random_seed);
         self.files.fill(FileState::EMPTY);
 
         let mut meta_page_id = None;
         let mut meta_seq = Seq::ZERO;
-        for page_id in 0..self.page_count() {
+        let mut meta_page_count = 0;
+        for page_id in 0..self.flash.page_count() {
             let page_id = PageID::from_raw(page_id as _).unwrap();
             if let Ok(h) = self.read_header::<MetaHeader>(page_id).await {
                 if h.seq > meta_seq {
                     meta_page_id = Some(page_id);
                     meta_seq = h.seq;
+                    meta_page_count = h.page_count;
                 }
             }
         }
@@ -203,8 +206,32 @@ impl<F: Flash> FileManager<F> {
             debug!("Meta page not found");
             corrupted!()
         };
+        if meta_page_count == 0 {
+            debug!("mount: flash page count zero",);
+            corrupted!()
+        }
+        if meta_page_count as usize > self.flash.page_count() {
+            debug!(
+                "mount: flash page count {} less than meta page {}. flash image truncated?",
+                self.flash.page_count(),
+                meta_page_count
+            );
+            corrupted!()
+        };
+        if meta_page_id.index() >= meta_page_count as usize {
+            debug!(
+                "mount: meta page id {} out of bounds for page count {}",
+                meta_page_id.index(),
+                meta_page_count
+            );
+            corrupted!()
+        };
+
         self.meta_page_id = meta_page_id;
         self.meta_seq = meta_seq;
+
+        let random_seed = self.random();
+        self.alloc.reset(meta_page_count as _, random_seed);
         self.alloc.mark_used(meta_page_id);
 
         r.open::<_, MetaHeader>(&mut self.flash, meta_page_id)
@@ -577,9 +604,11 @@ impl<'a, F: Flash> Transaction<'a, F> {
                 }
 
                 self.m.meta_seq = self.m.meta_seq.add(1)?; // TODO handle wraparound
-                w.write_header(&mut self.m.flash, MetaHeader { seq: self.m.meta_seq })
-                    .await
-                    .map_err(Error::Flash)?;
+                let h = MetaHeader {
+                    page_count: self.m.page_count() as _,
+                    seq: self.m.meta_seq,
+                };
+                w.write_header(&mut self.m.flash, h).await.map_err(Error::Flash)?;
                 w.commit(&mut self.m.flash).await?;
 
                 // free the old one.
