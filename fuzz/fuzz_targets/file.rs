@@ -11,7 +11,7 @@ use libfuzzer_sys::fuzz_target;
 
 const MAX_LEN: usize = 1024;
 
-fuzz_target!(|data: Input| { fuzz(data) });
+fuzz_target!(|data: Input| fuzz(data));
 
 #[derive(Arbitrary, Debug)]
 struct Input {
@@ -27,7 +27,6 @@ enum Op {
 }
 
 struct Record {
-    id: u32,
     len: usize,
     offs: usize,
 }
@@ -78,11 +77,7 @@ async fn fuzz_inner(ops: Input, dump: bool) {
                 };
 
                 let id = (records.len() * 2 + 1) as u32;
-                records.push(Record {
-                    id,
-                    len,
-                    offs: write_offs,
-                });
+                records.push(Record { len, offs: write_offs });
 
                 w.write(&mut m, &id.to_le_bytes()).await.unwrap();
                 buf[..len].fill(id as u8);

@@ -9,7 +9,7 @@ use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-fuzz_target!(|data: Input| { fuzz(data) });
+fuzz_target!(|data: Input| fuzz(data));
 
 #[derive(Arbitrary, Debug)]
 struct Input {

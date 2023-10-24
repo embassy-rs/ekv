@@ -4,7 +4,7 @@ use ekv::{Config, Database};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use libfuzzer_sys::fuzz_target;
 
-fuzz_target!(|data: &[u8]| { fuzz(data) });
+fuzz_target!(|data: &[u8]| fuzz(data));
 
 fn fuzz(data: &[u8]) {
     if std::env::var_os("RUST_LOG").is_some() {
