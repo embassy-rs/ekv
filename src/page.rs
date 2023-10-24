@@ -12,6 +12,7 @@ const CHUNK_MAGIC: u16 = 0x58A4;
 #[repr(C)]
 pub struct PageHeader {
     magic: u32,
+    page_id: u32,
     #[cfg(feature = "crc")]
     crc: u32,
 }
@@ -68,12 +69,13 @@ async fn write_header<F: Flash, H: Header>(flash: &mut F, page_id: PageID, heade
 
     let page_header = PageHeader {
         magic: H::MAGIC,
+        page_id: page_id.index() as u32,
         #[cfg(feature = "crc")]
         crc: crc32(&buf[PageHeader::SIZE..]),
     };
     buf[..PageHeader::SIZE].copy_from_slice(&page_header.to_bytes());
 
-    flash.write(page_id as _, 0, buf).await?;
+    flash.write(page_id, 0, buf).await?;
     Ok(())
 }
 
@@ -85,7 +87,7 @@ pub async fn read_header<F: Flash, H: Header>(flash: &mut F, page_id: PageID) ->
     flash.read(page_id as _, 0, buf).await.map_err(Error::Flash)?;
 
     let page_header = PageHeader::from_bytes(buf[..PageHeader::SIZE].try_into().unwrap());
-    if page_header.magic != H::MAGIC {
+    if page_header.magic != H::MAGIC || page_header.page_id != page_id.index() as u32 {
         // don't use `corrupted!()` here, this can happen during normal
         // operation while searching for meta pages, for mount/format.
         return Err(Error::Corrupted);
