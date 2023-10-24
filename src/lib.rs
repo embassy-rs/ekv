@@ -6,7 +6,8 @@
 #![feature(async_fn_in_trait)]
 #![allow(clippy::large_enum_variant)]
 #![allow(clippy::new_without_default)]
-#![warn(missing_docs)]
+// the `_test` feature makes public more stuff, causing bogus warnings.
+#![cfg_attr(not(feature = "_test"), warn(missing_docs))]
 
 // MUST go first.
 mod fmt;
