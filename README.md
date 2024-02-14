@@ -42,6 +42,8 @@ for performance.
 
 ## Alternatives
 
+`ekv` works best for datasets with large amounts of keys (>1000), where its `O(log n)` complexity outperforms linear search. For datasets with less keys, other key-value databases based on linear search (such as `sequential-storage`) will be faster.
+
 - If the dataset fits in RAM, you could read/write it all at once. Either making it `repr(C)` and transmuting, or serializing it with some compact `serde` flavor such as [`postcard`](https://docs.rs/postcard)
 - [sequential-storage](https://docs.rs/sequential-storage) - Rust. Linear search. No multi-key transactions. Multiple single-key transactions can be written to the same page, unlike `ekv`.
 - [Tock's tickv](https://docs.rs/tickv) - Rust. Hash table. No multi-key transactions.
