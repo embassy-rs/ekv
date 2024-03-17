@@ -36,7 +36,7 @@ def feature(name, default, min=None, max=None, pow2=None, vals=None, factors=[])
 
 
 feature("align", default=4, vals=[1, 2, 4])
-feature("page_size", default=4096, min=128, max=65536, pow2=True)
+feature("page_size", default=4096, min=8, max=65536, pow2=True)
 feature("max_page_count", default=256, min=1,
         max=65536, pow2=True, factors=[3, 5, 9])
 feature("erase_value", default=0xFF, vals=[0x00, 0xFF])
