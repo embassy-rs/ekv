@@ -7,7 +7,7 @@ use crate::errors::*;
 use crate::flash::Flash;
 use crate::page;
 pub use crate::page::ReadError;
-use crate::page::{ChunkHeader, Header, PageHeader, PageReader, PageWriter};
+use crate::page::{ChunkHeader, DehydratedPageReader, Header, PageHeader, PageReader, PageWriter};
 use crate::types::{OptionPageID, PageID};
 
 pub const PAGE_MAX_PAYLOAD_SIZE: usize = PAGE_SIZE - PageHeader::SIZE - size_of::<DataHeader>() - ChunkHeader::SIZE;
@@ -143,6 +143,27 @@ impl<F: Flash> FileManager<F> {
     pub async fn write(&mut self, r: &mut PageReader, file_id: FileID) -> Result<FileWriter, Error<F::Error>> {
         assert!(!self.dirty);
         FileWriter::new(self, r, file_id).await
+    }
+
+    pub async fn read_rehydrated<'a>(
+        &mut self,
+        r: &'a mut PageReader,
+        dehydrated: &DehydratedFileReader,
+    ) -> Result<FileReader<'a>, Error<F::Error>> {
+        assert!(!self.dirty);
+
+        Ok(FileReader {
+            file_id: dehydrated.file_id,
+            state: match &dehydrated.state {
+                DehydratedReaderState::Created => ReaderState::Created,
+                DehydratedReaderState::Finished => ReaderState::Finished,
+                DehydratedReaderState::Reading(s, rs) => {
+                    r.rehydrate_from(&mut self.flash, rs).await?;
+                    ReaderState::Reading(s.clone())
+                }
+            },
+            r,
+        })
     }
 
     pub fn file_flags(&self, file_id: FileID) -> u8 {
@@ -707,8 +728,23 @@ enum ReaderState {
     Reading(ReaderStateReading),
     Finished,
 }
+
+#[derive(Clone)]
 struct ReaderStateReading {
     seq: Seq,
+}
+
+#[derive(Clone)]
+pub struct DehydratedFileReader {
+    file_id: FileID,
+    state: DehydratedReaderState,
+}
+
+#[derive(Clone)]
+enum DehydratedReaderState {
+    Created,
+    Reading(ReaderStateReading, DehydratedPageReader),
+    Finished,
 }
 
 impl<'a> FileReader<'a> {
@@ -717,6 +753,17 @@ impl<'a> FileReader<'a> {
             file_id,
             r,
             state: ReaderState::Created,
+        }
+    }
+
+    pub fn dehydrate(&self) -> DehydratedFileReader {
+        DehydratedFileReader {
+            file_id: self.file_id,
+            state: match &self.state {
+                ReaderState::Created => DehydratedReaderState::Created,
+                ReaderState::Finished => DehydratedReaderState::Finished,
+                ReaderState::Reading(s) => DehydratedReaderState::Reading(s.clone(), self.r.dehydrate()),
+            },
         }
     }
 
@@ -2317,6 +2364,61 @@ mod tests {
         let h = m.read_header::<DataHeader>(page(3)).await.unwrap();
         assert_eq!(h.seq, Seq(PAGE_MAX_PAYLOAD_SIZE as u32 * 2));
         assert_eq!(h.record_boundary, 0);
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_hydration() {
+        let mut f = MemFlash::new();
+        let mut m = FileManager::new(&mut f, 0);
+        let mut pr = PageReader::new();
+        m.format().await.unwrap();
+        m.mount(&mut pr).await.unwrap();
+
+        let mut w = m.write(&mut pr, 1).await.unwrap();
+        w.write(&mut m, &[1, 2, 3, 4, 5, 6, 7, 8]).await.unwrap();
+        w.record_end();
+        m.commit(&mut w).await.unwrap();
+
+        let mut r = m.read(&mut pr, 1);
+
+        let dehydrated_start = r.dehydrate();
+
+        let mut buf = [0; 3];
+        r.read(&mut m, &mut buf).await.unwrap();
+        assert_eq!(buf, [1, 2, 3]);
+
+        let dehydrated_middle = r.dehydrate();
+
+        let mut buf = [0; 5];
+        r.read(&mut m, &mut buf).await.unwrap();
+        assert_eq!(buf, [4, 5, 6, 7, 8]);
+
+        let dehydrated_end = r.dehydrate();
+
+        let mut buf = [0; 1];
+        let res = r.read(&mut m, &mut buf).await;
+        assert!(matches!(res, Err(ReadError::Eof)));
+
+        let mut r = m.read_rehydrated(&mut pr, &dehydrated_start).await.unwrap();
+        let mut buf = [0; 8];
+        r.read(&mut m, &mut buf).await.unwrap();
+        assert_eq!(buf, [1, 2, 3, 4, 5, 6, 7, 8]);
+        let mut buf = [0; 1];
+        let res = r.read(&mut m, &mut buf).await;
+        assert!(matches!(res, Err(ReadError::Eof)));
+
+        let mut r = m.read_rehydrated(&mut pr, &dehydrated_middle).await.unwrap();
+        let mut buf = [0; 5];
+        r.read(&mut m, &mut buf).await.unwrap();
+        assert_eq!(buf, [4, 5, 6, 7, 8]);
+        let mut buf = [0; 1];
+        let res = r.read(&mut m, &mut buf).await;
+        assert!(matches!(res, Err(ReadError::Eof)));
+
+        let mut r = m.read_rehydrated(&mut pr, &dehydrated_end).await.unwrap();
+        let mut buf = [0; 1];
+        let res = r.read(&mut m, &mut buf).await;
+        assert!(matches!(res, Err(ReadError::Eof)));
     }
 
     #[test_log::test(tokio::test)]
