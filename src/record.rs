@@ -99,7 +99,7 @@ impl<F: Flash, M: RawMutex> Database<F, M> {
     /// Note that actually writing to the flash behind `ekv`'s back will result
     /// in corruption. This is intended for other tasks, for example
     /// reading the flash memory's serial number, or statistics.
-    pub async fn lock_flash(&self) -> impl Deref<Target = F> + DerefMut + '_ {
+    pub async fn lock_flash(&self) -> impl DerefMut<Target = F> + '_ {
         FlashLockGuard(self.inner.lock().await)
     }
 

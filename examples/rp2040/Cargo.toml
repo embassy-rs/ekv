@@ -7,11 +7,11 @@ name = "ekv-examples-rp2040"
 version = "0.1.0"
 
 [dependencies]
-embassy-executor = { version = "0.4.0",  features = ["nightly", "defmt", "integrated-timers", "executor-thread", "arch-cortex-m"] }
-embassy-time = { version = "0.2.0",  features = ["defmt", "defmt-timestamp-uptime"] }
+embassy-executor = { version = "0.5.0",  features = ["nightly", "defmt", "integrated-timers", "executor-thread", "arch-cortex-m"] }
+embassy-time = { version = "0.3.0",  features = ["defmt", "defmt-timestamp-uptime"] }
 embassy-rp = { version = "0.1.0",  features = ["defmt", "unstable-pac", "time-driver"] }
 embassy-sync = { version = "0.5.0" }
-embassy-futures = { version = "0.1.0" }
+embassy-futures = { version = "0.1.1" }
 
 defmt = "0.3"
 defmt-rtt = "0.4"
@@ -25,11 +25,11 @@ ekv = { path = "../../", features = ["crc", "align-4", "page-size-4096", "max-pa
 embedded-storage = { version = "0.3" }
 
 [patch.crates-io]
-embassy-executor = { git = "https://github.com/embassy-rs/embassy", rev = "915423fc63f209059a2242fbc3ad3b88d796514f" }
-embassy-time = { git = "https://github.com/embassy-rs/embassy", rev = "915423fc63f209059a2242fbc3ad3b88d796514f" }
-embassy-futures = { git = "https://github.com/embassy-rs/embassy", rev = "915423fc63f209059a2242fbc3ad3b88d796514f" }
-embassy-sync = { git = "https://github.com/embassy-rs/embassy", rev = "915423fc63f209059a2242fbc3ad3b88d796514f" }
-embassy-rp = { git = "https://github.com/embassy-rs/embassy", rev = "915423fc63f209059a2242fbc3ad3b88d796514f" }
+embassy-executor = { git = "https://github.com/embassy-rs/embassy", rev = "65e9f86d9e22ab2133c12cbb2613be075641ef62" }
+embassy-time = { git = "https://github.com/embassy-rs/embassy", rev = "65e9f86d9e22ab2133c12cbb2613be075641ef62" }
+embassy-futures = { git = "https://github.com/embassy-rs/embassy", rev = "65e9f86d9e22ab2133c12cbb2613be075641ef62" }
+embassy-sync = { git = "https://github.com/embassy-rs/embassy", rev = "65e9f86d9e22ab2133c12cbb2613be075641ef62" }
+embassy-rp = { git = "https://github.com/embassy-rs/embassy", rev = "65e9f86d9e22ab2133c12cbb2613be075641ef62" }
 
 [profile.release]
 codegen-units = 1
