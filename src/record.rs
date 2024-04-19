@@ -1,9 +1,7 @@
 use core::cell::RefCell;
 use core::cmp::Ordering;
 use core::future::poll_fn;
-use core::mem::MaybeUninit;
 use core::ops::{Deref, DerefMut};
-use core::slice;
 use core::task::Poll;
 
 use embassy_sync::blocking_mutex::raw::RawMutex;
@@ -729,18 +727,13 @@ impl<F: Flash> Inner<F> {
             return Ok(());
         }
 
-        let mut w = self.files.write(&mut self.readers[0], dst).await?;
+        let m = &mut self.files;
+        let mut w = m.write(&mut self.readers[0], dst).await?;
 
         // Open all files in level for reading.
-        // TODO: maybe use a bit less unsafe?
-        let mut r: [MaybeUninit<FileReader>; BRANCHING_FACTOR] = unsafe { MaybeUninit::uninit().assume_init() };
-        let readers_ptr = self.readers.as_mut_ptr();
-        for (i, &file_id) in src.iter().enumerate() {
-            r[i].write(self.files.read(unsafe { &mut *readers_ptr.add(i) }, file_id));
-        }
-        let r = unsafe { slice::from_raw_parts_mut(r.as_mut_ptr() as *mut FileReader, src.len()) };
-
-        let m = &mut self.files;
+        let mut r: Vec<FileReader, BRANCHING_FACTOR> = Vec::from_iter(
+            core::iter::zip(&src, &mut self.readers[..]).map(|(&file_id, reader)| m.read(reader, file_id)),
+        );
 
         struct KeySlot {
             valid: bool,
