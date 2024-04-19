@@ -427,11 +427,11 @@ impl<F: Flash> Inner<F> {
         let mut s = FileSearcher::new(r);
 
         let mut key_buf = [0u8; MAX_KEY_SIZE];
+        let mut header = [0; RECORD_HEADER_SIZE];
 
         // Binary search
         let mut ok = s.start(m).await?;
         while ok {
-            let mut header = [0; RECORD_HEADER_SIZE];
             match s.reader().read(m, &mut header).await {
                 Ok(()) => {}
                 Err(PageReadError::Eof) => return Ok(None), // key not present.
@@ -470,7 +470,6 @@ impl<F: Flash> Inner<F> {
 
         // Linear search
         loop {
-            let mut header = [0; RECORD_HEADER_SIZE];
             match r.read(m, &mut header).await {
                 Ok(()) => {}
                 Err(PageReadError::Eof) => return Ok(None), // key not present.
