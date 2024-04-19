@@ -135,7 +135,7 @@ impl<F: Flash> FileManager<F> {
         self.files[file_id as usize].last_page.is_none()
     }
 
-    pub async fn read<'a>(&mut self, r: &'a mut PageReader, file_id: FileID) -> FileReader<'a> {
+    pub fn read<'a>(&mut self, r: &'a mut PageReader, file_id: FileID) -> FileReader<'a> {
         assert!(!self.dirty);
         FileReader::new(self, r, file_id)
     }
@@ -1472,7 +1472,7 @@ mod tests {
         w.write(&mut m, &data).await.unwrap();
         m.commit(&mut w).await.unwrap();
 
-        let mut r = m.read(&mut pr, 0).await;
+        let mut r = m.read(&mut pr, 0);
         let mut buf = vec![0; data.len()];
         r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(data, buf);
@@ -1480,7 +1480,7 @@ mod tests {
         // Remount
         m.mount(&mut pr).await.unwrap();
 
-        let mut r = m.read(&mut pr, 0).await;
+        let mut r = m.read(&mut pr, 0);
         let mut buf = vec![0; data.len()];
         r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(data, buf);
@@ -1501,7 +1501,7 @@ mod tests {
         m.commit(&mut w).await.unwrap();
         w.discard(&mut m).await.unwrap();
 
-        let mut r = m.read(&mut pr, 0).await;
+        let mut r = m.read(&mut pr, 0);
         let mut buf = vec![0; data.len()];
         r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(data, buf);
@@ -1509,7 +1509,7 @@ mod tests {
         // Remount
         m.mount(&mut pr).await.unwrap();
 
-        let mut r = m.read(&mut pr, 0).await;
+        let mut r = m.read(&mut pr, 0);
         let mut buf = vec![0; data.len()];
         r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(data, buf);
@@ -1531,7 +1531,7 @@ mod tests {
         w.write(&mut m, &[6, 7, 8, 9]).await.unwrap();
         m.commit(&mut w).await.unwrap();
 
-        let mut r = m.read(&mut pr, 0).await;
+        let mut r = m.read(&mut pr, 0);
         let mut buf = vec![0; 9];
         r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(buf, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
@@ -1539,7 +1539,7 @@ mod tests {
         // Remount
         m.mount(&mut pr).await.unwrap();
 
-        let mut r = m.read(&mut pr, 0).await;
+        let mut r = m.read(&mut pr, 0);
         r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(buf, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
     }
@@ -1558,14 +1558,14 @@ mod tests {
 
         m.truncate(0, 2).await.unwrap();
 
-        let mut r = m.read(&mut pr, 0).await;
+        let mut r = m.read(&mut pr, 0);
         let mut buf = [0; 3];
         r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(buf, [3, 4, 5]);
 
         m.truncate(0, 1).await.unwrap();
 
-        let mut r = m.read(&mut pr, 0).await;
+        let mut r = m.read(&mut pr, 0);
         let mut buf = [0; 2];
         r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(buf, [4, 5]);
@@ -1573,7 +1573,7 @@ mod tests {
         // Remount
         m.mount(&mut pr).await.unwrap();
 
-        let mut r = m.read(&mut pr, 0).await;
+        let mut r = m.read(&mut pr, 0);
         let mut buf = [0; 2];
         r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(buf, [4, 5]);
@@ -1599,21 +1599,21 @@ mod tests {
         tx.truncate(0, 2).await.unwrap();
         tx.commit().await.unwrap();
 
-        let mut r = m.read(&mut pr, 0).await;
+        let mut r = m.read(&mut pr, 0);
         let mut buf = [0; 7];
         r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(buf, [3, 4, 5, 6, 7, 8, 9]);
 
         m.truncate(0, 1).await.unwrap();
 
-        let mut r = m.read(&mut pr, 0).await;
+        let mut r = m.read(&mut pr, 0);
         let mut buf = [0; 6];
         r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(buf, [4, 5, 6, 7, 8, 9]);
 
         m.truncate(0, 5).await.unwrap();
 
-        let mut r = m.read(&mut pr, 0).await;
+        let mut r = m.read(&mut pr, 0);
         let mut buf = [0; 1];
         r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(buf, [9]);
@@ -1621,7 +1621,7 @@ mod tests {
         // Remount
         m.mount(&mut pr).await.unwrap();
 
-        let mut r = m.read(&mut pr, 0).await;
+        let mut r = m.read(&mut pr, 0);
         let mut buf = [0; 1];
         r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(buf, [9]);
@@ -1630,7 +1630,7 @@ mod tests {
         w.write(&mut m, &[10, 11, 12]).await.unwrap();
         m.commit(&mut w).await.unwrap();
 
-        let mut r = m.read(&mut pr, 0).await;
+        let mut r = m.read(&mut pr, 0);
         let mut buf = [0; 4];
         r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(buf, [9, 10, 11, 12]);
@@ -1655,7 +1655,7 @@ mod tests {
 
         m.remount_if_dirty(&mut pr).await.unwrap();
 
-        let mut r = m.read(&mut pr, 0).await;
+        let mut r = m.read(&mut pr, 0);
         let mut buf = [0; 1];
         let res = r.read(&mut m, &mut buf).await;
         assert_eq!(res, Err(ReadError::Eof));
@@ -1684,7 +1684,7 @@ mod tests {
 
         assert_eq!(m.alloc.is_used(page(1)), false);
 
-        let mut r = m.read(&mut pr, 0).await;
+        let mut r = m.read(&mut pr, 0);
         let mut buf = [0; 1];
         let res = r.read(&mut m, &mut buf).await;
         assert!(matches!(res, Err(ReadError::Eof)));
@@ -1715,7 +1715,7 @@ mod tests {
 
         assert_eq!(m.alloc.is_used(page(1)), false);
 
-        let mut r = m.read(&mut pr, 0).await;
+        let mut r = m.read(&mut pr, 0);
         let mut buf = [0; 1];
         let res = r.read(&mut m, &mut buf).await;
         assert!(matches!(res, Err(ReadError::Eof)));
@@ -1755,7 +1755,7 @@ mod tests {
         assert_eq!(m.alloc.is_used(page(1)), false);
         assert_eq!(m.alloc.is_used(page(2)), false);
 
-        let mut r = m.read(&mut pr, 0).await;
+        let mut r = m.read(&mut pr, 0);
         let mut buf = [0; 1];
         let res = r.read(&mut m, &mut buf).await;
         assert!(matches!(res, Err(ReadError::Eof)));
@@ -1777,7 +1777,7 @@ mod tests {
         w.write(&mut m, &[6, 7, 8, 9]).await.unwrap();
         w.discard(&mut m).await.unwrap();
 
-        let mut r = m.read(&mut pr, 0).await;
+        let mut r = m.read(&mut pr, 0);
         let mut buf = [0; 5];
         r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(buf, [1, 2, 3, 4, 5]);
@@ -1789,7 +1789,7 @@ mod tests {
         w.write(&mut m, &[10, 11]).await.unwrap();
         m.commit(&mut w).await.unwrap();
 
-        let mut r = m.read(&mut pr, 0).await;
+        let mut r = m.read(&mut pr, 0);
         let mut buf = [0; 7];
         r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(buf, [1, 2, 3, 4, 5, 10, 11]);
@@ -1803,7 +1803,7 @@ mod tests {
         m.format().await.unwrap();
         m.mount(&mut pr).await.unwrap();
 
-        let mut r = m.read(&mut pr, 0).await;
+        let mut r = m.read(&mut pr, 0);
         let mut buf = vec![0; 1024];
         let res = r.read(&mut m, &mut buf).await;
         assert!(matches!(res, Err(ReadError::Eof)));
@@ -1823,7 +1823,7 @@ mod tests {
         w.write(&mut m, &data).await.unwrap();
         w.discard(&mut m).await.unwrap(); // don't commit
 
-        let mut r = m.read(&mut pr, 0).await;
+        let mut r = m.read(&mut pr, 0);
         let mut buf = vec![0; 1024];
         let res = r.read(&mut m, &mut buf).await;
         assert!(matches!(res, Err(ReadError::Eof)));
@@ -2038,12 +2038,12 @@ mod tests {
         m.commit(&mut w2).await.unwrap();
         m.commit(&mut w1).await.unwrap();
 
-        let mut r = m.read(&mut pr, 1).await;
+        let mut r = m.read(&mut pr, 1);
         let mut buf = [0; 32];
         r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(buf[..], data[..]);
 
-        let mut r = m.read(&mut pr, 2).await;
+        let mut r = m.read(&mut pr, 2);
         let mut buf = [0; 32];
         r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(buf[..], data[..]);
@@ -2051,12 +2051,12 @@ mod tests {
         // Remount
         m.mount(&mut pr).await.unwrap();
 
-        let mut r = m.read(&mut pr, 1).await;
+        let mut r = m.read(&mut pr, 1);
         let mut buf = [0; 32];
         r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(buf[..], data[..]);
 
-        let mut r = m.read(&mut pr, 2).await;
+        let mut r = m.read(&mut pr, 2);
         let mut buf = [0; 32];
         r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(buf[..], data[..]);
@@ -2327,7 +2327,7 @@ mod tests {
         m.format().await.unwrap();
         m.mount(&mut pr).await.unwrap();
 
-        let mut s = FileSearcher::new(m.read(&mut pr, 1).await);
+        let mut s = FileSearcher::new(m.read(&mut pr, 1));
         assert_eq!(s.start(&mut m).await.unwrap(), false);
         assert_eq!(s.reader().offset(&mut m), 0);
     }
@@ -2346,7 +2346,7 @@ mod tests {
 
         // start immediately return false, because there's nothing to bisect.
         // Only possible point to seek is start of the only page.
-        let mut s = FileSearcher::new(m.read(&mut pr, 1).await);
+        let mut s = FileSearcher::new(m.read(&mut pr, 1));
         assert_eq!(s.start(&mut m).await.unwrap(), false);
         assert_eq!(s.reader().offset(&mut m), 0);
     }
@@ -2366,13 +2366,13 @@ mod tests {
         }
         m.commit(&mut w).await.unwrap();
 
-        let mut s = FileSearcher::new(m.read(&mut pr, 1).await);
+        let mut s = FileSearcher::new(m.read(&mut pr, 1));
         assert_eq!(s.start(&mut m).await.unwrap(), true);
         assert_eq!(s.reader().offset(&mut m), PAGE_MAX_PAYLOAD_SIZE);
         assert_eq!(s.seek(&mut m, SeekDirection::Left).await.unwrap(), false);
         assert_eq!(s.reader().offset(&mut m), 0);
 
-        let mut s = FileSearcher::new(m.read(&mut pr, 1).await);
+        let mut s = FileSearcher::new(m.read(&mut pr, 1));
         assert_eq!(s.start(&mut m).await.unwrap(), true);
         assert_eq!(s.reader().offset(&mut m), PAGE_MAX_PAYLOAD_SIZE);
         assert_eq!(s.seek(&mut m, SeekDirection::Right).await.unwrap(), false);
@@ -2394,7 +2394,7 @@ mod tests {
 
         // start immediately return false, because there's nothing to bisect.
         // Only possible point to seek is start of the only page.
-        let mut s = FileSearcher::new(m.read(&mut pr, 1).await);
+        let mut s = FileSearcher::new(m.read(&mut pr, 1));
         assert_eq!(s.start(&mut m).await.unwrap(), false);
         assert_eq!(s.reader().offset(&mut m), 0);
     }
@@ -2414,7 +2414,7 @@ mod tests {
 
         // start immediately return false, because there's nothing to bisect.
         // Only possible point to seek is start of the only page.
-        let mut s = FileSearcher::new(m.read(&mut pr, 1).await);
+        let mut s = FileSearcher::new(m.read(&mut pr, 1));
         assert_eq!(s.start(&mut m).await.unwrap(), false);
         assert_eq!(s.reader().offset(&mut m), 0);
     }
@@ -2436,7 +2436,7 @@ mod tests {
 
         let mut buf = [0u8; 1];
         // Seek left
-        let mut s = FileSearcher::new(m.read(&mut pr, 1).await);
+        let mut s = FileSearcher::new(m.read(&mut pr, 1));
         assert_eq!(s.start(&mut m).await.unwrap(), true);
         assert_eq!(s.reader().offset(&mut m), 4348);
         s.reader().read(&mut m, &mut buf).await.unwrap();
@@ -2444,7 +2444,7 @@ mod tests {
         assert_eq!(s.reader().offset(&mut m), 0);
 
         // Seek right
-        let mut s = FileSearcher::new(m.read(&mut pr, 1).await);
+        let mut s = FileSearcher::new(m.read(&mut pr, 1));
         assert_eq!(s.start(&mut m).await.unwrap(), true);
         assert_eq!(s.reader().offset(&mut m), 4348);
         s.reader().read(&mut m, &mut buf).await.unwrap();
@@ -2471,7 +2471,7 @@ mod tests {
 
         let mut buf = [0u8; 1];
         // Seek left
-        let mut s = FileSearcher::new(m.read(&mut pr, 1).await);
+        let mut s = FileSearcher::new(m.read(&mut pr, 1));
         assert_eq!(s.start(&mut m).await.unwrap(), true);
         assert_eq!(s.reader().offset(&mut m), 8696);
         s.reader().read(&mut m, &mut buf).await.unwrap();
@@ -2482,7 +2482,7 @@ mod tests {
         assert_eq!(s.reader().offset(&mut m), 0);
 
         // Seek less left
-        let mut s = FileSearcher::new(m.read(&mut pr, 1).await);
+        let mut s = FileSearcher::new(m.read(&mut pr, 1));
         assert_eq!(s.start(&mut m).await.unwrap(), true);
         assert_eq!(s.reader().offset(&mut m), 8696);
         s.reader().read(&mut m, &mut buf).await.unwrap();
@@ -2493,7 +2493,7 @@ mod tests {
         assert_eq!(s.reader().offset(&mut m), 0);
 
         // Seek middle
-        let mut s = FileSearcher::new(m.read(&mut pr, 1).await);
+        let mut s = FileSearcher::new(m.read(&mut pr, 1));
         assert_eq!(s.start(&mut m).await.unwrap(), true);
         assert_eq!(s.reader().offset(&mut m), 8696);
         s.reader().read(&mut m, &mut buf).await.unwrap();
@@ -2504,7 +2504,7 @@ mod tests {
         assert_eq!(s.reader().offset(&mut m), 4348);
 
         // Seek right
-        let mut s = FileSearcher::new(m.read(&mut pr, 1).await);
+        let mut s = FileSearcher::new(m.read(&mut pr, 1));
         assert_eq!(s.start(&mut m).await.unwrap(), true);
         assert_eq!(s.reader().offset(&mut m), 8696);
         s.reader().read(&mut m, &mut buf).await.unwrap();
@@ -2534,7 +2534,7 @@ mod tests {
 
         let mut buf = [0u8; 1];
         // Seek left
-        let mut s = FileSearcher::new(m.read(&mut pr, 1).await);
+        let mut s = FileSearcher::new(m.read(&mut pr, 1));
         assert_eq!(s.start(&mut m).await.unwrap(), true);
         assert_eq!(s.reader().offset(&mut m), N * 2);
         s.reader().read(&mut m, &mut buf).await.unwrap();
@@ -2547,7 +2547,7 @@ mod tests {
         m.truncate(1, N * 2).await.unwrap();
 
         // Seek left
-        let mut s = FileSearcher::new(m.read(&mut pr, 1).await);
+        let mut s = FileSearcher::new(m.read(&mut pr, 1));
         assert_eq!(s.start(&mut m).await.unwrap(), true);
         assert_eq!(s.reader().offset(&mut m), N);
         s.reader().read(&mut m, &mut buf).await.unwrap();
@@ -2557,7 +2557,7 @@ mod tests {
         m.truncate(1, N).await.unwrap();
 
         // Seek left
-        let mut s = FileSearcher::new(m.read(&mut pr, 1).await);
+        let mut s = FileSearcher::new(m.read(&mut pr, 1));
         assert_eq!(s.start(&mut m).await.unwrap(), false);
         assert_eq!(s.reader().offset(&mut m), 0);
     }
@@ -2584,7 +2584,7 @@ mod tests {
         for want in 0..count + 1 {
             debug!("searching for {}", want);
 
-            let mut s = FileSearcher::new(m.read(&mut pr, 1).await);
+            let mut s = FileSearcher::new(m.read(&mut pr, 1));
             assert_eq!(s.start(&mut m).await.unwrap(), true);
 
             loop {
@@ -2675,7 +2675,7 @@ mod tests {
             // ============ Check read all
             debug!("{} {}, read_all", seq_min, seq_max);
 
-            let mut r = m.read(&mut pr, file_id).await;
+            let mut r = m.read(&mut pr, file_id);
             let mut data = vec![0; seq_max - seq_min];
             r.read(&mut m, &mut data).await.unwrap();
             let want_data: Vec<_> = (0..seq_max - seq_min).map(|i| (seq_min + i) as u8).collect();
@@ -2689,7 +2689,7 @@ mod tests {
             let s = rand_between(0, seq_max - seq_min);
             debug!("{} {}, read_seek {}", seq_min, seq_max, s);
 
-            let mut r = m.read(&mut pr, file_id).await;
+            let mut r = m.read(&mut pr, file_id);
             r.seek(&mut m, s).await.unwrap();
             let mut data = vec![0; seq_max - seq_min - s];
             r.read(&mut m, &mut data).await.unwrap();
@@ -2705,7 +2705,7 @@ mod tests {
             let s2 = rand_between(0, seq_max - seq_min - s1);
             debug!("{} {}, read_skip {} {}", seq_min, seq_max, s1, s2);
 
-            let mut r = m.read(&mut pr, file_id).await;
+            let mut r = m.read(&mut pr, file_id);
             r.skip(&mut m, s1).await.unwrap();
             r.skip(&mut m, s2).await.unwrap();
             let mut data = vec![0; seq_max - seq_min - s1 - s2];

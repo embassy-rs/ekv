@@ -424,7 +424,7 @@ impl<F: Flash> Inner<F> {
         key: &[u8],
         value: &mut [u8],
     ) -> Result<Option<usize>, ReadError<F::Error>> {
-        let r = self.files.read(&mut self.readers[0], file_id).await;
+        let r = self.files.read(&mut self.readers[0], file_id);
         let m = &mut self.files;
         let mut s = FileSearcher::new(r);
 
@@ -736,7 +736,7 @@ impl<F: Flash> Inner<F> {
         let mut r: [MaybeUninit<FileReader>; BRANCHING_FACTOR] = unsafe { MaybeUninit::uninit().assume_init() };
         let readers_ptr = self.readers.as_mut_ptr();
         for (i, &file_id) in src.iter().enumerate() {
-            r[i].write(self.files.read(unsafe { &mut *readers_ptr.add(i) }, file_id).await);
+            r[i].write(self.files.read(unsafe { &mut *readers_ptr.add(i) }, file_id));
         }
         let r = unsafe { slice::from_raw_parts_mut(r.as_mut_ptr() as *mut FileReader, src.len()) };
 
@@ -938,7 +938,7 @@ impl<F: Flash> Inner<F> {
     pub async fn dump_file(&mut self, file_id: FileID) -> Result<(), Error<F::Error>> {
         self.files.dump_file(&mut self.readers[0], file_id).await?;
 
-        let mut r = self.files.read(&mut self.readers[0], file_id).await;
+        let mut r = self.files.read(&mut self.readers[0], file_id);
         let mut key = [0u8; MAX_KEY_SIZE];
         let mut value = [0u8; MAX_VALUE_SIZE];
         loop {

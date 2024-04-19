@@ -102,7 +102,7 @@ async fn fuzz_inner(ops: Input, dump: bool) {
                     m.dump(&mut pr).await;
                 }
 
-                let mut s = FileSearcher::new(m.read(&mut pr, FILE_ID).await);
+                let mut s = FileSearcher::new(m.read(&mut pr, FILE_ID));
                 let mut ok = s.start(&mut m).await.unwrap();
                 let mut found = false;
 
