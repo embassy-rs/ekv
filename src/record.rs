@@ -11,11 +11,11 @@ use embassy_sync::waitqueue::WakerRegistration;
 use heapless::Vec;
 
 use crate::config::*;
-use crate::errors::{CorruptedError, Error, MountError, ReadError, WriteError};
+use crate::errors::{no_eof, CorruptedError, Error, MountError, ReadError, WriteError};
 use crate::file::{FileID, FileManager, FileReader, FileSearcher, FileWriter, SeekDirection, PAGE_MAX_PAYLOAD_SIZE};
 use crate::flash::Flash;
 use crate::page::{PageReader, ReadError as PageReadError};
-use crate::{CommitError, FormatError};
+use crate::{Bound, CommitError, Cursor, FormatError};
 
 const FILE_FLAG_COMPACT_DEST: u8 = 0x01;
 const FILE_FLAG_COMPACT_SRC: u8 = 0x02;
@@ -63,7 +63,7 @@ struct State {
 pub struct Database<F: Flash, M: RawMutex> {
     state: BlockingMutex<M, RefCell<State>>,
 
-    inner: Mutex<M, Inner<F>>,
+    pub(crate) inner: Mutex<M, Inner<F>>,
 }
 
 impl<F: Flash, M: RawMutex> Database<F, M> {
@@ -246,6 +246,28 @@ impl<'a, F: Flash + 'a, M: RawMutex + 'a> ReadTransaction<'a, F, M> {
 
         self.db.inner.lock().await.read(key, value).await
     }
+
+    /// Get a cursor for reading all the keys in the database.
+    ///
+    /// This is equivalent to calling `read_range(None, None)`.
+    ///
+    /// The cursor returns the keys in lexicographically ascending order.
+    pub async fn read_all<'b>(&'b self) -> Result<Cursor<'b, F, M>, Error<F::Error>> {
+        self.read_range(None, None).await
+    }
+
+    /// Get a cursor for reading keys in the database that are between `lower_bound` and `upper_bound`.
+    ///
+    /// A `None` bound indicates no upper or lower bound.
+    ///
+    /// The cursor returns the keys in lexicographically ascending order.
+    pub async fn read_range<'b>(
+        &'b self,
+        lower_bound: Option<Bound<'_>>,
+        upper_bound: Option<Bound<'b>>,
+    ) -> Result<Cursor<'b, F, M>, Error<F::Error>> {
+        Cursor::new(self.db, lower_bound, upper_bound).await
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -377,9 +399,9 @@ impl<'a, F: Flash + 'a, M: RawMutex + 'a> WriteTransaction<'a, F, M> {
     }
 }
 
-struct Inner<F: Flash> {
-    files: FileManager<F>,
-    readers: [PageReader; BRANCHING_FACTOR],
+pub(crate) struct Inner<F: Flash> {
+    pub(crate) files: FileManager<F>,
+    pub(crate) readers: [PageReader; BRANCHING_FACTOR],
     write_tx: Option<WriteTransactionInner>,
 }
 
@@ -1059,17 +1081,6 @@ impl<I: Iterator> Single for I {
                 Some(_) => Err(SingleError::MultipleElements),
             },
         }
-    }
-}
-
-fn no_eof<T>(e: PageReadError<T>) -> Error<T> {
-    match e {
-        PageReadError::Corrupted => Error::Corrupted,
-        #[cfg(not(feature = "_panic-on-corrupted"))]
-        PageReadError::Eof => Error::Corrupted,
-        #[cfg(feature = "_panic-on-corrupted")]
-        PageReadError::Eof => panic!("corrupted"),
-        PageReadError::Flash(x) => Error::Flash(x),
     }
 }
 

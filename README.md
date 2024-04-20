@@ -14,6 +14,7 @@ Key-value database for embedded systems, for raw NOR flash, using an LSM-Tree.
   - Consistent reads: Read transactions see a consistent snapshot of the database, unaffected by concurrent writes.
   - Unlimited read transactions and one write transaction are allowed concurrently.
   - Read transactions are only blocked by a write transaction commit, not by the whole write transaction. Commit is fast, `O(1)`.
+- Iterating reading keys with a cursor, either all or within a range. Multiple concurrent cursors are supported.
 - Wear leveling: erase cycles are spread out evenly between all flash pages. Pages are allocated cyclically. At boot, a random seed is required to decide which is the first.
 - Corruption-resistant: A corrupted or deliberately manipulated flash image cannot cause crashes, panics or infinite loops, only `Err(Corrupted)` errors.
 - Optional CRC32 protection of headers and data on flash.
@@ -36,7 +37,6 @@ for performance.
 - Add a max chunk size, to reduce the RAM requirement in PageReader.
 - Allow writes within a transaction to be unsorted.
 - Allow reads within a write transaction. They should see the the not yet committed writes in the current transaction.
-- Allow iterating the records in the database.
 - Add optional encryption + authentication support (which disables CRCs)
 - Integrate with `embedded-storage`.
 
@@ -62,4 +62,3 @@ This work is licensed under either of
 - MIT license ([LICENSE-MIT](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
 
 at your option.
-

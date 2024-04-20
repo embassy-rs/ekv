@@ -121,6 +121,29 @@ impl<E> From<Error<E>> for CommitError<E> {
     }
 }
 
+/// Error returned by [`Cursor::next`](crate::Cursor::next).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum CursorError<E> {
+    /// The provided buffer for the key was too small.
+    KeyBufferTooSmall,
+    /// The provided buffer for the value was too small.
+    ValueBufferTooSmall,
+    /// Database is corrupted, or not formatted yet.
+    Corrupted,
+    /// Some operation on the underlying [`Flash`](crate::flash::Flash) failed.
+    Flash(E),
+}
+
+impl<E> From<Error<E>> for CursorError<E> {
+    fn from(e: Error<E>) -> Self {
+        match e {
+            Error::Flash(e) => Self::Flash(e),
+            Error::Corrupted => Self::Corrupted,
+        }
+    }
+}
+
 /// Database is corrupted, or not formatted yet.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -153,5 +176,22 @@ impl<E> From<CorruptedError> for WriteError<E> {
 impl<E> From<CorruptedError> for SearchSeekError<E> {
     fn from(_: CorruptedError) -> Self {
         Self::Corrupted
+    }
+}
+
+impl<E> From<CorruptedError> for CursorError<E> {
+    fn from(_: CorruptedError) -> Self {
+        Self::Corrupted
+    }
+}
+
+pub(crate) fn no_eof<T>(e: PageReadError<T>) -> Error<T> {
+    match e {
+        PageReadError::Corrupted => Error::Corrupted,
+        #[cfg(not(feature = "_panic-on-corrupted"))]
+        PageReadError::Eof => Error::Corrupted,
+        #[cfg(feature = "_panic-on-corrupted")]
+        PageReadError::Eof => panic!("corrupted"),
+        PageReadError::Flash(x) => Error::Flash(x),
     }
 }

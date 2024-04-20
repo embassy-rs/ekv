@@ -14,10 +14,12 @@ mod macros;
 
 mod alloc;
 pub mod config;
+mod cursor;
 mod errors;
 pub mod flash;
 mod types;
 
+pub use cursor::{Bound, Cursor};
 pub use errors::{CommitError, FormatError, MountError, ReadError, WriteError};
 pub use record::{Config, Database, ReadTransaction, WriteTransaction};
 
