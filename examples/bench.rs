@@ -65,7 +65,7 @@ async fn run(p: Params) -> f64 {
     let mut buf = [0; 1024];
 
     for key in &keys {
-        let mut rtx = db.read_transaction().await;
+        let rtx = db.read_transaction().await;
         rtx.read(key, &mut buf).await.unwrap();
     }
 

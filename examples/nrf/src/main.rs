@@ -155,7 +155,7 @@ async fn main(_spawner: Spawner) -> ! {
         let key = make_key(i);
         let val = make_value(i);
 
-        let mut rtx = db.read_transaction().await;
+        let rtx = db.read_transaction().await;
         let n = rtx.read(&key, &mut buf).await.unwrap();
         assert_eq!(&buf[..n], &val[..]);
     }

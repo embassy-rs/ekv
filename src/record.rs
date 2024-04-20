@@ -239,7 +239,7 @@ impl<'a, F: Flash + 'a, M: RawMutex + 'a> ReadTransaction<'a, F, M> {
     /// Read a key from the database.
     ///
     /// The value is stored in the `value` buffer, and the length is returned.
-    pub async fn read(&mut self, key: &[u8], value: &mut [u8]) -> Result<usize, ReadError<F::Error>> {
+    pub async fn read(&self, key: &[u8], value: &mut [u8]) -> Result<usize, ReadError<F::Error>> {
         if key.len() > MAX_KEY_SIZE {
             return Err(ReadError::KeyTooBig);
         }
@@ -1088,7 +1088,7 @@ mod tests {
     use crate::flash::MemFlash;
 
     async fn check_read(db: &Database<impl Flash, NoopRawMutex>, key: &[u8], value: &[u8]) {
-        let mut rtx = db.read_transaction().await;
+        let rtx = db.read_transaction().await;
         let mut buf = [0; 1024];
         let n = rtx.read(key, &mut buf).await.unwrap();
         assert_eq!(&buf[..n], value);
@@ -1098,7 +1098,7 @@ mod tests {
     where
         F::Error: PartialEq,
     {
-        let mut rtx = db.read_transaction().await;
+        let rtx = db.read_transaction().await;
         assert_eq!(rtx.read(key, &mut []).await, Err(ReadError::KeyNotFound));
     }
 
@@ -1279,7 +1279,7 @@ mod tests {
         let read_state = Cell::new(0);
         let mut read_fut = async {
             read_state.set(1);
-            let mut rtx = db.read_transaction().await;
+            let rtx = db.read_transaction().await;
 
             read_state.set(2);
             yield_now().await;
@@ -1345,7 +1345,7 @@ mod tests {
         let read_state = Cell::new(0);
         let mut read_fut = async {
             read_state.set(1);
-            let mut rtx = db.read_transaction().await;
+            let rtx = db.read_transaction().await;
 
             read_state.set(2);
             yield_now().await;
@@ -1362,7 +1362,7 @@ mod tests {
         let read2_state = Cell::new(0);
         let mut read2_fut = async {
             read2_state.set(1);
-            let mut rtx = db.read_transaction().await;
+            let rtx = db.read_transaction().await;
 
             read2_state.set(2);
 
@@ -1458,7 +1458,7 @@ mod tests {
         wtx.write(b"foo", b"1234").await.unwrap();
         wtx.commit().await.unwrap();
 
-        let mut rtx = db.read_transaction().await;
+        let rtx = db.read_transaction().await;
         let mut buf = [0u8; 1];
         let r = rtx.read(b"foo", &mut buf).await;
         assert!(matches!(r, Err(ReadError::BufferTooSmall)));
@@ -1470,7 +1470,7 @@ mod tests {
 
         let db = Database::<_, NoopRawMutex>::new(&mut f, Config::default());
 
-        let mut rtx = db.read_transaction().await;
+        let rtx = db.read_transaction().await;
         let mut buf = [0u8; 1];
         let r = rtx.read(b"foo", &mut buf).await;
         assert!(matches!(r, Err(ReadError::Corrupted)));

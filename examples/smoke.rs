@@ -99,7 +99,7 @@ async fn main() {
         // Check everything
         for key in &keys {
             log::debug!("read {:02x?}", key);
-            let mut rtx = db.read_transaction().await;
+            let rtx = db.read_transaction().await;
             let got_val = match rtx.read(key, &mut buf).await {
                 Ok(n) => Some(&buf[..n]),
                 Err(ReadError::KeyNotFound) => None,
@@ -121,7 +121,7 @@ async fn main() {
     let db = Database::<_, NoopRawMutex>::new(&mut f, config);
 
     for key in &keys {
-        let mut rtx = db.read_transaction().await;
+        let rtx = db.read_transaction().await;
         let got_val = match rtx.read(key, &mut buf).await {
             Ok(n) => Some(&buf[..n]),
             Err(ReadError::KeyNotFound) => None,

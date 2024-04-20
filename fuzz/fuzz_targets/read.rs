@@ -31,7 +31,7 @@ async fn fuzz_inner(data: &[u8], dump: bool) {
     }
 
     let mut buf = [0; 64];
-    let mut rtx = db.read_transaction().await;
+    let rtx = db.read_transaction().await;
     _ = rtx.read(b"foo", &mut buf).await;
     drop(rtx);
 
@@ -41,7 +41,7 @@ async fn fuzz_inner(data: &[u8], dump: bool) {
         _ = wtx.commit().await;
     }
 
-    let mut rtx = db.read_transaction().await;
+    let rtx = db.read_transaction().await;
     _ = rtx.read(b"foo", &mut buf).await;
     drop(rtx);
 }

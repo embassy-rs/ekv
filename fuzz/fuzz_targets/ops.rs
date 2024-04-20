@@ -83,7 +83,7 @@ async fn fuzz_inner(ops: Input, dump: bool) {
 
         // Check everything
         for (key, val) in &m {
-            let mut rtx = db.read_transaction().await;
+            let rtx = db.read_transaction().await;
             let n = rtx.read(key, &mut buf).await.unwrap();
             let got_val = &buf[..n];
 
