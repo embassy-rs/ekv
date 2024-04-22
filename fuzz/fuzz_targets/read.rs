@@ -1,6 +1,6 @@
 #![no_main]
 use ekv::flash::MemFlash;
-use ekv::{Config, Database};
+use ekv::{Bound, Config, Database};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use libfuzzer_sys::fuzz_target;
 
@@ -35,6 +35,17 @@ async fn fuzz_inner(data: &[u8], dump: bool) {
     _ = rtx.read(b"foo", &mut buf).await;
     drop(rtx);
 
+    let rtx = db.read_transaction().await;
+    if let Ok(mut cursor) = rtx.read_all().await {
+        let mut kbuf = [0; 64];
+        let mut vbuf = [0; 64];
+        while let Ok(Some((klen, vlen))) = cursor.next(&mut kbuf, &mut vbuf).await {
+            assert!(klen <= kbuf.len());
+            assert!(vlen <= vbuf.len());
+        }
+    }
+    drop(rtx);
+
     for _ in 0..100 {
         let mut wtx = db.write_transaction().await;
         _ = wtx.write(b"foo", b"blah").await;
@@ -43,5 +54,28 @@ async fn fuzz_inner(data: &[u8], dump: bool) {
 
     let rtx = db.read_transaction().await;
     _ = rtx.read(b"foo", &mut buf).await;
+    drop(rtx);
+
+    let rtx = db.read_transaction().await;
+    if let Ok(mut cursor) = rtx
+        .read_range(
+            Some(Bound {
+                key: b"foo",
+                allow_equal: false,
+            }),
+            Some(Bound {
+                key: b"poo",
+                allow_equal: false,
+            }),
+        )
+        .await
+    {
+        let mut kbuf = [0; 64];
+        let mut vbuf = [0; 64];
+        while let Ok(Some((klen, vlen))) = cursor.next(&mut kbuf, &mut vbuf).await {
+            assert!(klen <= kbuf.len());
+            assert!(vlen <= vbuf.len());
+        }
+    }
     drop(rtx);
 }
