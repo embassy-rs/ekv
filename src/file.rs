@@ -253,7 +253,7 @@ impl<F: Flash> FileManager<F> {
 
         let random_seed = self.random();
         self.alloc.reset(meta_page_count as _, random_seed);
-        self.alloc.mark_used(meta_page_id);
+        self.alloc.mark_used(meta_page_id)?;
 
         r.open::<_, MetaHeader>(&mut self.flash, meta_page_id)
             .await
@@ -336,11 +336,10 @@ impl<F: Flash> FileManager<F> {
             };
 
             while let Some(pp) = p {
-                if self.alloc.is_used(pp.page_id) {
+                if self.alloc.mark_used(pp.page_id).is_err() {
                     info!("page used by multiple files at the same time. page_id={:?}", pp.page_id);
                     corrupted!();
                 }
-                self.alloc.mark_used(pp.page_id);
                 p = pp.prev(self, meta.first_seq).await?;
             }
         }
@@ -401,7 +400,7 @@ impl<F: Flash> FileManager<F> {
                     break;
                 }
             }
-            self.free_page(pp.page_id);
+            self.free_page(pp.page_id)?;
             from = pp.prev(self, seq_limit).await?;
         }
         Ok(())
@@ -417,11 +416,12 @@ impl<F: Flash> FileManager<F> {
         w
     }
 
-    fn free_page(&mut self, page_id: PageID) {
+    fn free_page(&mut self, page_id: PageID) -> Result<(), CorruptedError> {
         trace!("free page {:?}", page_id);
-        self.alloc.free(page_id);
+        self.alloc.free(page_id)?;
         #[cfg(feature = "_erase-on-free")]
         self.flash.erase(page_id);
+        Ok(())
     }
 
     #[cfg(feature = "std")]
@@ -689,7 +689,7 @@ impl<'a, F: Flash> Transaction<'a, F> {
                 w.commit(&mut self.m.flash).await?;
 
                 // free the old one.
-                self.m.free_page(self.m.meta_page_id);
+                self.m.free_page(self.m.meta_page_id)?;
                 self.m.meta_page_id = page_id;
 
                 self.m.dirty = false;
@@ -1429,7 +1429,7 @@ impl FileWriter {
 
             if let Some(rewritten_page_id) = self.rewritten_last_page_id {
                 trace!("freeing rewritten page {:?}", rewritten_page_id);
-                tx.m.alloc.free(rewritten_page_id);
+                tx.m.alloc.free(rewritten_page_id)?;
             }
         }
         Ok(())
@@ -1439,7 +1439,7 @@ impl FileWriter {
         if let Some(w) = &self.writer {
             // Free the page we're writing now (not yet committed)
             let page_id = w.page_id();
-            m.free_page(page_id);
+            m.free_page(page_id)?;
 
             // Free previous pages, if any
             let f = &m.files[self.file_id as usize];

@@ -1,4 +1,5 @@
 use crate::config::*;
+use crate::errors::CorruptedError;
 use crate::types::{PageID, RawPageID};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -77,22 +78,29 @@ impl Allocator {
         }
     }
 
-    pub fn mark_used(&mut self, page_id: PageID) {
+    pub fn mark_used(&mut self, page_id: PageID) -> Result<(), CorruptedError> {
         assert!(page_id.index() < self.page_count, "out of bounds");
-        assert_eq!(self.get_bit(page_id.index()), PageState::Free, "double mark_used");
+        if self.get_bit(page_id.index()) != PageState::Free {
+            corrupted!();
+        }
 
         self.set_bit(page_id.index(), PageState::Used);
         self.used += 1;
+        Ok(())
     }
 
-    pub fn free(&mut self, page_id: PageID) {
+    pub fn free(&mut self, page_id: PageID) -> Result<(), CorruptedError> {
         assert!(page_id.index() < self.page_count, "out of bounds");
-        assert_eq!(self.get_bit(page_id.index()), PageState::Used, "double free");
+        if self.get_bit(page_id.index()) != PageState::Used {
+            corrupted!();
+        }
 
         self.set_bit(page_id.index(), PageState::Free);
         self.used -= 1;
+        Ok(())
     }
 
+    #[allow(unused)]
     pub fn is_used(&self, page_id: PageID) -> bool {
         assert!(page_id.index() < self.page_count, "out of bounds");
 
@@ -146,8 +154,8 @@ mod tests {
         assert_eq!(a.try_allocate(), Some(page(0)));
         assert_eq!(a.try_allocate(), Some(page(1)));
         assert_eq!(a.try_allocate(), Some(page(2)));
-        a.free(page(2));
-        a.free(page(1));
+        a.free(page(2)).unwrap();
+        a.free(page(1)).unwrap();
         assert_eq!(a.try_allocate(), Some(page(3)));
         assert_eq!(a.try_allocate(), Some(page(4)));
         assert_eq!(a.try_allocate(), Some(page(1)));
@@ -160,17 +168,17 @@ mod tests {
     fn test_double_free() {
         let mut a = Allocator::new();
         a.reset(5, 0);
-        a.free(page(2));
+        a.free(page(2)).unwrap();
     }
 
     #[test_log::test]
     fn test_mark_used() {
         let mut a = Allocator::new();
         a.reset(5, 0);
-        a.mark_used(page(2));
-        a.free(page(2));
-        a.mark_used(page(2));
-        a.mark_used(page(3));
+        a.mark_used(page(2)).unwrap();
+        a.free(page(2)).unwrap();
+        a.mark_used(page(2)).unwrap();
+        a.mark_used(page(3)).unwrap();
         assert_eq!(a.try_allocate(), Some(page(0)));
         assert_eq!(a.try_allocate(), Some(page(1)));
         assert_eq!(a.try_allocate(), Some(page(4)));
@@ -182,19 +190,18 @@ mod tests {
         let mut a = Allocator::new();
         a.reset(5, 0);
         assert_eq!(a.is_used(page(2)), false);
-        a.mark_used(page(2));
+        a.mark_used(page(2)).unwrap();
         assert_eq!(a.is_used(page(2)), true);
-        a.free(page(2));
+        a.free(page(2)).unwrap();
         assert_eq!(a.is_used(page(2)), false);
     }
 
     #[test_log::test]
-    #[should_panic(expected = "double mark_used")]
     fn test_mark_used_double() {
         let mut a = Allocator::new();
         a.reset(5, 0);
-        a.mark_used(page(2));
-        a.mark_used(page(2));
+        a.mark_used(page(2)).unwrap();
+        a.mark_used(page(2)).unwrap_err();
     }
 
     #[test_log::test]
@@ -210,7 +217,7 @@ mod tests {
     fn test_mark_used_out_of_bounds() {
         let mut a = Allocator::new();
         a.reset(5, 0);
-        a.mark_used(page(10));
+        a.mark_used(page(10)).unwrap();
     }
 
     #[test_log::test]
@@ -218,6 +225,6 @@ mod tests {
     fn test_free_out_of_bounds() {
         let mut a = Allocator::new();
         a.reset(5, 0);
-        a.free(page(10));
+        a.free(page(10)).unwrap();
     }
 }
