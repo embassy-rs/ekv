@@ -427,11 +427,25 @@ impl<F: Flash> FileManager<F> {
     #[cfg(feature = "std")]
     #[allow(unused)]
     pub async fn dump(&mut self, r: &mut PageReader) {
+        info!("============= BEGIN DUMP");
+
+        self.dump_pages(r).await;
+
+        info!("File dump:");
         for file_id in 0..FILE_COUNT {
             info!("====== FILE {} ======", file_id);
             if let Err(e) = self.dump_file(r, file_id as _).await {
                 info!("failed to dump file: {:?}", e);
             }
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[allow(unused)]
+    pub async fn dump_pages(&mut self, r: &mut PageReader) {
+        info!("Page dump:");
+        for page_id in 0..self.flash.page_count() {
+            self.dump_page(r, PageID::from_raw(page_id as _).unwrap()).await;
         }
     }
 
@@ -455,40 +469,82 @@ impl<F: Flash> FileManager<F> {
             pp = p.prev(self, f.first_seq).await?;
         }
 
-        let mut buf = [0; 1024];
         for p in pages.iter().rev() {
-            let h = r.open::<_, DataHeader>(&mut self.flash, p.page_id).await?;
-            let n = r.read(&mut self.flash, &mut buf).await?;
-            let data = &buf[..n];
+            self.dump_page(r, p.page_id).await;
+        }
+
+        Ok(())
+    }
+
+    #[cfg(feature = "std")]
+    #[allow(unused)]
+    pub async fn dump_page(&mut self, r: &mut PageReader, page_id: PageID) {
+        if let Ok(h) = r.open::<_, MetaHeader>(&mut self.flash, page_id).await {
+            info!(
+                "  page {:?}: META seq {:?} page_count {:?}",
+                page_id, h.seq, h.page_count,
+            );
+        } else if let Ok(h) = r.open::<_, DataHeader>(&mut self.flash, page_id).await {
+            // Read all chunks
+            let mut chunks = Vec::new();
+            let mut buf = [0; PAGE_SIZE];
+            let mut last_corrupted = false;
+            let mut total_len = 0;
+            loop {
+                let Ok(n) = r.read(&mut self.flash, &mut buf).await else {
+                    last_corrupted = true;
+                    break;
+                };
+                if n == 0 {
+                    break;
+                }
+                chunks.push(buf[..n].to_vec());
+                total_len += n;
+            }
 
             let rb = if h.record_boundary == u16::MAX {
                 "None".to_string()
             } else {
                 format!(
-                    "{} (seq {:?})",
+                    "{} (seq {})",
                     h.record_boundary,
-                    h.seq.add(h.record_boundary as usize)?
+                    match h.seq.add(h.record_boundary as usize) {
+                        Ok(seq) => format!("{:?}", seq),
+                        Err(_) => "<overflow>".to_string(),
+                    }
                 )
             };
 
-            debug!(
-                "  page {:?}: seq {:?}..{:?} len {:?} record_boundary {} skiplist {:?}",
-                p.page_id,
+            info!(
+                "  page {:?}: seq {}..{} len {} record_boundary {} skiplist {:?}",
+                page_id,
                 h.seq,
-                h.seq.add(n)?,
-                n,
+                match h.seq.add(total_len) {
+                    Ok(seq) => format!("{:?}", seq),
+                    Err(_) => "<overflow>".to_string(),
+                },
+                total_len,
                 rb,
                 h.skiplist
             );
 
             let mut s = h.seq;
-            for c in data.chunks(32) {
-                debug!("     {:04}: {:02x?}", s.0, c);
-                s = s.add(c.len())?;
+            for (i, chunk) in chunks.iter().enumerate() {
+                info!("   chunk {}: len {}", i, chunk.len());
+                for c in chunk.chunks(32) {
+                    info!("     {:04}: {:02x?}", s.0, c);
+                    match s.add(c.len()) {
+                        Ok(s2) => s = s2,
+                        Err(_) => info!("    (seq overflow)"),
+                    }
+                }
             }
+            if last_corrupted {
+                info!("   last chunk corrupted");
+            }
+        } else {
+            info!("  page {:?}: corrupted", page_id);
         }
-
-        Ok(())
     }
 }
 

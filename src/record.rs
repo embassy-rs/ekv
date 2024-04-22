@@ -935,11 +935,16 @@ impl<F: Flash> Inner<F> {
 
     #[cfg(feature = "std")]
     pub async fn dump(&mut self) {
+        info!("============= BEGIN DUMP");
+
+        self.files.dump_pages(&mut self.readers[0]).await;
+
         if let Err(e) = self.files.remount_if_dirty(&mut self.readers[0]).await {
             info!("db is dirty, and remount failed: {:?}", e);
             return;
         }
 
+        info!("File dump:");
         for file_id in 0..FILE_COUNT {
             info!("====== FILE {} ======", file_id);
             if let Err(e) = self.dump_file(file_id as _).await {
