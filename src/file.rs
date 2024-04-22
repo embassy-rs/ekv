@@ -433,7 +433,6 @@ impl<F: Flash> FileManager<F> {
 
         info!("File dump:");
         for file_id in 0..FILE_COUNT {
-            info!("====== FILE {} ======", file_id);
             if let Err(e) = self.dump_file(r, file_id as _).await {
                 info!("failed to dump file: {:?}", e);
             }
@@ -451,17 +450,24 @@ impl<F: Flash> FileManager<F> {
 
     #[cfg(feature = "std")]
     #[allow(unused)]
-    pub async fn dump_file(&mut self, r: &mut PageReader, file_id: FileID) -> Result<(), Error<F::Error>> {
+    pub fn dump_file_header(&mut self, file_id: FileID) {
         let f = self.files[file_id as usize];
         info!(
-            "  seq: {:?}..{:?} len {:?} last_page {:?} flags {:02x}",
+            "==== FILE {}:  seq: {:?}..{:?} len {:?} last_page {:?} flags {:02x}",
+            file_id,
             f.first_seq,
             f.last_seq,
             f.last_seq.sub(f.first_seq),
             f.last_page.map(|p| p.page_id),
             f.flags
         );
+    }
 
+    #[cfg(feature = "std")]
+    #[allow(unused)]
+    pub async fn dump_file(&mut self, r: &mut PageReader, file_id: FileID) -> Result<(), Error<F::Error>> {
+        self.dump_file_header(file_id);
+        let f = self.files[file_id as usize];
         let mut pages = Vec::new();
         let mut pp = f.last_page;
         while let Some(p) = pp {

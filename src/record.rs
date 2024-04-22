@@ -946,7 +946,6 @@ impl<F: Flash> Inner<F> {
 
         info!("File dump:");
         for file_id in 0..FILE_COUNT {
-            info!("====== FILE {} ======", file_id);
             if let Err(e) = self.dump_file(file_id as _).await {
                 info!("failed to dump file: {:?}", e);
             }
@@ -954,7 +953,17 @@ impl<F: Flash> Inner<F> {
     }
 
     #[cfg(feature = "std")]
-    pub async fn dump_file(&mut self, file_id: FileID) -> Result<(), Error<F::Error>> {
+    #[allow(unused)]
+    async fn dump_file_headers(&mut self) {
+        info!("============= BEGIN DUMP");
+
+        for file_id in 0..FILE_COUNT {
+            self.files.dump_file_header(file_id as _);
+        }
+    }
+
+    #[cfg(feature = "std")]
+    async fn dump_file(&mut self, file_id: FileID) -> Result<(), Error<F::Error>> {
         self.files.dump_file(&mut self.readers[0], file_id).await?;
 
         let mut r = self.files.read(&mut self.readers[0], file_id);
