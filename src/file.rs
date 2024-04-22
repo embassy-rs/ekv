@@ -886,24 +886,38 @@ impl<'a> FileReader<'a> {
         Ok(())
     }
 
+    /// Read an exact amount of bytes.
+    ///
+    /// If we're at file end, return Eof.
+    /// If there's some data left at the file but not enough to fill `data`, return Corrupted.
     pub async fn read<F: Flash>(
         &mut self,
         m: &mut FileManager<F>,
         mut data: &mut [u8],
     ) -> Result<(), ReadError<F::Error>> {
+        let mut read_some = false;
+
         while !data.is_empty() {
             match &mut self.state {
-                ReaderState::Finished => return Err(ReadError::Eof),
+                ReaderState::Finished => {
+                    if read_some {
+                        corrupted!() // Unexpected EOF!
+                    } else {
+                        return Err(ReadError::Eof);
+                    }
+                }
                 ReaderState::Created => {
                     self.next_page(m).await?;
                     continue;
                 }
                 ReaderState::Reading(s) => {
                     let n = self.r.read(&mut m.flash, data).await?;
-                    data = &mut data[n..];
-                    s.seq = s.seq.add(n)?;
                     if n == 0 {
                         self.next_page(m).await?;
+                    } else {
+                        data = &mut data[n..];
+                        s.seq = s.seq.add(n)?;
+                        read_some = true;
                     }
                 }
             }
@@ -1622,6 +1636,62 @@ mod tests {
         let mut buf = vec![0; data.len()];
         r.read(&mut m, &mut buf).await.unwrap();
         assert_eq!(data, buf);
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_empty_eof() {
+        let mut f = MemFlash::new();
+        let mut m = FileManager::new(&mut f, 0);
+        let mut pr = PageReader::new();
+        m.format().await.unwrap();
+        m.mount(&mut pr).await.unwrap();
+
+        let mut r = m.read(&mut pr, 0);
+        let mut buf = vec![0; 1];
+        let res = r.read(&mut m, &mut buf).await;
+        assert_eq!(res, Err(ReadError::Eof));
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_read_eof() {
+        let mut f = MemFlash::new();
+        let mut m = FileManager::new(&mut f, 0);
+        let mut pr = PageReader::new();
+        m.format().await.unwrap();
+        m.mount(&mut pr).await.unwrap();
+
+        let data = dummy_data(24);
+
+        let mut w = m.write(&mut pr, 0).await.unwrap();
+        w.write(&mut m, &data).await.unwrap();
+        m.commit(&mut w).await.unwrap();
+
+        let mut r = m.read(&mut pr, 0);
+        let mut buf = vec![0; data.len()];
+        r.read(&mut m, &mut buf).await.unwrap();
+        assert_eq!(data, buf);
+        let res = r.read(&mut m, &mut buf).await;
+        assert_eq!(res, Err(ReadError::Eof));
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_read_unexpected_eof() {
+        let mut f = MemFlash::new();
+        let mut m = FileManager::new(&mut f, 0);
+        let mut pr = PageReader::new();
+        m.format().await.unwrap();
+        m.mount(&mut pr).await.unwrap();
+
+        let data = dummy_data(24);
+
+        let mut w = m.write(&mut pr, 0).await.unwrap();
+        w.write(&mut m, &data).await.unwrap();
+        m.commit(&mut w).await.unwrap();
+
+        let mut r = m.read(&mut pr, 0);
+        let mut buf = vec![0; data.len() + 1];
+        let res = r.read(&mut m, &mut buf).await;
+        assert_eq!(res, Err(ReadError::Corrupted));
     }
 
     #[test_log::test(tokio::test)]
