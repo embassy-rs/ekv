@@ -275,8 +275,8 @@ impl<F: Flash> Inner<F> {
                     s.reader().skip(m, header.value_len).await.map_err(no_eof)?;
                     return Ok(Some(s.reader().dehydrate()));
                 }
-                Ordering::Less => {}                  // keep going
-                Ordering::Greater => return Ok(None), // done
+                Ordering::Less => {}                              // keep going
+                Ordering::Greater => return Ok(Some(dehydrated)), // done
             }
 
             r.skip(m, header.value_len).await.map_err(no_eof)?;
@@ -293,19 +293,54 @@ mod tests {
     use crate::flash::MemFlash;
     use crate::Config;
 
-    async fn check_read_range(db: &Database<impl Flash, NoopRawMutex>, entries: &[(&[u8], &[u8])]) {
-        let rtx = db.read_transaction().await;
-        let mut cursor = rtx.read_all().await.unwrap();
-
+    async fn check_cursor(mut cursor: Cursor<'_, impl Flash, NoopRawMutex>, entries: &[(&[u8], &[u8])]) {
         let mut kbuf = [0; MAX_KEY_SIZE];
         let mut vbuf = [0; MAX_VALUE_SIZE];
 
-        for (k, v) in entries {
-            let (klen, vlen) = cursor.next(&mut kbuf, &mut vbuf).await.unwrap().unwrap();
-            assert_eq!(*k, &kbuf[..klen]);
-            assert_eq!(*v, &vbuf[..vlen]);
+        let mut got = std::vec::Vec::new();
+        while let Some((klen, vlen)) = cursor.next(&mut kbuf, &mut vbuf).await.unwrap() {
+            got.push((kbuf[..klen].to_vec(), vbuf[..vlen].to_vec()));
         }
-        assert!(cursor.next(&mut kbuf, &mut vbuf).await.unwrap().is_none());
+
+        let ok = entries.iter().copied().eq(got.iter().map(|(k, v)| (&k[..], &v[..])));
+        if !ok {
+            eprintln!("expected:");
+            for (k, v) in entries {
+                eprintln!("  '{}': '{}'", String::from_utf8_lossy(k), String::from_utf8_lossy(v))
+            }
+            eprintln!("got:");
+            for (k, v) in &got {
+                eprintln!("  '{}': '{}'", String::from_utf8_lossy(k), String::from_utf8_lossy(v))
+            }
+            panic!("check_cursor failed")
+        }
+    }
+
+    async fn check_read_all(db: &Database<impl Flash, NoopRawMutex>, entries: &[(&[u8], &[u8])]) {
+        let rtx = db.read_transaction().await;
+        let cursor = rtx.read_all().await.unwrap();
+        check_cursor(cursor, entries).await
+    }
+
+    async fn check_read_range(
+        db: &Database<impl Flash, NoopRawMutex>,
+        lower: Option<Bound<'_>>,
+        upper: Option<Bound<'_>>,
+        entries: &[(&[u8], &[u8])],
+    ) {
+        let rtx = db.read_transaction().await;
+        let cursor = rtx.read_range(lower, upper).await.unwrap();
+        check_cursor(cursor, entries).await
+    }
+
+    fn incl(key: &[u8]) -> Option<Bound<'_>> {
+        Some(Bound { key, allow_equal: true })
+    }
+    fn excl(key: &[u8]) -> Option<Bound<'_>> {
+        Some(Bound {
+            key,
+            allow_equal: false,
+        })
     }
 
     #[test_log::test(tokio::test)]
@@ -315,7 +350,7 @@ mod tests {
         db.format().await.unwrap();
 
         let rows: &[(&[u8], &[u8])] = &[];
-        check_read_range(&db, rows).await;
+        check_read_all(&db, rows).await;
     }
 
     #[test_log::test(tokio::test)]
@@ -345,7 +380,7 @@ mod tests {
             (b"foo", b"5678"),
             (b"lol", b"9999"),
         ];
-        check_read_range(&db, rows).await;
+        check_read_all(&db, rows).await;
     }
 
     #[test_log::test(tokio::test)]
@@ -364,7 +399,7 @@ mod tests {
         wtx.commit().await.unwrap();
 
         let rows: &[(&[u8], &[u8])] = &[(b"foo", b"1234")];
-        check_read_range(&db, rows).await;
+        check_read_all(&db, rows).await;
     }
 
     #[test_log::test(tokio::test)]
@@ -387,6 +422,185 @@ mod tests {
         wtx.commit().await.unwrap();
 
         let rows: &[(&[u8], &[u8])] = &[];
-        check_read_range(&db, rows).await;
+        check_read_all(&db, rows).await;
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_range() {
+        let mut f = MemFlash::new();
+        let db = Database::new(&mut f, Config::default());
+        db.format().await.unwrap();
+
+        let mut wtx = db.write_transaction().await;
+        wtx.write(b"aa", b"a").await.unwrap();
+        wtx.write(b"bb", b"b").await.unwrap();
+        wtx.write(b"cc", b"c").await.unwrap();
+        wtx.write(b"dd", b"d").await.unwrap();
+        wtx.write(b"ee", b"e").await.unwrap();
+        wtx.write(b"ff", b"f").await.unwrap();
+        wtx.commit().await.unwrap();
+
+        let rows: &[(&[u8], &[u8])] = &[
+            (b"aa", b"a"),
+            (b"bb", b"b"),
+            (b"cc", b"c"),
+            (b"dd", b"d"),
+            (b"ee", b"e"),
+            (b"ff", b"f"),
+        ];
+        check_read_range(&db, None, None, rows).await;
+        check_read_range(&db, None, incl(b"ff"), rows).await;
+        check_read_range(&db, None, incl(b"zz"), rows).await;
+        check_read_range(&db, None, excl(b"zz"), rows).await;
+
+        check_read_range(&db, incl(b"aa"), None, rows).await;
+        check_read_range(&db, incl(b"aa"), incl(b"ff"), rows).await;
+        check_read_range(&db, incl(b"aa"), incl(b"zz"), rows).await;
+        check_read_range(&db, incl(b"aa"), excl(b"zz"), rows).await;
+
+        check_read_range(&db, incl(b"0"), None, rows).await;
+        check_read_range(&db, incl(b"0"), incl(b"ff"), rows).await;
+        check_read_range(&db, incl(b"0"), incl(b"zz"), rows).await;
+        check_read_range(&db, incl(b"0"), excl(b"zz"), rows).await;
+
+        check_read_range(&db, excl(b"0"), None, rows).await;
+        check_read_range(&db, excl(b"0"), incl(b"ff"), rows).await;
+        check_read_range(&db, excl(b"0"), incl(b"zz"), rows).await;
+        check_read_range(&db, excl(b"0"), excl(b"zz"), rows).await;
+
+        // match a few keys.
+        let rows: &[(&[u8], &[u8])] = &[(b"cc", b"c"), (b"dd", b"d"), (b"ee", b"e")];
+        check_read_range(&db, incl(b"cc"), incl(b"ee"), rows).await;
+        check_read_range(&db, incl(b"c0"), incl(b"ee"), rows).await;
+        check_read_range(&db, excl(b"c0"), incl(b"ee"), rows).await;
+        check_read_range(&db, excl(b"bb"), incl(b"ee"), rows).await;
+
+        check_read_range(&db, incl(b"cc"), incl(b"ef"), rows).await;
+        check_read_range(&db, incl(b"c0"), incl(b"ef"), rows).await;
+        check_read_range(&db, excl(b"c0"), incl(b"ef"), rows).await;
+        check_read_range(&db, excl(b"bb"), incl(b"ef"), rows).await;
+
+        check_read_range(&db, incl(b"cc"), excl(b"ef"), rows).await;
+        check_read_range(&db, incl(b"c0"), excl(b"ef"), rows).await;
+        check_read_range(&db, excl(b"c0"), excl(b"ef"), rows).await;
+        check_read_range(&db, excl(b"bb"), excl(b"ef"), rows).await;
+
+        check_read_range(&db, incl(b"cc"), excl(b"ff"), rows).await;
+        check_read_range(&db, incl(b"c0"), excl(b"ff"), rows).await;
+        check_read_range(&db, excl(b"c0"), excl(b"ff"), rows).await;
+        check_read_range(&db, excl(b"bb"), excl(b"ff"), rows).await;
+
+        // empty to the left
+        check_read_range(&db, None, incl(b"0"), &[]).await;
+        check_read_range(&db, None, excl(b"0"), &[]).await;
+        check_read_range(&db, None, excl(b"aa"), &[]).await;
+
+        // empty to the right
+        check_read_range(&db, incl(b"z"), None, &[]).await;
+        check_read_range(&db, excl(b"z"), None, &[]).await;
+        check_read_range(&db, excl(b"ff"), None, &[]).await;
+
+        // empty in the middle
+        check_read_range(&db, excl(b"aa"), excl(b"bb"), &[]).await;
+        check_read_range(&db, incl(b"ax"), excl(b"bb"), &[]).await;
+        check_read_range(&db, excl(b"aa"), incl(b"ba"), &[]).await;
+        check_read_range(&db, incl(b"ax"), incl(b"ba"), &[]).await;
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_range_mulifile() {
+        let mut f = MemFlash::new();
+        let db = Database::new(&mut f, Config::default());
+        db.format().await.unwrap();
+
+        // write the thing in multiple transactions, so the keys are spread across files.
+        let mut wtx = db.write_transaction().await;
+        wtx.write(b"aa", b"a").await.unwrap();
+        wtx.write(b"bb", b"b").await.unwrap();
+        wtx.write(b"bbbad", b"bad").await.unwrap();
+        wtx.write(b"cc", b"wrong").await.unwrap();
+        wtx.write(b"dd", b"wrong").await.unwrap();
+        wtx.write(b"ff", b"f").await.unwrap();
+        wtx.write(b"ffbad", b"bad").await.unwrap();
+        wtx.write(b"zzbad", b"bad").await.unwrap();
+        wtx.commit().await.unwrap();
+
+        let mut wtx = db.write_transaction().await;
+        wtx.write(b"aa", b"a").await.unwrap();
+        wtx.write(b"bb", b"b").await.unwrap();
+        wtx.delete(b"bbbad").await.unwrap();
+        wtx.write(b"cc", b"c").await.unwrap();
+        wtx.write(b"dd", b"d").await.unwrap();
+        wtx.write(b"ee", b"e").await.unwrap();
+        wtx.delete(b"ffbad").await.unwrap();
+        wtx.delete(b"zzbad").await.unwrap();
+        wtx.delete(b"zzzzznotexisting").await.unwrap();
+        wtx.commit().await.unwrap();
+
+        let rows: &[(&[u8], &[u8])] = &[
+            (b"aa", b"a"),
+            (b"bb", b"b"),
+            (b"cc", b"c"),
+            (b"dd", b"d"),
+            (b"ee", b"e"),
+            (b"ff", b"f"),
+        ];
+        check_read_range(&db, None, None, rows).await;
+        check_read_range(&db, None, incl(b"ff"), rows).await;
+        check_read_range(&db, None, incl(b"zz"), rows).await;
+        check_read_range(&db, None, excl(b"zz"), rows).await;
+
+        check_read_range(&db, incl(b"aa"), None, rows).await;
+        check_read_range(&db, incl(b"aa"), incl(b"ff"), rows).await;
+        check_read_range(&db, incl(b"aa"), incl(b"zz"), rows).await;
+        check_read_range(&db, incl(b"aa"), excl(b"zz"), rows).await;
+
+        check_read_range(&db, incl(b"0"), None, rows).await;
+        check_read_range(&db, incl(b"0"), incl(b"ff"), rows).await;
+        check_read_range(&db, incl(b"0"), incl(b"zz"), rows).await;
+        check_read_range(&db, incl(b"0"), excl(b"zz"), rows).await;
+
+        check_read_range(&db, excl(b"0"), None, rows).await;
+        check_read_range(&db, excl(b"0"), incl(b"ff"), rows).await;
+        check_read_range(&db, excl(b"0"), incl(b"zz"), rows).await;
+        check_read_range(&db, excl(b"0"), excl(b"zz"), rows).await;
+
+        // match a few keys.
+        let rows: &[(&[u8], &[u8])] = &[(b"cc", b"c"), (b"dd", b"d"), (b"ee", b"e")];
+        check_read_range(&db, incl(b"cc"), incl(b"ee"), rows).await;
+        check_read_range(&db, incl(b"c0"), incl(b"ee"), rows).await;
+        check_read_range(&db, excl(b"c0"), incl(b"ee"), rows).await;
+        check_read_range(&db, excl(b"bb"), incl(b"ee"), rows).await;
+
+        check_read_range(&db, incl(b"cc"), incl(b"ef"), rows).await;
+        check_read_range(&db, incl(b"c0"), incl(b"ef"), rows).await;
+        check_read_range(&db, excl(b"c0"), incl(b"ef"), rows).await;
+        check_read_range(&db, excl(b"bb"), incl(b"ef"), rows).await;
+
+        check_read_range(&db, incl(b"cc"), excl(b"ef"), rows).await;
+        check_read_range(&db, incl(b"c0"), excl(b"ef"), rows).await;
+        check_read_range(&db, excl(b"c0"), excl(b"ef"), rows).await;
+        check_read_range(&db, excl(b"bb"), excl(b"ef"), rows).await;
+
+        check_read_range(&db, incl(b"cc"), excl(b"ff"), rows).await;
+        check_read_range(&db, incl(b"c0"), excl(b"ff"), rows).await;
+        check_read_range(&db, excl(b"c0"), excl(b"ff"), rows).await;
+        check_read_range(&db, excl(b"bb"), excl(b"ff"), rows).await;
+
+        // empty to the left
+        check_read_range(&db, None, incl(b"0"), &[]).await;
+        check_read_range(&db, None, excl(b"0"), &[]).await;
+        check_read_range(&db, None, excl(b"aa"), &[]).await;
+
+        // empty to the right
+        check_read_range(&db, incl(b"z"), None, &[]).await;
+        check_read_range(&db, excl(b"z"), None, &[]).await;
+        check_read_range(&db, excl(b"ff"), None, &[]).await;
+
+        // empty in the middle
+        check_read_range(&db, excl(b"aa"), excl(b"bb"), &[]).await;
+        check_read_range(&db, incl(b"ax"), excl(b"bb"), &[]).await;
+        check_read_range(&db, excl(b"aa"), incl(b"ba"), &[]).await;
+        check_read_range(&db, incl(b"ax"), incl(b"ba"), &[]).await;
     }
 }
