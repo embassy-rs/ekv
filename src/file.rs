@@ -1078,7 +1078,7 @@ impl<'a> FileSearcher<'a> {
     }
 
     async fn really_seek<F: Flash>(&mut self, m: &mut FileManager<F>) -> Result<bool, Error<F::Error>> {
-        let left = self.left.add(1).unwrap();
+        let left = self.left.add(1)?;
         let mut i = if left >= self.right {
             0
         } else {
@@ -1095,7 +1095,7 @@ impl<'a> FileSearcher<'a> {
                             Err(SearchSeekError::Flash(e)) => return Err(Error::Flash(e)),
                             Err(SearchSeekError::Corrupted) => corrupted!(),
                             Err(SearchSeekError::TooMuchLeft) => {
-                                let new_left = seq.add(1).unwrap();
+                                let new_left = seq.add(1)?;
                                 assert!(new_left >= self.left);
                                 self.left = new_left;
                             }
@@ -1236,7 +1236,7 @@ impl<'a> FileSearcher<'a> {
             }
             SeekDirection::Right => {
                 trace!("search seek right");
-                self.left = self.curr_high.add(1).unwrap();
+                self.left = self.curr_high.add(1)?;
                 self.result = self.curr_mid;
             }
         }
