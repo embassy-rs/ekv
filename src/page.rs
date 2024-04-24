@@ -6,7 +6,7 @@ use crate::errors::Error;
 use crate::flash::Flash;
 use crate::types::PageID;
 
-const CHUNK_MAGIC: u16 = 0x58A4;
+const CHUNK_MAGIC: u16 = 0x59B4;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(C)]
@@ -52,8 +52,6 @@ impl<E> From<Error<E>> for ReadError<E> {
 pub unsafe trait Header: Sized {
     const MAGIC: u32;
 }
-
-pub const MAX_CHUNK_SIZE: usize = PAGE_SIZE - PageHeader::SIZE - ChunkHeader::SIZE;
 
 async fn write_header<F: Flash, H: Header>(flash: &mut F, page_id: PageID, header: H) -> Result<(), F::Error> {
     assert!(size_of::<H>() <= MAX_HEADER_SIZE);
