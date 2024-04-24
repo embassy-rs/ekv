@@ -1,7 +1,7 @@
 use core::marker::PhantomData;
 use core::mem::size_of;
 
-use crate::config::*;
+use crate::config::{ALIGN, PAGE_SIZE, self, MAX_HEADER_SIZE, ERASE_VALUE};
 use crate::errors::Error;
 use crate::flash::Flash;
 use crate::types::PageID;
@@ -52,6 +52,12 @@ impl<E> From<Error<E>> for ReadError<E> {
 pub unsafe trait Header: Sized {
     const MAGIC: u32;
 }
+
+const MAX_CHUNK_SIZE: usize = if config::MAX_CHUNK_SIZE > (PAGE_SIZE - PageHeader::SIZE - ChunkHeader::SIZE) {
+    PAGE_SIZE - PageHeader::SIZE - ChunkHeader::SIZE
+} else {
+    config::MAX_CHUNK_SIZE
+};
 
 async fn write_header<F: Flash, H: Header>(flash: &mut F, page_id: PageID, header: H) -> Result<(), F::Error> {
     assert!(size_of::<H>() <= MAX_HEADER_SIZE);
