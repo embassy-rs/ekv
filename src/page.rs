@@ -1,7 +1,7 @@
 use core::marker::PhantomData;
 use core::mem::size_of;
 
-use crate::config::{ALIGN, PAGE_SIZE, self, MAX_HEADER_SIZE, ERASE_VALUE};
+use crate::config::{self, ALIGN, ERASE_VALUE, MAX_HEADER_SIZE, PAGE_SIZE};
 use crate::errors::Error;
 use crate::flash::Flash;
 use crate::types::PageID;
