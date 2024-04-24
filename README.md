@@ -19,6 +19,7 @@ Key-value database for embedded systems, for raw NOR flash, using an LSM-Tree.
 - Corruption-resistant: A corrupted or deliberately manipulated flash image cannot cause crashes, panics or infinite loops, only `Err(Corrupted)` errors.
 - Optional CRC32 protection of headers and data on flash.
 - Extensively tested, using unit tests and fuzzing.
+- Tunable chunk size. Smaller chunks reduce RAM requirements at the expense of doing more and smaller writesand spending a bit more flash space in chunk headers with CRCs.
 
 ## Current status
 
@@ -34,7 +35,6 @@ The on-disk format is **not stable** yet.
 - Optimize tiny write transactions: append to the last file if possible, instead of starting a new one. Currently each write transaction opens a new file, which will have to erase at least one full page, even if the transaction writes just one small key. It is recommended to batch multiple writes in a single transaction
 for performance.
 - Support access align higher than 4. Currently reads/writes are (optionally) aligned up to 4 bytes. Some flash out there can only be written in 8-byte words or higher.
-- Add a max chunk size, to reduce the RAM requirement in PageReader.
 - Allow writes within a transaction to be unsorted.
 - Allow reads within a write transaction. They should see the the not yet committed writes in the current transaction.
 - Add optional encryption + authentication support (which disables CRCs)
