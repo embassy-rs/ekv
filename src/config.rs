@@ -90,6 +90,14 @@ pub const ERASE_VALUE: u8 = match raw::ERASE_VALUE {
     _ => core::panic!("invalid ERASE_VALUE"),
 };
 
+/// Maximum chunk size supported.
+///
+/// The chunk size controls how big chunks of data is read and written from/to flash. A low
+/// value reduces the memory usage of EKV at the expense of more reads/writes.
+///
+/// Default: 4096
+pub const MAX_CHUNK_SIZE: usize = raw::MAX_CHUNK_SIZE;
+
 pub(crate) const MAX_HEADER_SIZE: usize = {
     let a = size_of::<MetaHeader>();
     let b = size_of::<DataHeader>();
