@@ -6,7 +6,7 @@ use crate::errors::Error;
 use crate::flash::Flash;
 use crate::types::PageID;
 
-const CHUNK_MAGIC: u16 = 0x59B4;
+const CHUNK_MAGIC: u16 = 0x59C4;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(C)]
