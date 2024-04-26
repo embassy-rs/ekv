@@ -53,11 +53,12 @@ pub unsafe trait Header: Sized {
     const MAGIC: u32;
 }
 
-const MAX_CHUNK_SIZE: usize = if config::MAX_CHUNK_SIZE > (PAGE_SIZE - PageHeader::SIZE - ChunkHeader::SIZE) {
+pub(crate) const MAX_CHUNK_SIZE: usize = if config::MAX_CHUNK_SIZE > (PAGE_SIZE - PageHeader::SIZE - ChunkHeader::SIZE) {
     PAGE_SIZE - PageHeader::SIZE - ChunkHeader::SIZE
 } else {
     config::MAX_CHUNK_SIZE
 };
+pub(crate) const CHUNKS_PER_PAGE: usize = (PAGE_SIZE - PageHeader::SIZE) / (MAX_CHUNK_SIZE + ChunkHeader::SIZE);
 
 async fn write_header<F: Flash, H: Header>(flash: &mut F, page_id: PageID, header: H) -> Result<(), F::Error> {
     assert!(size_of::<H>() <= MAX_HEADER_SIZE);
@@ -433,8 +434,12 @@ impl<H: Header> PageWriter<H> {
         self.page_id
     }
 
+    pub fn is_chunk_full(&self) -> bool {
+        self.chunk_pos == MAX_CHUNK_SIZE
+    }
+
     pub async fn write<F: Flash>(&mut self, flash: &mut F, data: &[u8]) -> Result<usize, Error<F::Error>> {
-        let max_write = PAGE_SIZE.saturating_sub(self.chunk_offset + ChunkHeader::SIZE + self.chunk_pos).min(MAX_CHUNK_SIZE);
+        let max_write = PAGE_SIZE.saturating_sub(self.chunk_offset + (ChunkHeader::SIZE * CHUNKS_PER_PAGE) + self.chunk_pos).min(MAX_CHUNK_SIZE);
         let total_n = data.len().min(max_write);
         if total_n == 0 {
             return Ok(0);
@@ -513,7 +518,6 @@ impl<H: Header> PageWriter<H> {
             // nothing to commit.
             return Ok(());
         }
-
         self.erase_if_needed(flash).await.map_err(Error::Flash)?;
 
         // flush align buf.
@@ -535,6 +539,7 @@ impl<H: Header> PageWriter<H> {
             #[cfg(feature = "crc")]
             crc: self.crc.finish(),
         };
+
         flash
             .write(self.page_id as _, self.chunk_offset, &h.to_bytes())
             .await
@@ -625,7 +630,7 @@ mod tests {
     }
 
     const HEADER: TestHeader = TestHeader { foo: 123456 };
-    const MAX_PAYLOAD: usize = PAGE_SIZE - PageHeader::SIZE - size_of::<TestHeader>() - ChunkHeader::SIZE;
+    const MAX_PAYLOAD: usize = PAGE_SIZE - PageHeader::SIZE - size_of::<TestHeader>() - (ChunkHeader::SIZE * CHUNKS_PER_PAGE);
 
     #[test_log::test]
     fn test_crc32() {

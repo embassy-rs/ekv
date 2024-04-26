@@ -10,7 +10,8 @@ pub use crate::page::ReadError;
 use crate::page::{ChunkHeader, DehydratedPageReader, Header, PageHeader, PageReader, PageWriter};
 use crate::types::{OptionPageID, PageID};
 
-pub const PAGE_MAX_PAYLOAD_SIZE: usize = PAGE_SIZE - PageHeader::SIZE - size_of::<DataHeader>() - ChunkHeader::SIZE;
+pub const PAGE_MAX_PAYLOAD_SIZE: usize =
+    PAGE_SIZE - PageHeader::SIZE - size_of::<DataHeader>() - (page::CHUNKS_PER_PAGE * ChunkHeader::SIZE);
 
 pub type FileID = u8;
 
@@ -93,6 +94,7 @@ pub struct FileManager<F: Flash> {
 
 impl<F: Flash> FileManager<F> {
     pub fn new(flash: F, random_seed: u32) -> Self {
+        assert!(FILE_COUNT * FileMeta::SIZE <= page::MAX_CHUNK_SIZE);
         Self {
             flash,
             random: random_seed,
@@ -1378,9 +1380,7 @@ impl FileWriter {
 
         trace!(
             "flush_header: page={:?} h={:?} record_boundary={:?}",
-            page_id,
-            header,
-            self.record_boundary
+            page_id, header, self.record_boundary
         );
 
         self.seq = next_seq;
@@ -1414,6 +1414,10 @@ impl FileWriter {
                 }
                 Some(w) => {
                     let n = w.write(&mut m.flash, data).await?;
+                    if w.is_chunk_full() {
+                        // Commit when we wrote a whole chunk
+                        w.commit(&mut m.flash).await?;
+                    }
                     data = &data[n..];
                     if n == 0 {
                         self.next_page(m).await?;
