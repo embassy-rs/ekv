@@ -434,7 +434,7 @@ impl<H: Header> PageWriter<H> {
     }
 
     pub async fn write<F: Flash>(&mut self, flash: &mut F, data: &[u8]) -> Result<usize, Error<F::Error>> {
-        let max_write = PAGE_SIZE.saturating_sub(self.chunk_offset + ChunkHeader::SIZE + self.chunk_pos);
+        let max_write = PAGE_SIZE.saturating_sub(self.chunk_offset + ChunkHeader::SIZE + self.chunk_pos).min(MAX_CHUNK_SIZE);
         let total_n = data.len().min(max_write);
         if total_n == 0 {
             return Ok(0);
