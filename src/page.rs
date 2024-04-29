@@ -238,6 +238,9 @@ impl PageReader {
 
     async fn load_chunk<F: Flash>(&mut self, flash: &mut F) -> Result<(), Error<F::Error>> {
         let n = align_up(self.ch.chunk_len);
+        if n > MAX_CHUNK_SIZE {
+            return Err(Error::Corrupted);
+        }
         flash
             .read(
                 self.ch.page_id as _,
