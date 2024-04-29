@@ -189,6 +189,7 @@ branching-factor-2 = [] # Default
 branching-factor-3 = []
 branching-factor-4 = []
 
+max-chunk-size-128 = []
 max-chunk-size-256 = []
 max-chunk-size-512 = []
 max-chunk-size-1024 = []
