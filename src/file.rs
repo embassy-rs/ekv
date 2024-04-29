@@ -313,13 +313,15 @@ impl<F: Flash> FileManager<F> {
                     debug!("read_page failed: last_page_id={:?} file_id={}", last_page_id, file_id);
                 })?;
 
+            let mut to_skip = PAGE_SIZE;
             let mut page_len = 0;
             loop {
-                let n = r.skip(&mut self.flash, PAGE_SIZE).await?;
+                let n = r.skip(&mut self.flash, to_skip).await?;
                 if n == 0 {
                     break;
                 }
                 page_len += n;
+                to_skip -= n;
             }
 
             let last_seq = h.seq.add(page_len)?;
@@ -881,7 +883,16 @@ impl<'a> FileReader<'a> {
                         debug!("failed read next page={:?}", pp.page_id);
                     })?;
                 let n = seq.sub(h.seq);
-                let got_n = self.r.skip(&mut m.flash, n).await?;
+                let mut remaining = n;
+                let mut got_n = 0;
+                loop {
+                    let r = self.r.skip(&mut m.flash, remaining).await?;
+                    if r == 0 {
+                        break;
+                    }
+                    got_n += r;
+                    remaining -= r;
+                }
                 let eof = self.r.is_at_eof(&mut m.flash).await?;
                 if n != got_n || eof {
                     debug!(
