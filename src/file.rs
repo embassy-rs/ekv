@@ -1392,7 +1392,9 @@ impl FileWriter {
 
         trace!(
             "flush_header: page={:?} h={:?} record_boundary={:?}",
-            page_id, header, self.record_boundary
+            page_id,
+            header,
+            self.record_boundary
         );
 
         self.seq = next_seq;

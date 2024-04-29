@@ -637,7 +637,8 @@ mod tests {
     }
 
     const HEADER: TestHeader = TestHeader { foo: 123456 };
-    const MAX_PAYLOAD: usize = PAGE_SIZE - PageHeader::SIZE - size_of::<TestHeader>() - (ChunkHeader::SIZE * CHUNKS_PER_PAGE);
+    const MAX_PAYLOAD: usize =
+        PAGE_SIZE - PageHeader::SIZE - size_of::<TestHeader>() - (ChunkHeader::SIZE * CHUNKS_PER_PAGE);
 
     #[test_log::test]
     fn test_crc32() {
