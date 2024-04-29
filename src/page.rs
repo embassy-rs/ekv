@@ -278,19 +278,14 @@ impl PageReader {
         self.ch.page_id
     }
 
+    /// Read up to data.len() bytes of data or until the end of the current chunk.
+    ///
+    /// May return less bytes than the buffer if not available.
     pub async fn read<F: Flash>(&mut self, flash: &mut F, data: &mut [u8]) -> Result<usize, Error<F::Error>> {
         trace!("PageReader({:?}): read({})", self.ch.page_id, data.len());
-        if self.ch.at_end || data.is_empty() {
+        if self.is_at_eof(flash).await? || data.is_empty() {
             trace!("read: at end or zero len");
             return Ok(0);
-        }
-
-        if self.chunk_pos == self.ch.chunk_len {
-            trace!("read: at end of chunk");
-            if !self.next_chunk(flash).await? {
-                trace!("read: no next chunk, we're at end.");
-                return Ok(0);
-            }
         }
 
         let n = data.len().min(self.ch.chunk_len - self.chunk_pos);
@@ -452,6 +447,9 @@ impl<H: Header> PageWriter<H> {
         self.chunk_pos >= MAX_CHUNK_SIZE
     }
 
+    /// Write n bytes of data to the page.
+    ///
+    /// If the current chunk is full, it will commit it.
     pub async fn write<F: Flash>(&mut self, flash: &mut F, data: &[u8]) -> Result<usize, Error<F::Error>> {
         let max_write = PAGE_SIZE
             .saturating_sub(self.chunk_offset + ChunkHeader::SIZE + self.chunk_pos)
