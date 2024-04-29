@@ -11,7 +11,7 @@ use crate::page::{ChunkHeader, DehydratedPageReader, Header, PageHeader, PageRea
 use crate::types::{OptionPageID, PageID};
 
 pub const PAGE_MAX_PAYLOAD_SIZE: usize =
-    PAGE_SIZE - PageHeader::SIZE - size_of::<DataHeader>() - ChunkHeader::SIZE;
+    PAGE_SIZE - PageHeader::SIZE - size_of::<DataHeader>() - (page::CHUNKS_PER_PAGE * ChunkHeader::SIZE);
 
 pub type FileID = u8;
 
