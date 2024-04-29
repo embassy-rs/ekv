@@ -29,7 +29,7 @@ pub struct MetaHeader {
 }
 
 unsafe impl page::Header for MetaHeader {
-    const MAGIC: u32 = 0x1d81bcdc;
+    const MAGIC: u32 = 0x1d81bcde;
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -49,7 +49,7 @@ pub struct DataHeader {
 }
 
 unsafe impl page::Header for DataHeader {
-    const MAGIC: u32 = 0x7fcbf35c;
+    const MAGIC: u32 = 0x7fcbf35d;
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
