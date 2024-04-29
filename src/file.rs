@@ -312,7 +312,16 @@ impl<F: Flash> FileManager<F> {
                 .inspect_err(|_| {
                     debug!("read_page failed: last_page_id={:?} file_id={}", last_page_id, file_id);
                 })?;
-            let page_len = r.skip(&mut self.flash, PAGE_SIZE).await?;
+
+            let mut page_len = 0;
+            loop {
+                let n = r.skip(&mut self.flash, PAGE_SIZE).await?;
+                if n == 0 {
+                    break;
+                }
+                page_len += n;
+            }
+
             let last_seq = h.seq.add(page_len)?;
 
             let mut p = Some(PagePointer {
