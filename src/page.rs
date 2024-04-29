@@ -300,26 +300,32 @@ impl PageReader {
         Ok(n)
     }
 
-    pub async fn skip<F: Flash>(&mut self, flash: &mut F, len: usize) -> Result<usize, Error<F::Error>> {
+    /// Skip up to len bytes in the reader or until the end of the last chunk
+    ///
+    /// Skips across chunks within the page.
+    pub async fn skip<F: Flash>(&mut self, flash: &mut F, mut len: usize) -> Result<usize, Error<F::Error>> {
         trace!("PageReader({:?}): skip({})", self.ch.page_id, len);
         if self.ch.at_end || len == 0 {
             trace!("skip: at end or zero len");
             return Ok(0);
         }
 
-        if self.chunk_pos == self.ch.chunk_len {
-            trace!("skip: at end of chunk");
-            if !self.next_chunk(flash).await? {
+        let start = len;
+        loop {
+            if self.is_at_eof(flash).await? {
                 trace!("skip: no next chunk, we're at end.");
-                return Ok(0);
+                return Ok(start - len);
+            }
+
+            let n = len.min(self.ch.chunk_len - self.chunk_pos);
+            self.ch.prev_chunks_len += n;
+            self.chunk_pos += n;
+            len -= n;
+            if len == 0 {
+                trace!("skip: done, n={}", start - len);
+                return Ok(start - len);
             }
         }
-
-        let n = len.min(self.ch.chunk_len - self.chunk_pos);
-        self.ch.prev_chunks_len += n;
-        self.chunk_pos += n;
-        trace!("skip: done, n={}", n);
-        Ok(n)
     }
 
     pub async fn is_at_eof<F: Flash>(&mut self, flash: &mut F) -> Result<bool, Error<F::Error>> {
