@@ -53,7 +53,8 @@ pub unsafe trait Header: Sized {
     const MAGIC: u32;
 }
 
-pub(crate) const MAX_CHUNK_SIZE: usize = if config::MAX_CHUNK_SIZE > (PAGE_SIZE - PageHeader::SIZE - ChunkHeader::SIZE) {
+pub(crate) const MAX_CHUNK_SIZE: usize = if config::MAX_CHUNK_SIZE > (PAGE_SIZE - PageHeader::SIZE - ChunkHeader::SIZE)
+{
     PAGE_SIZE - PageHeader::SIZE - ChunkHeader::SIZE
 } else {
     config::MAX_CHUNK_SIZE
@@ -435,11 +436,17 @@ impl<H: Header> PageWriter<H> {
     }
 
     pub fn is_chunk_full(&self) -> bool {
-        self.chunk_pos == MAX_CHUNK_SIZE
+        self.chunk_pos >= MAX_CHUNK_SIZE
+    }
+
+    pub fn chunk_size(&self) -> usize {
+        self.chunk_pos
     }
 
     pub async fn write<F: Flash>(&mut self, flash: &mut F, data: &[u8]) -> Result<usize, Error<F::Error>> {
-        let max_write = PAGE_SIZE.saturating_sub(self.chunk_offset + (ChunkHeader::SIZE * CHUNKS_PER_PAGE) + self.chunk_pos).min(MAX_CHUNK_SIZE);
+        let max_write = PAGE_SIZE
+            .saturating_sub(self.chunk_offset + ChunkHeader::SIZE + self.chunk_pos)
+            .min(MAX_CHUNK_SIZE.saturating_sub(self.chunk_pos));
         let total_n = data.len().min(max_write);
         if total_n == 0 {
             return Ok(0);

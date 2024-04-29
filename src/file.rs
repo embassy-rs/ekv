@@ -1317,6 +1317,9 @@ impl FileWriter {
                     let mut data = &buf[..n];
                     while !data.is_empty() {
                         let n = w.write(&mut m.flash, data).await?;
+                        if w.is_chunk_full() {
+                            w.commit(&mut m.flash).await?;
+                        }
                         data = &data[n..];
 
                         // the new page can't get full, because we're not writing more
