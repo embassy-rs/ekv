@@ -153,9 +153,14 @@ impl ChunkIter {
             return Ok(false);
         }
 
+        if header.len as usize > MAX_CHUNK_SIZE {
+            corrupted!();
+        }
+
         let Some(data_end) = data_start.checked_add(header.len as usize) else {
-            corrupted!()
+            corrupted!();
         };
+
         if data_end > PAGE_SIZE {
             corrupted!();
         }
@@ -238,9 +243,8 @@ impl PageReader {
 
     async fn load_chunk<F: Flash>(&mut self, flash: &mut F) -> Result<(), Error<F::Error>> {
         let n = align_up(self.ch.chunk_len);
-        if n > MAX_CHUNK_SIZE {
-            return Err(Error::Corrupted);
-        }
+        assert!(n <= MAX_CHUNK_SIZE);
+
         flash
             .read(
                 self.ch.page_id as _,
