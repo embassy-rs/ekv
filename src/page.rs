@@ -435,7 +435,7 @@ impl<H: Header> PageWriter<H> {
         self.page_id
     }
 
-    pub fn is_chunk_full(&self) -> bool {
+    fn is_chunk_full(&self) -> bool {
         self.chunk_pos >= MAX_CHUNK_SIZE
     }
 
@@ -496,6 +496,10 @@ impl<H: Header> PageWriter<H> {
         self.align_buf[..n].copy_from_slice(data);
         self.total_pos += n;
         self.chunk_pos += n;
+
+        if self.is_chunk_full() {
+            self.commit(flash).await?;
+        }
 
         Ok(total_n)
     }

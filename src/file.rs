@@ -1326,9 +1326,6 @@ impl FileWriter {
                     let mut data = &buf[..n];
                     while !data.is_empty() {
                         let n = w.write(&mut m.flash, data).await?;
-                        if w.is_chunk_full() {
-                            w.commit(&mut m.flash).await?;
-                        }
                         data = &data[n..];
 
                         // the new page can't get full, because we're not writing more
@@ -1428,10 +1425,6 @@ impl FileWriter {
                 }
                 Some(w) => {
                     let n = w.write(&mut m.flash, data).await?;
-                    if w.is_chunk_full() {
-                        // Commit when we wrote a whole chunk
-                        w.commit(&mut m.flash).await?;
-                    }
                     data = &data[n..];
                     if n == 0 {
                         self.next_page(m).await?;
