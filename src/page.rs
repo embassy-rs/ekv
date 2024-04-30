@@ -59,7 +59,6 @@ pub(crate) const MAX_CHUNK_SIZE: usize = if config::MAX_CHUNK_SIZE > (PAGE_SIZE 
 } else {
     config::MAX_CHUNK_SIZE
 };
-pub(crate) const CHUNKS_PER_PAGE: usize = (PAGE_SIZE - PageHeader::SIZE) / (MAX_CHUNK_SIZE + ChunkHeader::SIZE);
 
 async fn write_header<F: Flash, H: Header>(flash: &mut F, page_id: PageID, header: H) -> Result<(), F::Error> {
     assert!(size_of::<H>() <= MAX_HEADER_SIZE);
@@ -649,7 +648,7 @@ mod tests {
 
     const HEADER: TestHeader = TestHeader { foo: 123456 };
     const MAX_PAYLOAD: usize =
-        PAGE_SIZE - PageHeader::SIZE - size_of::<TestHeader>() - (ChunkHeader::SIZE * CHUNKS_PER_PAGE);
+        PAGE_SIZE - PageHeader::SIZE - size_of::<TestHeader>() - ChunkHeader::SIZE;
 
     #[test_log::test]
     fn test_crc32() {
