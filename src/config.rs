@@ -216,6 +216,8 @@ const _CHECKS: () = {
     core::assert!(MAX_VALUE_SIZE > 0);
 
     core::assert!(RECORD_HEADER_SIZE <= 4);
+
+    core::assert!(MAX_CHUNK_SIZE % ALIGN == 0);
 };
 
 /// Dump the compile-time configuration to `log` or `defmt`.
