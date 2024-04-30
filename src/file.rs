@@ -10,11 +10,12 @@ pub use crate::page::ReadError;
 use crate::page::{ChunkHeader, DehydratedPageReader, Header, PageHeader, PageReader, PageWriter};
 use crate::types::{OptionPageID, PageID};
 
-
-const CHUNKS_PER_PAGE: usize = (PAGE_SIZE - PageHeader::SIZE) / (page::MAX_CHUNK_SIZE + ChunkHeader::SIZE);
-const CHUNKS_REMAINDER: usize = (PAGE_SIZE - PageHeader::SIZE) % (page::MAX_CHUNK_SIZE + ChunkHeader::SIZE);
-
-pub const PAGE_MAX_PAYLOAD_SIZE: usize = (CHUNKS_PER_PAGE * page::MAX_CHUNK_SIZE) + CHUNKS_REMAINDER - size_of::<DataHeader>();
+// Number of chunks + chunk headers per page.
+const CHUNKS_PER_PAGE: usize = (PAGE_SIZE - PageHeader::SIZE - size_of::<DataHeader>()) / (page::MAX_CHUNK_SIZE + ChunkHeader::SIZE);
+// Size of the last chunk + chunk header.
+const CHUNKS_REMAINDER: usize = (PAGE_SIZE - PageHeader::SIZE - size_of::<DataHeader>()) % (page::MAX_CHUNK_SIZE + ChunkHeader::SIZE);
+// Bytes in max chunks + remainder chunk without the last chunk header.
+pub const PAGE_MAX_PAYLOAD_SIZE: usize = (CHUNKS_PER_PAGE * page::MAX_CHUNK_SIZE) + CHUNKS_REMAINDER.saturating_sub(ChunkHeader::SIZE);
 
 pub type FileID = u8;
 
