@@ -8,6 +8,7 @@ use ekv::flash::MemFlash;
 use ekv::page::PageReader;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
+use log::info;
 
 const MAX_LEN: usize = 1024;
 
@@ -60,13 +61,14 @@ async fn fuzz_inner(ops: Input, dump: bool) {
     let mut trunc_offs: usize = 0;
 
     for op in ops.ops {
+        info!("========== OP: {:?}", op);
         match op {
             Op::Append { len } => {
                 if len > MAX_LEN {
                     continue;
                 }
 
-                if (m.used_pages() + 3) * PAGE_SIZE + len >= MAX_PAGE_COUNT * PAGE_SIZE {
+                if (m.used_pages() + 4) * PAGE_SIZE + len >= MAX_PAGE_COUNT * PAGE_SIZE {
                     continue;
                 }
 
@@ -127,7 +129,7 @@ async fn fuzz_inner(ops: Input, dump: bool) {
                 }
 
                 // Linear search
-                loop {
+                while !found {
                     let mut got_id = [0u8; 4];
                     match s.reader().read(&mut m, &mut got_id).await {
                         Ok(()) => {}

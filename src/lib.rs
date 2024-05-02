@@ -5,6 +5,7 @@
 #![allow(async_fn_in_trait)]
 #![allow(clippy::large_enum_variant)]
 #![allow(clippy::new_without_default)]
+#![allow(clippy::modulo_one)] // needed when ALIGN=1
 // the `_test` feature makes public more stuff, causing bogus warnings.
 #![cfg_attr(not(feature = "_test"), warn(missing_docs))]
 
