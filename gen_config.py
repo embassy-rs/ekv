@@ -46,7 +46,7 @@ feature("max_value_size", default=1024, min=1, max=65536, pow2=True)
 
 feature("scratch_page_count", default=4, min=0, max=65536, pow2=True)
 feature("branching_factor", default=2, min=2, max=4)
-feature("max_chunk_size", default=4096, vals=[256, 512, 1024, 2048, 4096])
+feature("max_chunk_size", default=4096, vals=[128, 256, 512, 1024, 2048, 4096])
 
 # ========= Update Cargo.toml
 

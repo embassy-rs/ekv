@@ -19,7 +19,7 @@ Key-value database for embedded systems, for raw NOR flash, using an LSM-Tree.
 - Corruption-resistant: A corrupted or deliberately manipulated flash image cannot cause crashes, panics or infinite loops, only `Err(Corrupted)` errors.
 - Optional CRC32 protection of headers and data on flash.
 - Extensively tested, using unit tests and fuzzing.
-- Tunable chunk size. Smaller chunks reduce RAM requirements at the expense of doing more and smaller writesand spending a bit more flash space in chunk headers with CRCs.
+- Tunable chunk size. Smaller chunks reduce RAM requirements at the expense of doing more and smaller writes and spending a bit more flash space in chunk headers with CRCs.
 
 ## Current status
 
