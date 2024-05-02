@@ -1,7 +1,7 @@
 use core::cell::RefCell;
 use core::cmp::Ordering;
 use core::future::poll_fn;
-use core::ops::{Deref, DerefMut};
+use core::ops::{Deref, DerefMut, RangeBounds};
 use core::task::Poll;
 
 use embassy_sync::blocking_mutex::raw::RawMutex;
@@ -15,7 +15,7 @@ use crate::errors::{no_eof, CorruptedError, Error, MountError, ReadError, WriteE
 use crate::file::{FileID, FileManager, FileReader, FileSearcher, FileWriter, SeekDirection, PAGE_MAX_PAYLOAD_SIZE};
 use crate::flash::Flash;
 use crate::page::{PageReader, ReadError as PageReadError};
-use crate::{Bound, CommitError, Cursor, FormatError};
+use crate::{CommitError, Cursor, FormatError};
 
 const FILE_FLAG_COMPACT_DEST: u8 = 0x01;
 const FILE_FLAG_COMPACT_SRC: u8 = 0x02;
@@ -249,24 +249,21 @@ impl<'a, F: Flash + 'a, M: RawMutex + 'a> ReadTransaction<'a, F, M> {
 
     /// Get a cursor for reading all the keys in the database.
     ///
-    /// This is equivalent to calling `read_range(None, None)`.
+    /// This is equivalent to calling `read_range(..)`.
     ///
     /// The cursor returns the keys in lexicographically ascending order.
     pub async fn read_all<'b>(&'b self) -> Result<Cursor<'b, F, M>, Error<F::Error>> {
-        self.read_range(None, None).await
+        self.read_range(..).await
     }
 
-    /// Get a cursor for reading keys in the database that are between `lower_bound` and `upper_bound`.
-    ///
-    /// A `None` bound indicates no upper or lower bound.
+    /// Get a cursor for reading keys in the database that are in the given range.
     ///
     /// The cursor returns the keys in lexicographically ascending order.
     pub async fn read_range<'b>(
         &'b self,
-        lower_bound: Option<Bound<'_>>,
-        upper_bound: Option<Bound<'b>>,
+        range: impl RangeBounds<&'b [u8]>,
     ) -> Result<Cursor<'b, F, M>, Error<F::Error>> {
-        Cursor::new(self.db, lower_bound, upper_bound).await
+        Cursor::new(self.db, range.start_bound().map(|x| *x), range.end_bound().map(|x| *x)).await
     }
 }
 

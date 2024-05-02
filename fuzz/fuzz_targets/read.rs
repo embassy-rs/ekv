@@ -1,6 +1,6 @@
 #![no_main]
 use ekv::flash::MemFlash;
-use ekv::{Bound, Config, Database};
+use ekv::{Config, Database};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use libfuzzer_sys::fuzz_target;
 
@@ -57,19 +57,7 @@ async fn fuzz_inner(data: &[u8], dump: bool) {
     drop(rtx);
 
     let rtx = db.read_transaction().await;
-    if let Ok(mut cursor) = rtx
-        .read_range(
-            Some(Bound {
-                key: b"foo",
-                allow_equal: false,
-            }),
-            Some(Bound {
-                key: b"poo",
-                allow_equal: false,
-            }),
-        )
-        .await
-    {
+    if let Ok(mut cursor) = rtx.read_range(&b"foo"[..]..&b"poo"[..]).await {
         let mut kbuf = [0; 64];
         let mut vbuf = [0; 64];
         while let Ok(Some((klen, vlen))) = cursor.next(&mut kbuf, &mut vbuf).await {

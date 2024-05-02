@@ -1,4 +1,5 @@
 use core::cmp::Ordering;
+use core::ops::Bound;
 
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use heapless::Vec;
@@ -11,33 +12,20 @@ use crate::page::ReadError as PageReadError;
 use crate::record::{Inner, RecordHeader};
 use crate::Database;
 
-/// Upper or lower bound for a range read.
-pub struct Bound<'a> {
-    /// Key.
-    pub key: &'a [u8],
-    /// Whether the bound includes entries with key equal to `self.key`.
-    ///
-    /// If false, only entries with strictly greater keys (for `lower_bound`) or
-    /// strictly smaller keys (for `upper_bound`) will be returned.
-    ///
-    /// If true, equal keys will also be returned.
-    pub allow_equal: bool,
-}
-
 /// Cursor for a range read.
 ///
 /// Returned by [`ReadTransaction::read_all()`](crate::ReadTransaction::read_all) and [`ReadTransaction::read_range()`](crate::ReadTransaction::read_range).
 pub struct Cursor<'a, F: Flash + 'a, M: RawMutex + 'a> {
     db: &'a Database<F, M>,
-    upper_bound: Option<Bound<'a>>,
+    upper_bound: Bound<&'a [u8]>,
     readers: [Option<DehydratedFileReader>; FILE_COUNT],
 }
 
 impl<'a, F: Flash + 'a, M: RawMutex + 'a> Cursor<'a, F, M> {
     pub(crate) async fn new(
         db: &'a Database<F, M>,
-        lower_bound: Option<Bound<'_>>,
-        upper_bound: Option<Bound<'a>>,
+        lower_bound: Bound<&[u8]>,
+        upper_bound: Bound<&'a [u8]>,
     ) -> Result<Self, Error<F::Error>> {
         let inner = &mut *db.inner.lock().await;
         inner.files.remount_if_dirty(&mut inner.readers[0]).await?;
@@ -46,10 +34,12 @@ impl<'a, F: Flash + 'a, M: RawMutex + 'a> Cursor<'a, F, M> {
         let mut readers: Vec<Option<DehydratedFileReader>, FILE_COUNT> = Vec::new();
         for i in 0..FILE_COUNT {
             let file_id = i as FileID;
-            let r = if let Some(bound) = &lower_bound {
-                inner.search_lower_bound_file(file_id, bound).await?
-            } else {
-                Some(inner.files.read(&mut inner.readers[0], file_id).dehydrate())
+            let r = match lower_bound {
+                Bound::Excluded(k) | Bound::Included(k) => {
+                    let included = matches!(lower_bound, Bound::Included(_));
+                    inner.search_lower_bound_file(file_id, k, included).await?
+                }
+                Bound::Unbounded => Some(inner.files.read(&mut inner.readers[0], file_id).dehydrate()),
             };
             let _ = readers.push(r);
         }
@@ -107,13 +97,10 @@ impl<'a, F: Flash + 'a, M: RawMutex + 'a> Cursor<'a, F, M> {
                     let got_key = &mut key_buf[..header.key_len];
                     r.read(m, got_key).await.map_err(no_eof)?;
 
-                    let finished = match &self.upper_bound {
-                        None => false,
-                        Some(upper_bound) => match got_key[..].cmp(upper_bound.key) {
-                            Ordering::Equal => !upper_bound.allow_equal,
-                            Ordering::Less => false,
-                            Ordering::Greater => true,
-                        },
+                    let finished = match self.upper_bound {
+                        Bound::Included(key) => key < got_key,
+                        Bound::Excluded(key) => key <= got_key,
+                        Bound::Unbounded => false,
                     };
                     if finished {
                         // reached the upper bound, remove this file.
@@ -203,7 +190,8 @@ impl<F: Flash> Inner<F> {
     async fn search_lower_bound_file(
         &mut self,
         file_id: FileID,
-        bound: &Bound<'_>,
+        bound_key: &[u8],
+        bound_included: bool,
     ) -> Result<Option<DehydratedFileReader>, Error<F::Error>> {
         let r = self.files.read(&mut self.readers[0], file_id);
         let m = &mut self.files;
@@ -229,10 +217,10 @@ impl<F: Flash> Inner<F> {
             s.reader().read(m, got_key).await.map_err(no_eof)?;
 
             // Found?
-            let dir = match got_key[..].cmp(bound.key) {
+            let dir = match got_key[..].cmp(bound_key) {
                 Ordering::Equal => {
                     // if equal is allowed, return it.
-                    if bound.allow_equal {
+                    if bound_included {
                         return Ok(Some(dehydrated));
                     }
                     // otherwise return the next key.
@@ -265,10 +253,10 @@ impl<F: Flash> Inner<F> {
             r.read(m, got_key).await.map_err(no_eof)?;
 
             // Found?
-            match got_key[..].cmp(bound.key) {
+            match got_key[..].cmp(bound_key) {
                 Ordering::Equal => {
                     // if equal is allowed, return it.
-                    if bound.allow_equal {
+                    if bound_included {
                         return Ok(Some(dehydrated));
                     }
                     // otherwise return the next key.
@@ -286,6 +274,9 @@ impl<F: Flash> Inner<F> {
 
 #[cfg(test)]
 mod tests {
+    use std::ops::Bound;
+    use std::ops::Bound::*;
+
     use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 
     use super::*;
@@ -324,23 +315,13 @@ mod tests {
 
     async fn check_read_range(
         db: &Database<impl Flash, NoopRawMutex>,
-        lower: Option<Bound<'_>>,
-        upper: Option<Bound<'_>>,
+        lower: Bound<&[u8]>,
+        upper: Bound<&[u8]>,
         entries: &[(&[u8], &[u8])],
     ) {
         let rtx = db.read_transaction().await;
-        let cursor = rtx.read_range(lower, upper).await.unwrap();
+        let cursor = rtx.read_range((lower, upper)).await.unwrap();
         check_cursor(cursor, entries).await
-    }
-
-    fn incl(key: &[u8]) -> Option<Bound<'_>> {
-        Some(Bound { key, allow_equal: true })
-    }
-    fn excl(key: &[u8]) -> Option<Bound<'_>> {
-        Some(Bound {
-            key,
-            allow_equal: false,
-        })
     }
 
     #[test_log::test(tokio::test)]
@@ -448,63 +429,63 @@ mod tests {
             (b"ee", b"e"),
             (b"ff", b"f"),
         ];
-        check_read_range(&db, None, None, rows).await;
-        check_read_range(&db, None, incl(b"ff"), rows).await;
-        check_read_range(&db, None, incl(b"zz"), rows).await;
-        check_read_range(&db, None, excl(b"zz"), rows).await;
+        check_read_range(&db, Unbounded, Unbounded, rows).await;
+        check_read_range(&db, Unbounded, Included(b"ff"), rows).await;
+        check_read_range(&db, Unbounded, Included(b"zz"), rows).await;
+        check_read_range(&db, Unbounded, Excluded(b"zz"), rows).await;
 
-        check_read_range(&db, incl(b"aa"), None, rows).await;
-        check_read_range(&db, incl(b"aa"), incl(b"ff"), rows).await;
-        check_read_range(&db, incl(b"aa"), incl(b"zz"), rows).await;
-        check_read_range(&db, incl(b"aa"), excl(b"zz"), rows).await;
+        check_read_range(&db, Included(b"aa"), Unbounded, rows).await;
+        check_read_range(&db, Included(b"aa"), Included(b"ff"), rows).await;
+        check_read_range(&db, Included(b"aa"), Included(b"zz"), rows).await;
+        check_read_range(&db, Included(b"aa"), Excluded(b"zz"), rows).await;
 
-        check_read_range(&db, incl(b"0"), None, rows).await;
-        check_read_range(&db, incl(b"0"), incl(b"ff"), rows).await;
-        check_read_range(&db, incl(b"0"), incl(b"zz"), rows).await;
-        check_read_range(&db, incl(b"0"), excl(b"zz"), rows).await;
+        check_read_range(&db, Included(b"0"), Unbounded, rows).await;
+        check_read_range(&db, Included(b"0"), Included(b"ff"), rows).await;
+        check_read_range(&db, Included(b"0"), Included(b"zz"), rows).await;
+        check_read_range(&db, Included(b"0"), Excluded(b"zz"), rows).await;
 
-        check_read_range(&db, excl(b"0"), None, rows).await;
-        check_read_range(&db, excl(b"0"), incl(b"ff"), rows).await;
-        check_read_range(&db, excl(b"0"), incl(b"zz"), rows).await;
-        check_read_range(&db, excl(b"0"), excl(b"zz"), rows).await;
+        check_read_range(&db, Excluded(b"0"), Unbounded, rows).await;
+        check_read_range(&db, Excluded(b"0"), Included(b"ff"), rows).await;
+        check_read_range(&db, Excluded(b"0"), Included(b"zz"), rows).await;
+        check_read_range(&db, Excluded(b"0"), Excluded(b"zz"), rows).await;
 
         // match a few keys.
         let rows: &[(&[u8], &[u8])] = &[(b"cc", b"c"), (b"dd", b"d"), (b"ee", b"e")];
-        check_read_range(&db, incl(b"cc"), incl(b"ee"), rows).await;
-        check_read_range(&db, incl(b"c0"), incl(b"ee"), rows).await;
-        check_read_range(&db, excl(b"c0"), incl(b"ee"), rows).await;
-        check_read_range(&db, excl(b"bb"), incl(b"ee"), rows).await;
+        check_read_range(&db, Included(b"cc"), Included(b"ee"), rows).await;
+        check_read_range(&db, Included(b"c0"), Included(b"ee"), rows).await;
+        check_read_range(&db, Excluded(b"c0"), Included(b"ee"), rows).await;
+        check_read_range(&db, Excluded(b"bb"), Included(b"ee"), rows).await;
 
-        check_read_range(&db, incl(b"cc"), incl(b"ef"), rows).await;
-        check_read_range(&db, incl(b"c0"), incl(b"ef"), rows).await;
-        check_read_range(&db, excl(b"c0"), incl(b"ef"), rows).await;
-        check_read_range(&db, excl(b"bb"), incl(b"ef"), rows).await;
+        check_read_range(&db, Included(b"cc"), Included(b"ef"), rows).await;
+        check_read_range(&db, Included(b"c0"), Included(b"ef"), rows).await;
+        check_read_range(&db, Excluded(b"c0"), Included(b"ef"), rows).await;
+        check_read_range(&db, Excluded(b"bb"), Included(b"ef"), rows).await;
 
-        check_read_range(&db, incl(b"cc"), excl(b"ef"), rows).await;
-        check_read_range(&db, incl(b"c0"), excl(b"ef"), rows).await;
-        check_read_range(&db, excl(b"c0"), excl(b"ef"), rows).await;
-        check_read_range(&db, excl(b"bb"), excl(b"ef"), rows).await;
+        check_read_range(&db, Included(b"cc"), Excluded(b"ef"), rows).await;
+        check_read_range(&db, Included(b"c0"), Excluded(b"ef"), rows).await;
+        check_read_range(&db, Excluded(b"c0"), Excluded(b"ef"), rows).await;
+        check_read_range(&db, Excluded(b"bb"), Excluded(b"ef"), rows).await;
 
-        check_read_range(&db, incl(b"cc"), excl(b"ff"), rows).await;
-        check_read_range(&db, incl(b"c0"), excl(b"ff"), rows).await;
-        check_read_range(&db, excl(b"c0"), excl(b"ff"), rows).await;
-        check_read_range(&db, excl(b"bb"), excl(b"ff"), rows).await;
+        check_read_range(&db, Included(b"cc"), Excluded(b"ff"), rows).await;
+        check_read_range(&db, Included(b"c0"), Excluded(b"ff"), rows).await;
+        check_read_range(&db, Excluded(b"c0"), Excluded(b"ff"), rows).await;
+        check_read_range(&db, Excluded(b"bb"), Excluded(b"ff"), rows).await;
 
         // empty to the left
-        check_read_range(&db, None, incl(b"0"), &[]).await;
-        check_read_range(&db, None, excl(b"0"), &[]).await;
-        check_read_range(&db, None, excl(b"aa"), &[]).await;
+        check_read_range(&db, Unbounded, Included(b"0"), &[]).await;
+        check_read_range(&db, Unbounded, Excluded(b"0"), &[]).await;
+        check_read_range(&db, Unbounded, Excluded(b"aa"), &[]).await;
 
         // empty to the right
-        check_read_range(&db, incl(b"z"), None, &[]).await;
-        check_read_range(&db, excl(b"z"), None, &[]).await;
-        check_read_range(&db, excl(b"ff"), None, &[]).await;
+        check_read_range(&db, Included(b"z"), Unbounded, &[]).await;
+        check_read_range(&db, Excluded(b"z"), Unbounded, &[]).await;
+        check_read_range(&db, Excluded(b"ff"), Unbounded, &[]).await;
 
         // empty in the middle
-        check_read_range(&db, excl(b"aa"), excl(b"bb"), &[]).await;
-        check_read_range(&db, incl(b"ax"), excl(b"bb"), &[]).await;
-        check_read_range(&db, excl(b"aa"), incl(b"ba"), &[]).await;
-        check_read_range(&db, incl(b"ax"), incl(b"ba"), &[]).await;
+        check_read_range(&db, Excluded(b"aa"), Excluded(b"bb"), &[]).await;
+        check_read_range(&db, Included(b"ax"), Excluded(b"bb"), &[]).await;
+        check_read_range(&db, Excluded(b"aa"), Included(b"ba"), &[]).await;
+        check_read_range(&db, Included(b"ax"), Included(b"ba"), &[]).await;
     }
 
     #[test_log::test(tokio::test)]
@@ -545,62 +526,62 @@ mod tests {
             (b"ee", b"e"),
             (b"ff", b"f"),
         ];
-        check_read_range(&db, None, None, rows).await;
-        check_read_range(&db, None, incl(b"ff"), rows).await;
-        check_read_range(&db, None, incl(b"zz"), rows).await;
-        check_read_range(&db, None, excl(b"zz"), rows).await;
+        check_read_range(&db, Unbounded, Unbounded, rows).await;
+        check_read_range(&db, Unbounded, Included(b"ff"), rows).await;
+        check_read_range(&db, Unbounded, Included(b"zz"), rows).await;
+        check_read_range(&db, Unbounded, Excluded(b"zz"), rows).await;
 
-        check_read_range(&db, incl(b"aa"), None, rows).await;
-        check_read_range(&db, incl(b"aa"), incl(b"ff"), rows).await;
-        check_read_range(&db, incl(b"aa"), incl(b"zz"), rows).await;
-        check_read_range(&db, incl(b"aa"), excl(b"zz"), rows).await;
+        check_read_range(&db, Included(b"aa"), Unbounded, rows).await;
+        check_read_range(&db, Included(b"aa"), Included(b"ff"), rows).await;
+        check_read_range(&db, Included(b"aa"), Included(b"zz"), rows).await;
+        check_read_range(&db, Included(b"aa"), Excluded(b"zz"), rows).await;
 
-        check_read_range(&db, incl(b"0"), None, rows).await;
-        check_read_range(&db, incl(b"0"), incl(b"ff"), rows).await;
-        check_read_range(&db, incl(b"0"), incl(b"zz"), rows).await;
-        check_read_range(&db, incl(b"0"), excl(b"zz"), rows).await;
+        check_read_range(&db, Included(b"0"), Unbounded, rows).await;
+        check_read_range(&db, Included(b"0"), Included(b"ff"), rows).await;
+        check_read_range(&db, Included(b"0"), Included(b"zz"), rows).await;
+        check_read_range(&db, Included(b"0"), Excluded(b"zz"), rows).await;
 
-        check_read_range(&db, excl(b"0"), None, rows).await;
-        check_read_range(&db, excl(b"0"), incl(b"ff"), rows).await;
-        check_read_range(&db, excl(b"0"), incl(b"zz"), rows).await;
-        check_read_range(&db, excl(b"0"), excl(b"zz"), rows).await;
+        check_read_range(&db, Excluded(b"0"), Unbounded, rows).await;
+        check_read_range(&db, Excluded(b"0"), Included(b"ff"), rows).await;
+        check_read_range(&db, Excluded(b"0"), Included(b"zz"), rows).await;
+        check_read_range(&db, Excluded(b"0"), Excluded(b"zz"), rows).await;
 
         // match a few keys.
         let rows: &[(&[u8], &[u8])] = &[(b"cc", b"c"), (b"dd", b"d"), (b"ee", b"e")];
-        check_read_range(&db, incl(b"cc"), incl(b"ee"), rows).await;
-        check_read_range(&db, incl(b"c0"), incl(b"ee"), rows).await;
-        check_read_range(&db, excl(b"c0"), incl(b"ee"), rows).await;
-        check_read_range(&db, excl(b"bb"), incl(b"ee"), rows).await;
+        check_read_range(&db, Included(b"cc"), Included(b"ee"), rows).await;
+        check_read_range(&db, Included(b"c0"), Included(b"ee"), rows).await;
+        check_read_range(&db, Excluded(b"c0"), Included(b"ee"), rows).await;
+        check_read_range(&db, Excluded(b"bb"), Included(b"ee"), rows).await;
 
-        check_read_range(&db, incl(b"cc"), incl(b"ef"), rows).await;
-        check_read_range(&db, incl(b"c0"), incl(b"ef"), rows).await;
-        check_read_range(&db, excl(b"c0"), incl(b"ef"), rows).await;
-        check_read_range(&db, excl(b"bb"), incl(b"ef"), rows).await;
+        check_read_range(&db, Included(b"cc"), Included(b"ef"), rows).await;
+        check_read_range(&db, Included(b"c0"), Included(b"ef"), rows).await;
+        check_read_range(&db, Excluded(b"c0"), Included(b"ef"), rows).await;
+        check_read_range(&db, Excluded(b"bb"), Included(b"ef"), rows).await;
 
-        check_read_range(&db, incl(b"cc"), excl(b"ef"), rows).await;
-        check_read_range(&db, incl(b"c0"), excl(b"ef"), rows).await;
-        check_read_range(&db, excl(b"c0"), excl(b"ef"), rows).await;
-        check_read_range(&db, excl(b"bb"), excl(b"ef"), rows).await;
+        check_read_range(&db, Included(b"cc"), Excluded(b"ef"), rows).await;
+        check_read_range(&db, Included(b"c0"), Excluded(b"ef"), rows).await;
+        check_read_range(&db, Excluded(b"c0"), Excluded(b"ef"), rows).await;
+        check_read_range(&db, Excluded(b"bb"), Excluded(b"ef"), rows).await;
 
-        check_read_range(&db, incl(b"cc"), excl(b"ff"), rows).await;
-        check_read_range(&db, incl(b"c0"), excl(b"ff"), rows).await;
-        check_read_range(&db, excl(b"c0"), excl(b"ff"), rows).await;
-        check_read_range(&db, excl(b"bb"), excl(b"ff"), rows).await;
+        check_read_range(&db, Included(b"cc"), Excluded(b"ff"), rows).await;
+        check_read_range(&db, Included(b"c0"), Excluded(b"ff"), rows).await;
+        check_read_range(&db, Excluded(b"c0"), Excluded(b"ff"), rows).await;
+        check_read_range(&db, Excluded(b"bb"), Excluded(b"ff"), rows).await;
 
         // empty to the left
-        check_read_range(&db, None, incl(b"0"), &[]).await;
-        check_read_range(&db, None, excl(b"0"), &[]).await;
-        check_read_range(&db, None, excl(b"aa"), &[]).await;
+        check_read_range(&db, Unbounded, Included(b"0"), &[]).await;
+        check_read_range(&db, Unbounded, Excluded(b"0"), &[]).await;
+        check_read_range(&db, Unbounded, Excluded(b"aa"), &[]).await;
 
         // empty to the right
-        check_read_range(&db, incl(b"z"), None, &[]).await;
-        check_read_range(&db, excl(b"z"), None, &[]).await;
-        check_read_range(&db, excl(b"ff"), None, &[]).await;
+        check_read_range(&db, Included(b"z"), Unbounded, &[]).await;
+        check_read_range(&db, Excluded(b"z"), Unbounded, &[]).await;
+        check_read_range(&db, Excluded(b"ff"), Unbounded, &[]).await;
 
         // empty in the middle
-        check_read_range(&db, excl(b"aa"), excl(b"bb"), &[]).await;
-        check_read_range(&db, incl(b"ax"), excl(b"bb"), &[]).await;
-        check_read_range(&db, excl(b"aa"), incl(b"ba"), &[]).await;
-        check_read_range(&db, incl(b"ax"), incl(b"ba"), &[]).await;
+        check_read_range(&db, Excluded(b"aa"), Excluded(b"bb"), &[]).await;
+        check_read_range(&db, Included(b"ax"), Excluded(b"bb"), &[]).await;
+        check_read_range(&db, Excluded(b"aa"), Included(b"ba"), &[]).await;
+        check_read_range(&db, Included(b"ax"), Included(b"ba"), &[]).await;
     }
 }
