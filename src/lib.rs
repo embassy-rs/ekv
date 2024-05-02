@@ -20,7 +20,7 @@ mod errors;
 pub mod flash;
 mod types;
 
-pub use cursor::{Bound, Cursor};
+pub use cursor::Cursor;
 pub use errors::{CommitError, FormatError, MountError, ReadError, WriteError};
 pub use record::{Config, Database, ReadTransaction, WriteTransaction};
 
