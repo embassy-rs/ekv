@@ -21,7 +21,7 @@ pub mod flash;
 mod types;
 
 pub use cursor::Cursor;
-pub use errors::{CommitError, FormatError, MountError, ReadError, WriteError};
+pub use errors::*;
 pub use record::{Config, Database, ReadTransaction, WriteTransaction};
 
 #[cfg(feature = "_test")]
