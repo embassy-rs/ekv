@@ -73,6 +73,8 @@ pub const PAGE_SIZE: usize = raw::PAGE_SIZE;
 /// This value is just a compile-time upper limit, used to size some in-memory and on-disk data
 /// structures. This allows supporting different memory sizes with the same binary.
 ///
+/// The [`PageID`](crate::types::PageID) is backed by a `u16` so the maximum page count is 65535.
+///
 /// Default: 256
 pub const MAX_PAGE_COUNT: usize = raw::MAX_PAGE_COUNT;
 

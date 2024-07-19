@@ -17,6 +17,8 @@ pub trait Flash {
     type Error: Debug;
 
     /// Get the page count of the flash storage.
+    ///
+    /// The [`PageID`](crate::types::PageID) is backed by a `u16` so the maximum page count is 65535.
     fn page_count(&self) -> usize;
 
     /// Erase a page.
