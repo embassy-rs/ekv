@@ -5,11 +5,11 @@
 //! They can be set in two ways:
 //!
 //! - Via Cargo features: enable a feature like `<name>-<value>`. `name` must be in lowercase and
-//! use dashes instead of underscores. For example. `max-page-count-1024`. Only a selection of values
-//! is available, check `Cargo.toml` for the list.
+//!   use dashes instead of underscores. For example. `max-page-count-1024`. Only a selection of values
+//!   is available, check `Cargo.toml` for the list.
 //! - Via environment variables at build time: set the variable named `EKV_<value>`. For example
-//! `EKV_MAX_PAGE_COUNT=1024 cargo build`. You can also set them in the `[env]` section of `.cargo/config.toml`.
-//! Any value can be set, unlike with Cargo features.
+//!   `EKV_MAX_PAGE_COUNT=1024 cargo build`. You can also set them in the `[env]` section of `.cargo/config.toml`.
+//!   Any value can be set, unlike with Cargo features.
 //!
 //! Environment variables take precedence over Cargo features. If two Cargo features are enabled for the same setting
 //! with different values, compilation fails.
