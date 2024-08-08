@@ -5,7 +5,9 @@ use crate::page::ReadError as PageReadError;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Error<E> {
+    /// Database is corrupted.
     Corrupted,
+    /// Error from the underlying flash.
     Flash(E),
 }
 
