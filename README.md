@@ -32,8 +32,7 @@ The on-disk format is **not stable** yet.
 
 ## Future work
 
-- Optimize tiny write transactions: append to the last file if possible, instead of starting a new one. Currently each write transaction opens a new file, which will have to erase at least one full page, even if the transaction writes just one small key. It is recommended to batch multiple writes in a single transaction
-for performance.
+- Optimize tiny write transactions: append to the last file if possible, instead of starting a new one. Currently each write transaction opens a new file, which will have to erase at least one full page, even if the transaction writes just one small key. It is recommended to batch multiple writes in a single transaction for performance.
 - Support access align higher than 4. Currently reads/writes are (optionally) aligned up to 4 bytes. Some flash out there can only be written in 8-byte words or higher.
 - Allow writes within a transaction to be unsorted.
 - Allow reads within a write transaction. They should see the the not yet committed writes in the current transaction.
