@@ -13,7 +13,7 @@ edition = "2021"
 defmt = { version = "0.3.2", optional = true }
 log = { version = "0.4.17", optional = true }
 heapless = "0.8"
-embassy-sync = "0.5.0"
+embassy-sync = "0.6.0"
 
 [dev-dependencies]
 ekv = { path = ".", features = ["std", "log"]}
