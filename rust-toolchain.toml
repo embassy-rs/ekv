@@ -1,5 +1,5 @@
 [toolchain]
-channel = "nightly-2024-07-16"
+channel = "1.82"
 components = [ "rust-src", "rustfmt", "clippy" ]
 targets = [
     "thumbv6m-none-eabi",

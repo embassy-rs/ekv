@@ -1,6 +1,5 @@
 #![no_std]
 #![no_main]
-#![feature(impl_trait_in_assoc_type)]
 
 // must go first
 mod fmt;
@@ -71,16 +70,11 @@ impl<'a> ekv::flash::Flash for Flash<'a> {
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) -> ! {
-    unsafe {
-        let nvmc = &*pac::NVMC::ptr();
-        let power = &*pac::POWER::ptr();
+    // Enable DC-DC
+    pac::POWER.dcdcen().write(|w| w.set_dcdcen(true));
 
-        // Enable DC-DC
-        power.dcdcen.write(|w| w.dcdcen().enabled());
-
-        // Enable flash cache
-        nvmc.icachecnf.write(|w| w.cacheen().enabled());
-    }
+    // Enable flash cache
+    pac::NVMC.icachecnf().write(|w| w.set_cacheen(true));
 
     let p = embassy_nrf::init(Default::default());
 

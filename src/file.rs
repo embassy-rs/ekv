@@ -664,15 +664,22 @@ impl<'a, F: Flash> Transaction<'a, F> {
         self.m.dirty = true;
 
         // Try appending to the existing meta page.
-        let res: Result<(), WriteError<F::Error>> = try {
+        let res: Result<(), WriteError<F::Error>> = 'x: {
             let mut mw = PageWriter::new();
-            mw.open_append(&mut self.m.flash, self.m.meta_page_id).await?;
+            if let Err(e) = mw.open_append(&mut self.m.flash, self.m.meta_page_id).await {
+                break 'x Err(e.into());
+            }
             for file_id in 0..FILE_COUNT {
                 if self.m.files[file_id].dirty {
-                    self.write_file_meta(&mut mw, file_id as FileID).await?;
+                    if let Err(e) = self.write_file_meta(&mut mw, file_id as FileID).await {
+                        break 'x Err(e);
+                    }
                 }
             }
-            mw.commit(&mut self.m.flash).await?;
+            if let Err(e) = mw.commit(&mut self.m.flash).await {
+                break 'x Err(e.into());
+            }
+            Ok(())
         };
 
         match res {

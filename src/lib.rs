@@ -1,7 +1,6 @@
 #![doc = include_str!("../README.md")]
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(unused_must_use)]
-#![feature(try_blocks)]
 #![allow(async_fn_in_trait)]
 #![allow(clippy::large_enum_variant)]
 #![allow(clippy::new_without_default)]
