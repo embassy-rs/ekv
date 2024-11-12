@@ -6,8 +6,19 @@ members = [
 
 [package]
 name = "ekv"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Key-value database for embedded systems, for raw NOR flash, using an LSM-Tree"
+repository = "https://github.com/embassy-rs/ekv"
+documentation = "https://docs.embassy.dev/ekv"
+keywords = ["embedded", "storage", "database", "flash", "key-value"]
+categories = [
+    "embedded",
+    "no-std",
+    "asynchronous",
+    "database-implementations",
+]
 
 [dependencies]
 defmt = { version = "0.3.2", optional = true }
