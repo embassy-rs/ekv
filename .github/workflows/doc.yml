@@ -30,6 +30,7 @@ jobs:
 
       - name: build
         run: |
+          mv rust-toolchain-nightly.toml rust-toolchain.toml
           mkdir crates
           builder -i . -o crates/ekv/git.zup
 
