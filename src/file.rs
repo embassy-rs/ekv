@@ -998,7 +998,10 @@ pub enum SearchSeekError<E> {
     Corrupted,
 }
 
-impl<E> From<Error<E>> for SearchSeekError<E> {
+impl<E> From<Error<E>> for SearchSeekError<E>
+where
+    E: core::error::Error,
+{
     fn from(e: Error<E>) -> Self {
         match e {
             Error::Flash(e) => Self::Flash(e),
@@ -1015,7 +1018,10 @@ pub enum WriteError<E> {
     Corrupted,
 }
 
-impl<E> From<Error<E>> for WriteError<E> {
+impl<E> From<Error<E>> for WriteError<E>
+where
+    E: core::error::Error,
+{
     fn from(e: Error<E>) -> Self {
         match e {
             Error::Flash(e) => Self::Flash(e),

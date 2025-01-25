@@ -35,7 +35,10 @@ pub enum ReadError<E> {
     Corrupted,
 }
 
-impl<E> From<Error<E>> for ReadError<E> {
+impl<E> From<Error<E>> for ReadError<E>
+where
+    E: core::error::Error,
+{
     fn from(err: Error<E>) -> Self {
         match err {
             Error::Flash(e) => Self::Flash(e),
