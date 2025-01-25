@@ -2,8 +2,6 @@
 //!
 //! You must implement this trait for your flash storage to use it with `ekv`.
 
-use core::fmt::Debug;
-
 #[cfg(feature = "std")]
 use crate::config::*;
 pub use crate::types::PageID;
@@ -14,7 +12,7 @@ pub use crate::types::PageID;
 /// Flash storage trait
 pub trait Flash {
     /// Error type for the flash operations.
-    type Error: Debug;
+    type Error: core::error::Error;
 
     /// Get the page count of the flash storage.
     fn page_count(&self) -> usize;
