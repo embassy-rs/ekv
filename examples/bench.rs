@@ -12,7 +12,7 @@ struct Params {
 
 fn rand_data(len: usize) -> Vec<u8> {
     let mut res = vec![0; len];
-    rand::thread_rng().fill(&mut res[..]);
+    rand::rng().fill(&mut res[..]);
     res
 }
 

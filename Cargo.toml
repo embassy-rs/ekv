@@ -21,18 +21,18 @@ categories = [
 ]
 
 [dependencies]
-defmt = { version = "0.3.2", optional = true }
-log = { version = "0.4.17", optional = true }
+defmt = { version = "1.0.1", optional = true }
+log = { version = "0.4.27", optional = true }
 heapless = "0.8"
 embassy-sync = "0.7"
 
 [dev-dependencies]
 ekv = { path = ".", features = ["std", "log"]}
-env_logger = "0.10.0"
-plotters = "0.3.4"
-test-log = "0.2.11"
-rand = "0.8.5"
-tokio = { version = "1.24.2", default-features = false, features = ["macros", "rt"] }
+env_logger = "0.11.8"
+plotters = "0.3.7"
+test-log = "0.2.17"
+rand = "0.9.1"
+tokio = { version = "1.45.1", default-features = false, features = ["macros", "rt"] }
 critical-section = { version = "1", features = ["std"] }
 
 # Do asserts and overflow checks when doing `cargo test --release`

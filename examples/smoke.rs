@@ -12,16 +12,16 @@ const VAL_MIN_LEN: usize = 1;
 const VAL_MAX_LEN: usize = 10;
 
 fn rand(max: usize) -> usize {
-    rand::thread_rng().gen_range(0..max)
+    rand::rng().random_range(0..max)
 }
 
 fn rand_between(from: usize, to: usize) -> usize {
-    rand::thread_rng().gen_range(from..=to)
+    rand::rng().random_range(from..=to)
 }
 
 fn rand_data(len: usize) -> Vec<u8> {
     let mut res = vec![0; len];
-    rand::thread_rng().fill(&mut res[..]);
+    rand::rng().fill(&mut res[..]);
     res
 }
 
