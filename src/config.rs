@@ -161,7 +161,7 @@ pub const MAX_VALUE_SIZE: usize = raw::MAX_VALUE_SIZE;
 pub(crate) const KEY_SIZE_BITS: u32 = (MAX_KEY_SIZE + 1).next_power_of_two().ilog2();
 pub(crate) const VALUE_SIZE_BITS: u32 = (MAX_VALUE_SIZE + 1).next_power_of_two().ilog2();
 const RECORD_HEADER_BITS: u32 = 1 + KEY_SIZE_BITS + VALUE_SIZE_BITS;
-pub(crate) const RECORD_HEADER_SIZE: usize = (RECORD_HEADER_BITS as usize + 7) / 8;
+pub(crate) const RECORD_HEADER_SIZE: usize = (RECORD_HEADER_BITS as usize).div_ceil(8);
 
 /// Amount of scratch pages reserved for compaction.
 ///
@@ -192,7 +192,7 @@ pub(crate) const MIN_FREE_PAGE_COUNT: usize = 1
     + SCRATCH_PAGE_COUNT
     + MIN_FREE_PAGE_COUNT_COMPACT
     + BRANCHING_FACTOR
-    + (MAX_RECORD_SIZE + PAGE_MAX_PAYLOAD_SIZE - 1) / PAGE_MAX_PAYLOAD_SIZE; // ceil(MAX_RECORD_SIZE/PAGE_MAX_PAYLOAD_SIZE)
+    + MAX_RECORD_SIZE.div_ceil(PAGE_MAX_PAYLOAD_SIZE); // ceil(MAX_RECORD_SIZE/PAGE_MAX_PAYLOAD_SIZE)
 
 #[allow(clippy::assertions_on_constants)]
 const _CHECKS: () = {
@@ -249,7 +249,7 @@ pub fn dump() {
         MAX_VALUE_SIZE,
         MAX_RECORD_SIZE,
         RECORD_HEADER_SIZE,
-        (MAX_RECORD_SIZE + PAGE_MAX_PAYLOAD_SIZE - 1) / PAGE_MAX_PAYLOAD_SIZE
+        MAX_RECORD_SIZE.div_ceil(PAGE_MAX_PAYLOAD_SIZE)
     );
     debug!(
         "scratch_page_count={}, min_free_page_count={}, min_free_page_count_compact={}",

@@ -1,5 +1,5 @@
 [toolchain]
-channel = "1.82"
+channel = "1.87"
 components = [ "rust-src", "rustfmt", "clippy" ]
 targets = [
     "thumbv6m-none-eabi",

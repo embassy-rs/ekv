@@ -8,12 +8,12 @@ edition = "2021"
 cargo-fuzz = true
 
 [dependencies]
-arbitrary = { version = "1.2.2", features = ["derive"] }
+arbitrary = { version = "1.4.1", features = ["derive"] }
 libfuzzer-sys = "0.4"
-env_logger = "0.10"
+env_logger = "0.11"
 ekv = { path = "..", features= ["std", "log", "_test"]}
-log = { version = "0.4.17" }
-tokio = { version = "1.24.2", default-features = false, features = ["rt"] }
+log = { version = "0.4.27" }
+tokio = { version = "1.45.1", default-features = false, features = ["rt"] }
 critical-section = { version = "1", features = ["std"] }
 embassy-sync = "0.7"
 

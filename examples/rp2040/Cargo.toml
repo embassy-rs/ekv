@@ -7,29 +7,29 @@ name = "ekv-examples-rp2040"
 version = "0.1.0"
 
 [dependencies]
-embassy-executor = { version = "0.6.3",  features = ["defmt", "integrated-timers", "executor-thread", "arch-cortex-m"] }
-embassy-time = { version = "0.3.0",  features = ["defmt", "defmt-timestamp-uptime"] }
-embassy-rp = { version = "0.2.0",  features = ["rp2040", "defmt", "unstable-pac", "time-driver"] }
-embassy-sync = { version = "0.6.0" }
+embassy-executor = { version = "0.7.0",  features = ["defmt", "executor-thread", "arch-cortex-m"] }
+embassy-time = { version = "0.4.0",  features = ["defmt", "defmt-timestamp-uptime"] }
+embassy-rp = { version = "0.4.0",  features = ["rp2040", "defmt", "unstable-pac", "time-driver"] }
+embassy-sync = { version = "0.7.0" }
 embassy-futures = { version = "0.1.1" }
 
-defmt = "0.3"
-defmt-rtt = "0.4"
+defmt = "1"
+defmt-rtt = "1"
 
-cortex-m = { version = "0.7.6", features = ["critical-section-single-core"] }
-cortex-m-rt = "0.7.0"
-panic-probe = { version = "0.3", features = ["print-defmt"] }
-futures = { version = "0.3.17", default-features = false, features = ["async-await", "cfg-target-has-atomic", "unstable"] }
+cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7.5"
+panic-probe = { version = "1.0", features = ["print-defmt"] }
+futures = { version = "0.3.31", default-features = false, features = ["async-await", "cfg-target-has-atomic", "unstable"] }
 
 ekv = { path = "../../", features = ["crc", "align-4", "page-size-4096", "max-page-count-32"] }
 embedded-storage = { version = "0.3" }
 
 [patch.crates-io]
-embassy-executor = { git = "https://github.com/embassy-rs/embassy", rev = "796f6c034a148e1fedb3196a2c73a155f5d0545f" }
-embassy-time = { git = "https://github.com/embassy-rs/embassy", rev = "796f6c034a148e1fedb3196a2c73a155f5d0545f" }
-embassy-futures = { git = "https://github.com/embassy-rs/embassy", rev = "796f6c034a148e1fedb3196a2c73a155f5d0545f" }
-embassy-sync = { git = "https://github.com/embassy-rs/embassy", rev = "796f6c034a148e1fedb3196a2c73a155f5d0545f" }
-embassy-rp = { git = "https://github.com/embassy-rs/embassy", rev = "796f6c034a148e1fedb3196a2c73a155f5d0545f" }
+embassy-executor = { git = "https://github.com/embassy-rs/embassy", rev = "b5ab3276dce7322e33946e974770fa91b98124a4" }
+embassy-time = { git = "https://github.com/embassy-rs/embassy", rev = "b5ab3276dce7322e33946e974770fa91b98124a4" }
+embassy-futures = { git = "https://github.com/embassy-rs/embassy", rev = "b5ab3276dce7322e33946e974770fa91b98124a4" }
+embassy-sync = { git = "https://github.com/embassy-rs/embassy", rev = "b5ab3276dce7322e33946e974770fa91b98124a4" }
+embassy-rp = { git = "https://github.com/embassy-rs/embassy", rev = "b5ab3276dce7322e33946e974770fa91b98124a4" }
 
 [profile.release]
 codegen-units = 1

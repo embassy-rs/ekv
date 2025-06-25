@@ -967,7 +967,7 @@ impl<F: Flash> Inner<F> {
         let mut key = [0u8; MAX_KEY_SIZE];
         let mut value = [0u8; MAX_VALUE_SIZE];
         loop {
-            let seq = r.curr_seq(&mut self.files);
+            let seq = r.curr_seq(&self.files);
 
             let mut header = [0; RECORD_HEADER_SIZE];
             match r.read(&mut self.files, &mut header).await {

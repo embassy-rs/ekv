@@ -2583,7 +2583,7 @@ mod tests {
 
         let mut s = FileSearcher::new(m.read(&mut pr, 1));
         assert_eq!(s.start(&mut m).await.unwrap(), false);
-        assert_eq!(s.reader().offset(&mut m), 0);
+        assert_eq!(s.reader().offset(&m), 0);
     }
 
     #[test_log::test(tokio::test)]
@@ -2602,7 +2602,7 @@ mod tests {
         // Only possible point to seek is start of the only page.
         let mut s = FileSearcher::new(m.read(&mut pr, 1));
         assert_eq!(s.start(&mut m).await.unwrap(), false);
-        assert_eq!(s.reader().offset(&mut m), 0);
+        assert_eq!(s.reader().offset(&m), 0);
     }
 
     #[test_log::test(tokio::test)]
@@ -2622,15 +2622,15 @@ mod tests {
 
         let mut s = FileSearcher::new(m.read(&mut pr, 1));
         assert_eq!(s.start(&mut m).await.unwrap(), true);
-        assert_eq!(s.reader().offset(&mut m), PAGE_MAX_PAYLOAD_SIZE);
+        assert_eq!(s.reader().offset(&m), PAGE_MAX_PAYLOAD_SIZE);
         assert_eq!(s.seek(&mut m, SeekDirection::Left).await.unwrap(), false);
-        assert_eq!(s.reader().offset(&mut m), 0);
+        assert_eq!(s.reader().offset(&m), 0);
 
         let mut s = FileSearcher::new(m.read(&mut pr, 1));
         assert_eq!(s.start(&mut m).await.unwrap(), true);
-        assert_eq!(s.reader().offset(&mut m), PAGE_MAX_PAYLOAD_SIZE);
+        assert_eq!(s.reader().offset(&m), PAGE_MAX_PAYLOAD_SIZE);
         assert_eq!(s.seek(&mut m, SeekDirection::Right).await.unwrap(), false);
-        assert_eq!(s.reader().offset(&mut m), PAGE_MAX_PAYLOAD_SIZE);
+        assert_eq!(s.reader().offset(&m), PAGE_MAX_PAYLOAD_SIZE);
     }
 
     #[test_log::test(tokio::test)]
@@ -2650,7 +2650,7 @@ mod tests {
         // Only possible point to seek is start of the only page.
         let mut s = FileSearcher::new(m.read(&mut pr, 1));
         assert_eq!(s.start(&mut m).await.unwrap(), false);
-        assert_eq!(s.reader().offset(&mut m), 0);
+        assert_eq!(s.reader().offset(&m), 0);
     }
 
     #[test_log::test(tokio::test)]
@@ -2670,7 +2670,7 @@ mod tests {
         // Only possible point to seek is start of the only page.
         let mut s = FileSearcher::new(m.read(&mut pr, 1));
         assert_eq!(s.start(&mut m).await.unwrap(), false);
-        assert_eq!(s.reader().offset(&mut m), 0);
+        assert_eq!(s.reader().offset(&m), 0);
     }
 
     #[test_log::test(tokio::test)]
@@ -2694,18 +2694,18 @@ mod tests {
         // Seek left
         let mut s = FileSearcher::new(m.read(&mut pr, 1));
         assert_eq!(s.start(&mut m).await.unwrap(), true);
-        assert_eq!(s.reader().offset(&mut m), N);
+        assert_eq!(s.reader().offset(&m), N);
         s.reader().read(&mut m, &mut buf).await.unwrap();
         assert_eq!(s.seek(&mut m, SeekDirection::Left).await.unwrap(), false);
-        assert_eq!(s.reader().offset(&mut m), 0);
+        assert_eq!(s.reader().offset(&m), 0);
 
         // Seek right
         let mut s = FileSearcher::new(m.read(&mut pr, 1));
         assert_eq!(s.start(&mut m).await.unwrap(), true);
-        assert_eq!(s.reader().offset(&mut m), N);
+        assert_eq!(s.reader().offset(&m), N);
         s.reader().read(&mut m, &mut buf).await.unwrap();
         assert_eq!(s.seek(&mut m, SeekDirection::Right).await.unwrap(), false);
-        assert_eq!(s.reader().offset(&mut m), N);
+        assert_eq!(s.reader().offset(&m), N);
     }
 
     #[test_log::test(tokio::test)]
@@ -2731,43 +2731,43 @@ mod tests {
         // Seek left
         let mut s = FileSearcher::new(m.read(&mut pr, 1));
         assert_eq!(s.start(&mut m).await.unwrap(), true);
-        assert_eq!(s.reader().offset(&mut m), N * 2);
+        assert_eq!(s.reader().offset(&m), N * 2);
         s.reader().read(&mut m, &mut buf).await.unwrap();
         assert_eq!(s.seek(&mut m, SeekDirection::Left).await.unwrap(), true);
-        assert_eq!(s.reader().offset(&mut m), N);
+        assert_eq!(s.reader().offset(&m), N);
         s.reader().read(&mut m, &mut buf).await.unwrap();
         assert_eq!(s.seek(&mut m, SeekDirection::Left).await.unwrap(), false);
-        assert_eq!(s.reader().offset(&mut m), 0);
+        assert_eq!(s.reader().offset(&m), 0);
 
         // Seek less left
         let mut s = FileSearcher::new(m.read(&mut pr, 1));
         assert_eq!(s.start(&mut m).await.unwrap(), true);
-        assert_eq!(s.reader().offset(&mut m), N * 2);
+        assert_eq!(s.reader().offset(&m), N * 2);
         s.reader().read(&mut m, &mut buf).await.unwrap();
         assert_eq!(s.seek(&mut m, SeekDirection::Left).await.unwrap(), true);
-        assert_eq!(s.reader().offset(&mut m), N);
+        assert_eq!(s.reader().offset(&m), N);
         s.reader().read(&mut m, &mut buf).await.unwrap();
         assert_eq!(s.seek(&mut m, SeekDirection::Left).await.unwrap(), false);
-        assert_eq!(s.reader().offset(&mut m), 0);
+        assert_eq!(s.reader().offset(&m), 0);
 
         // Seek middle
         let mut s = FileSearcher::new(m.read(&mut pr, 1));
         assert_eq!(s.start(&mut m).await.unwrap(), true);
-        assert_eq!(s.reader().offset(&mut m), N * 2);
+        assert_eq!(s.reader().offset(&m), N * 2);
         s.reader().read(&mut m, &mut buf).await.unwrap();
         assert_eq!(s.seek(&mut m, SeekDirection::Left).await.unwrap(), true);
-        assert_eq!(s.reader().offset(&mut m), N);
+        assert_eq!(s.reader().offset(&m), N);
         s.reader().read(&mut m, &mut buf).await.unwrap();
         assert_eq!(s.seek(&mut m, SeekDirection::Right).await.unwrap(), false);
-        assert_eq!(s.reader().offset(&mut m), N);
+        assert_eq!(s.reader().offset(&m), N);
 
         // Seek right
         let mut s = FileSearcher::new(m.read(&mut pr, 1));
         assert_eq!(s.start(&mut m).await.unwrap(), true);
-        assert_eq!(s.reader().offset(&mut m), N * 2);
+        assert_eq!(s.reader().offset(&m), N * 2);
         s.reader().read(&mut m, &mut buf).await.unwrap();
         assert_eq!(s.seek(&mut m, SeekDirection::Right).await.unwrap(), false);
-        assert_eq!(s.reader().offset(&mut m), N * 2);
+        assert_eq!(s.reader().offset(&m), N * 2);
     }
 
     #[test_log::test(tokio::test)]
@@ -2794,30 +2794,30 @@ mod tests {
         // Seek left
         let mut s = FileSearcher::new(m.read(&mut pr, 1));
         assert_eq!(s.start(&mut m).await.unwrap(), true);
-        assert_eq!(s.reader().offset(&mut m), N * 2);
+        assert_eq!(s.reader().offset(&m), N * 2);
         s.reader().read(&mut m, &mut buf).await.unwrap();
         assert_eq!(s.seek(&mut m, SeekDirection::Left).await.unwrap(), true);
-        assert_eq!(s.reader().offset(&mut m), N);
+        assert_eq!(s.reader().offset(&m), N);
         s.reader().read(&mut m, &mut buf).await.unwrap();
         assert_eq!(s.seek(&mut m, SeekDirection::Left).await.unwrap(), false);
-        assert_eq!(s.reader().offset(&mut m), 0);
+        assert_eq!(s.reader().offset(&m), 0);
 
         m.truncate(1, N * 2).await.unwrap();
 
         // Seek left
         let mut s = FileSearcher::new(m.read(&mut pr, 1));
         assert_eq!(s.start(&mut m).await.unwrap(), true);
-        assert_eq!(s.reader().offset(&mut m), N);
+        assert_eq!(s.reader().offset(&m), N);
         s.reader().read(&mut m, &mut buf).await.unwrap();
         assert_eq!(s.seek(&mut m, SeekDirection::Left).await.unwrap(), false);
-        assert_eq!(s.reader().offset(&mut m), 0);
+        assert_eq!(s.reader().offset(&m), 0);
 
         m.truncate(1, N).await.unwrap();
 
         // Seek left
         let mut s = FileSearcher::new(m.read(&mut pr, 1));
         assert_eq!(s.start(&mut m).await.unwrap(), false);
-        assert_eq!(s.reader().offset(&mut m), 0);
+        assert_eq!(s.reader().offset(&m), 0);
     }
 
     #[test_log::test(tokio::test)]
@@ -2881,11 +2881,11 @@ mod tests {
     }
 
     fn rand(max: usize) -> usize {
-        rand::thread_rng().gen_range(0..max)
+        rand::rng().random_range(0..max)
     }
 
     fn rand_between(from: usize, to: usize) -> usize {
-        rand::thread_rng().gen_range(from..=to)
+        rand::rng().random_range(from..=to)
     }
 
     #[test_log::test(tokio::test)]

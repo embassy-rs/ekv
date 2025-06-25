@@ -12,7 +12,7 @@ pub enum PageState {
 /// Page allocator
 pub struct Allocator {
     page_count: usize,
-    pages: [u8; (MAX_PAGE_COUNT + 7) / 8],
+    pages: [u8; MAX_PAGE_COUNT.div_ceil(8)],
     used: usize,
     next_page_id: usize,
 }
@@ -21,7 +21,7 @@ impl Allocator {
     pub fn new() -> Self {
         Self {
             page_count: 0,
-            pages: [0u8; (MAX_PAGE_COUNT + 7) / 8],
+            pages: [0u8; MAX_PAGE_COUNT.div_ceil(8)],
             used: 0,
             next_page_id: 0,
         }
