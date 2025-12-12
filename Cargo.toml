@@ -72,6 +72,8 @@ _test = []
 align-1 = []
 align-2 = []
 align-4 = [] # Default
+align-8 = []
+align-16 = []
 
 page-size-128 = []
 page-size-256 = []

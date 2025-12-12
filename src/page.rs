@@ -10,21 +10,48 @@ const CHUNK_MAGIC: u16 = 0x59C5;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(C)]
+#[cfg_attr(any(
+    all(feature = "crc", not(feature = "align-8"), not(feature = "align-16")),
+    all(not(feature = "crc"), feature = "align-8"),
+), repr(align(8)))]
+#[cfg_attr(all(feature = "crc", feature = "align-16"), repr(align(16)))]
 pub struct PageHeader {
     magic: u32,
     page_id: u32,
     #[cfg(feature = "crc")]
     crc: u32,
+
+    // Without CRC: 8 bytes → add 8 bytes for ALIGN=16
+    #[cfg(all(not(feature = "crc"), feature = "align-16"))]
+    _padding: [u8; 8],
+
+    // With CRC: 12 bytes → add 4 bytes for ALIGN=8/16
+    #[cfg(all(feature = "crc", any(feature = "align-8", feature = "align-16")))]
+    _padding: [u8; 4],
 }
 impl_bytes!(PageHeader);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(C)]
+#[cfg_attr(all(feature = "crc", not(feature = "align-16")), repr(align(8)))]
+#[cfg_attr(all(feature = "crc", feature = "align-16"), repr(align(16)))]
+#[cfg_attr(all(not(feature = "crc"), feature = "align-8"), repr(align(8)))]
+#[cfg_attr(all(not(feature = "crc"), feature = "align-16"), repr(align(16)))]
 pub struct ChunkHeader {
     magic: u16,
     len: u16,
     #[cfg(feature = "crc")]
     crc: u32,
+
+    // Without CRC: 4 bytes → add 4 bytes for ALIGN=8, 12 bytes for ALIGN=16
+    #[cfg(all(not(feature = "crc"), feature = "align-8"))]
+    _padding: [u8; 4],
+    #[cfg(all(not(feature = "crc"), feature = "align-16"))]
+    _padding: [u8; 12],
+
+    // With CRC: 8 bytes → add 8 bytes for ALIGN=16
+    #[cfg(all(feature = "crc", feature = "align-16"))]
+    _padding: [u8; 8],
 }
 impl_bytes!(ChunkHeader);
 
@@ -77,6 +104,10 @@ async fn write_header<F: Flash, H: Header>(flash: &mut F, page_id: PageID, heade
         page_id: page_id.index() as u32,
         #[cfg(feature = "crc")]
         crc: crc32(&buf[PageHeader::SIZE..]),
+        #[cfg(all(not(feature = "crc"), feature = "align-16"))]
+        _padding: [0; 8],
+        #[cfg(all(feature = "crc", any(feature = "align-8", feature = "align-16")))]
+        _padding: [0; 4],
     };
     buf[..PageHeader::SIZE].copy_from_slice(&page_header.to_bytes());
 
@@ -555,6 +586,12 @@ impl<H: Header> PageWriter<H> {
             len: self.chunk_pos as u16,
             #[cfg(feature = "crc")]
             crc: self.crc.finish(),
+            #[cfg(all(not(feature = "crc"), feature = "align-8"))]
+            _padding: [0; 4],
+            #[cfg(all(not(feature = "crc"), feature = "align-16"))]
+            _padding: [0; 12],
+            #[cfg(all(feature = "crc", feature = "align-16"))]
+            _padding: [0; 8],
         };
 
         flash
@@ -638,15 +675,29 @@ mod tests {
 
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     #[repr(C)]
+    #[cfg_attr(feature = "align-8", repr(align(8)))]
+    #[cfg_attr(feature = "align-16", repr(align(16)))]
     pub struct TestHeader {
         foo: u32,
+
+        // Padding for alignment
+        #[cfg(feature = "align-8")]
+        _padding: [u8; 4],
+        #[cfg(feature = "align-16")]
+        _padding: [u8; 12],
     }
 
     unsafe impl Header for TestHeader {
         const MAGIC: u32 = 0x470b635c;
     }
 
-    const HEADER: TestHeader = TestHeader { foo: 123456 };
+    const HEADER: TestHeader = TestHeader {
+        foo: 123456,
+        #[cfg(feature = "align-8")]
+        _padding: [0; 4],
+        #[cfg(feature = "align-16")]
+        _padding: [0; 12],
+    };
     const MAX_PAYLOAD: usize = PAGE_SIZE - PageHeader::SIZE - size_of::<TestHeader>() - ChunkHeader::SIZE;
 
     #[test_log::test]
@@ -991,36 +1042,44 @@ mod tests {
     async fn test_multichunk_append_no_commit_then_retry() {
         let f = &mut MemFlash::new();
 
+        // Calculate sizes that will work with any alignment
+        // We want to fill most of the page, leaving just a small amount of space
+        let initial_data_size = MAX_PAYLOAD / 3;
+        let append_data_size = MAX_PAYLOAD / 3;
+        let initial_data: Vec<u8> = (1..=initial_data_size).map(|i| i as u8).collect();
+        let append_data: Vec<u8> = (100..100 + append_data_size).map(|i| i as u8).collect();
+
         // Write
         let mut w = PageWriter::new();
         w.open(f, PAGE).await;
-        let n = w.write(f, &[1, 2, 3, 4, 5, 6, 7, 8, 9]).await.unwrap();
-        assert_eq!(n, 9);
+        let n = w.write(f, &initial_data).await.unwrap();
+        assert_eq!(n, initial_data_size);
         w.write_header(f, HEADER).await.unwrap();
         w.commit(f).await.unwrap();
 
         // Append but don't commit
         w.open_append(f, PAGE).await.unwrap();
-        let n = w.write(f, &[10, 11, 12, 13, 14, 15]).await.unwrap();
-        assert_eq!(n, 6);
+        let n = w.write(f, &append_data).await.unwrap();
+        assert_eq!(n, append_data_size);
         // no commit!
 
         // Even though we didn't commit the appended stuff, it did get written to flash.
-        // If there's "left over garbage" we can non longer append to this page. It must
+        // If there's "left over garbage" we can no longer append to this page. It must
         // behave as if it was full.
         w.open_append(f, PAGE).await.unwrap();
-        let n = w.write(f, &[13, 14, 15]).await.unwrap();
-        assert_eq!(n, 0);
+        let retry_data = vec![200u8; 10];
+        let n = w.write(f, &retry_data).await.unwrap();
+        assert_eq!(n, 0, "Page should reject writes after uncommitted append");
 
-        // Read
+        // Read - should only see the committed data
         let mut r = PageReader::new();
         let h = r.open::<_, TestHeader>(f, PAGE).await.unwrap();
         assert_eq!(h, HEADER);
         let mut buf = vec![0; MAX_PAYLOAD];
 
         let n = r.read(f, &mut buf).await.unwrap();
-        assert_eq!(n, 9);
-        assert_eq!(buf[..9], [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(n, initial_data_size);
+        assert_eq!(&buf[..initial_data_size], &initial_data[..]);
 
         let n = r.read(f, &mut buf).await.unwrap();
         assert_eq!(n, 0);
@@ -1170,6 +1229,27 @@ mod tests {
         r.rehydrate_from(f, &dehydrated_end).await.unwrap();
         let n = r.read(f, &mut buf).await.unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn test_header_alignment() {
+        use core::mem::size_of;
+        assert_eq!(size_of::<PageHeader>() % ALIGN, 0, "PageHeader not aligned to ALIGN");
+        assert_eq!(size_of::<ChunkHeader>() % ALIGN, 0, "ChunkHeader not aligned to ALIGN");
+    }
+
+    #[test]
+    fn test_chunk_offset_alignment() {
+        use crate::file::{MetaHeader, DataHeader};
+        use core::mem::size_of;
+
+        // MetaHeader
+        let meta_offset = PageHeader::SIZE + size_of::<MetaHeader>();
+        assert_eq!(meta_offset % ALIGN, 0, "First chunk offset not aligned for MetaHeader");
+
+        // DataHeader
+        let data_offset = PageHeader::SIZE + size_of::<DataHeader>();
+        assert_eq!(data_offset % ALIGN, 0, "First chunk offset not aligned for DataHeader");
     }
 
     fn dummy_data(len: usize) -> Vec<u8> {

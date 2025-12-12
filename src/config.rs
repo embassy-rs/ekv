@@ -26,6 +26,7 @@
 use core::mem::size_of;
 
 use crate::file::{DataHeader, MetaHeader, PAGE_MAX_PAYLOAD_SIZE};
+use crate::page::{ChunkHeader, PageHeader};
 use crate::record::RecordHeader;
 
 mod raw {
@@ -200,10 +201,17 @@ const _CHECKS: () = {
 
     core::assert!(BRANCHING_FACTOR >= 2 && BRANCHING_FACTOR <= 4);
 
-    // Only align 1, 2, 4 is supported for now.
-    // We only align data. Header sizes are aligned to 4 but not 8.
-    // Supporting higher aligns would require aligning the headers as well.
-    core::assert!(ALIGN == 1 || ALIGN == 2 || ALIGN == 4);
+    // Support align 1, 2, 4, 8, 16
+    core::assert!(ALIGN == 1 || ALIGN == 2 || ALIGN == 4 || ALIGN == 8 || ALIGN == 16);
+
+    // Verify headers are properly aligned
+    core::assert!(size_of::<PageHeader>() % ALIGN == 0, "PageHeader not aligned to ALIGN");
+    core::assert!(
+        size_of::<ChunkHeader>() % ALIGN == 0,
+        "ChunkHeader not aligned to ALIGN"
+    );
+    core::assert!(size_of::<MetaHeader>() % ALIGN == 0, "MetaHeader not aligned to ALIGN");
+    core::assert!(size_of::<DataHeader>() % ALIGN == 0, "DataHeader not aligned to ALIGN");
 
     // assert MIN_FREE_PAGE_COUNT is reasonable.
     // If it's too big relative to the total flash size, we'll waste a lot of space!
