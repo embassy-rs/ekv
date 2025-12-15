@@ -10,11 +10,21 @@ const CHUNK_MAGIC: u16 = 0x59C5;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(C)]
+#[cfg_attr(feature = "align-8", repr(align(8)))]
+#[cfg_attr(feature = "align-16", repr(align(16)))]
 pub struct PageHeader {
     magic: u32,
     page_id: u32,
     #[cfg(feature = "crc")]
     crc: u32,
+
+    // Without CRC: 8 bytes → add 8 bytes for ALIGN=16
+    #[cfg(all(not(feature = "crc"), feature = "align-16"))]
+    _padding: [u8; 8],
+
+    // With CRC: 12 bytes → add 4 bytes for ALIGN=8/16
+    #[cfg(all(feature = "crc", any(feature = "align-8", feature = "align-16")))]
+    _padding: [u8; 4],
 }
 impl_bytes!(PageHeader);
 
@@ -62,8 +72,15 @@ pub(crate) const MAX_CHUNK_SIZE: usize = if config::MAX_CHUNK_SIZE > (PAGE_SIZE 
 
 async fn write_header<F: Flash, H: Header>(flash: &mut F, page_id: PageID, header: H) -> Result<(), F::Error> {
     assert!(size_of::<H>() <= MAX_HEADER_SIZE);
-    let mut buf = [0u8; PageHeader::SIZE + MAX_HEADER_SIZE];
-    let buf = &mut buf[..PageHeader::SIZE + size_of::<H>()];
+    let mut buf_array = [0u8; PageHeader::SIZE + MAX_HEADER_SIZE];
+    let total_size = PageHeader::SIZE + size_of::<H>();
+    // Round up to next multiple of ALIGN
+    let aligned_size = if total_size % ALIGN != 0 {
+        total_size + ALIGN - (total_size % ALIGN)
+    } else {
+        total_size
+    };
+    let buf = &mut buf_array[..aligned_size];
 
     unsafe {
         buf.as_mut_ptr()
@@ -76,7 +93,11 @@ async fn write_header<F: Flash, H: Header>(flash: &mut F, page_id: PageID, heade
         magic: H::MAGIC,
         page_id: page_id.index() as u32,
         #[cfg(feature = "crc")]
-        crc: crc32(&buf[PageHeader::SIZE..]),
+        crc: crc32(&buf[PageHeader::SIZE..total_size]),
+        #[cfg(all(not(feature = "crc"), feature = "align-16"))]
+        _padding: [0; 8],
+        #[cfg(all(feature = "crc", any(feature = "align-8", feature = "align-16")))]
+        _padding: [0; 4],
     };
     buf[..PageHeader::SIZE].copy_from_slice(&page_header.to_bytes());
 
@@ -86,8 +107,15 @@ async fn write_header<F: Flash, H: Header>(flash: &mut F, page_id: PageID, heade
 
 pub async fn read_header<F: Flash, H: Header>(flash: &mut F, page_id: PageID) -> Result<H, Error<F::Error>> {
     assert!(size_of::<H>() <= MAX_HEADER_SIZE);
-    let mut buf = [0u8; PageHeader::SIZE + MAX_HEADER_SIZE];
-    let buf = &mut buf[..PageHeader::SIZE + size_of::<H>()];
+    let mut buf_array = [0u8; PageHeader::SIZE + MAX_HEADER_SIZE];
+    let total_size = PageHeader::SIZE + size_of::<H>();
+    // Round up to next multiple of ALIGN
+    let aligned_size = if total_size % ALIGN != 0 {
+        total_size + ALIGN - (total_size % ALIGN)
+    } else {
+        total_size
+    };
+    let buf = &mut buf_array[..aligned_size];
 
     flash.read(page_id as _, 0, buf).await.map_err(Error::Flash)?;
 
@@ -100,7 +128,7 @@ pub async fn read_header<F: Flash, H: Header>(flash: &mut F, page_id: PageID) ->
 
     #[cfg(feature = "crc")]
     {
-        let got_crc = crc32(&buf[PageHeader::SIZE..]);
+        let got_crc = crc32(&buf[PageHeader::SIZE..total_size]);
         if got_crc != page_header.crc {
             return Err(Error::Corrupted);
         }
@@ -129,7 +157,7 @@ struct ChunkIter {
 
 impl ChunkIter {
     async fn next_chunk<F: Flash>(&mut self, flash: &mut F) -> Result<bool, Error<F::Error>> {
-        self.chunk_offset += ChunkHeader::SIZE + align_up(self.chunk_len);
+        self.chunk_offset += align_up(ChunkHeader::SIZE + self.chunk_len);
         self.open_chunk(flash).await
     }
 
@@ -140,12 +168,13 @@ impl ChunkIter {
             return Ok(false);
         }
 
-        let mut header = [0u8; ChunkHeader::SIZE];
+        // Read ALIGN bytes to get the chunk header + first bytes of data
+        let mut buf = [0u8; ALIGN];
         flash
-            .read(self.page_id as _, self.chunk_offset, &mut header)
+            .read(self.page_id as _, self.chunk_offset, &mut buf)
             .await
             .map_err(Error::Flash)?;
-        let header = ChunkHeader::from_bytes(header);
+        let header = ChunkHeader::from_bytes(buf[..ChunkHeader::SIZE].try_into().unwrap());
 
         if header.magic != CHUNK_MAGIC {
             self.at_end = true;
@@ -241,17 +270,33 @@ impl PageReader {
     }
 
     async fn load_chunk<F: Flash>(&mut self, flash: &mut F) -> Result<(), Error<F::Error>> {
-        let n = align_up(self.ch.chunk_len);
-        assert!(n <= MAX_CHUNK_SIZE);
+        assert!(self.ch.chunk_len <= MAX_CHUNK_SIZE);
 
+        // Read ALIGN bytes to get chunk header + first bytes of data
+        let mut first_buf = [0u8; ALIGN];
         flash
-            .read(
-                self.ch.page_id as _,
-                self.ch.chunk_offset + ChunkHeader::SIZE,
-                &mut self.buf[..n],
-            )
+            .read(self.ch.page_id as _, self.ch.chunk_offset, &mut first_buf)
             .await
             .map_err(Error::Flash)?;
+
+        // Copy first bytes of data from the combined buffer
+        let header_buf_size = ALIGN - ChunkHeader::SIZE;
+        let first_data_len = self.ch.chunk_len.min(header_buf_size);
+        self.buf[..first_data_len].copy_from_slice(&first_buf[ChunkHeader::SIZE..ChunkHeader::SIZE + first_data_len]);
+
+        // Read the rest of the data if any
+        if self.ch.chunk_len > header_buf_size {
+            let remaining_len = self.ch.chunk_len - header_buf_size;
+            let n = align_up(remaining_len);
+            flash
+                .read(
+                    self.ch.page_id as _,
+                    self.ch.chunk_offset + ALIGN,
+                    &mut self.buf[header_buf_size..header_buf_size + n],
+                )
+                .await
+                .map_err(Error::Flash)?;
+        }
 
         #[cfg(feature = "crc")]
         {
@@ -343,6 +388,12 @@ pub struct PageWriter<H: Header> {
     crc: Crc32,
     align_buf: [u8; ALIGN],
 
+    /// Buffer for the first bytes of data that will be written together with the chunk header.
+    /// Size is ALIGN - ChunkHeader::SIZE.
+    chunk_header_buf: [u8; ALIGN],
+    /// Number of bytes currently in chunk_header_buf.
+    chunk_header_buf_len: usize,
+
     /// Total data bytes in page (all chunks)
     total_pos: usize,
 
@@ -359,6 +410,8 @@ impl<H: Header> PageWriter<H> {
             page_id: PageID::from_raw(0).unwrap(),
             needs_erase: true,
             align_buf: [0; ALIGN],
+            chunk_header_buf: [0; ALIGN],
+            chunk_header_buf_len: 0,
             total_pos: 0,
             chunk_offset: PageHeader::SIZE + size_of::<H>(),
             chunk_pos: 0,
@@ -372,6 +425,7 @@ impl<H: Header> PageWriter<H> {
         self.page_id = page_id;
         self.needs_erase = true;
         self.align_buf = [0; ALIGN];
+        self.chunk_header_buf_len = 0;
         self.total_pos = 0;
         self.chunk_offset = PageHeader::SIZE + size_of::<H>();
         self.chunk_pos = 0;
@@ -424,6 +478,7 @@ impl<H: Header> PageWriter<H> {
         self.page_id = page_id;
         self.needs_erase = false;
         self.align_buf = [0; ALIGN];
+        self.chunk_header_buf_len = 0;
         self.total_pos = r.prev_chunks_len;
         self.chunk_offset = r.chunk_offset;
         self.chunk_pos = 0;
@@ -464,48 +519,67 @@ impl<H: Header> PageWriter<H> {
 
         self.erase_if_needed(flash).await.map_err(Error::Flash)?;
 
-        let align_offs = self.chunk_pos % ALIGN;
-        if align_offs != 0 {
-            let left = ALIGN - align_offs;
-            let n = left.min(data.len());
-
-            self.align_buf[align_offs..][..n].copy_from_slice(&data[..n]);
+        // Buffer the first (ALIGN - ChunkHeader::SIZE) bytes to be written with the header on commit
+        let header_buf_size = ALIGN - ChunkHeader::SIZE;
+        if self.chunk_header_buf_len < header_buf_size {
+            let n = (header_buf_size - self.chunk_header_buf_len).min(data.len());
+            self.chunk_header_buf[self.chunk_header_buf_len..][..n].copy_from_slice(&data[..n]);
+            self.chunk_header_buf_len += n;
             data = &data[n..];
             self.total_pos += n;
             self.chunk_pos += n;
+        }
 
-            if n == left {
+        // Once we've buffered enough, write the rest to flash starting at chunk_offset + ALIGN
+        if !data.is_empty() {
+            // Calculate offset within the post-header-buffer data region
+            let post_header_pos = self.chunk_pos - header_buf_size;
+            let align_offs = post_header_pos % ALIGN;
+
+            if align_offs != 0 {
+                let left = ALIGN - align_offs;
+                let n = left.min(data.len());
+
+                self.align_buf[align_offs..][..n].copy_from_slice(&data[..n]);
+                data = &data[n..];
+                self.total_pos += n;
+                self.chunk_pos += n;
+
+                if n == left {
+                    let post_header_pos = self.chunk_pos - header_buf_size;
+                    flash
+                        .write(
+                            self.page_id as _,
+                            self.chunk_offset + ALIGN + post_header_pos - ALIGN,
+                            &self.align_buf,
+                        )
+                        .await
+                        .map_err(Error::Flash)?;
+                }
+            }
+
+            let n = data.len() - (data.len() % ALIGN);
+            if n != 0 {
+                let post_header_pos = self.chunk_pos - header_buf_size;
                 flash
                     .write(
                         self.page_id as _,
-                        self.chunk_offset + ChunkHeader::SIZE + self.chunk_pos - ALIGN,
-                        &self.align_buf,
+                        self.chunk_offset + ALIGN + post_header_pos,
+                        &data[..n],
                     )
                     .await
                     .map_err(Error::Flash)?;
+                data = &data[n..];
+                self.total_pos += n;
+                self.chunk_pos += n;
             }
-        }
 
-        let n = data.len() - (data.len() % ALIGN);
-        if n != 0 {
-            flash
-                .write(
-                    self.page_id as _,
-                    self.chunk_offset + ChunkHeader::SIZE + self.chunk_pos,
-                    &data[..n],
-                )
-                .await
-                .map_err(Error::Flash)?;
-            data = &data[n..];
+            let n = data.len();
+            assert!(n < ALIGN);
+            self.align_buf[..n].copy_from_slice(data);
             self.total_pos += n;
             self.chunk_pos += n;
         }
-
-        let n = data.len();
-        assert!(n < ALIGN);
-        self.align_buf[..n].copy_from_slice(data);
-        self.total_pos += n;
-        self.chunk_pos += n;
 
         if self.is_chunk_full() {
             self.commit(flash).await?;
@@ -537,19 +611,24 @@ impl<H: Header> PageWriter<H> {
         }
         self.erase_if_needed(flash).await.map_err(Error::Flash)?;
 
-        // flush align buf.
-        let align_offs = self.chunk_pos % ALIGN;
-        if align_offs != 0 {
-            flash
-                .write(
-                    self.page_id as _,
-                    self.chunk_offset + ChunkHeader::SIZE + self.chunk_pos - align_offs,
-                    &self.align_buf,
-                )
-                .await
-                .map_err(Error::Flash)?;
+        // flush align buf if we have data beyond the header buffer.
+        let header_buf_size = ALIGN - ChunkHeader::SIZE;
+        if self.chunk_pos > header_buf_size {
+            let post_header_pos = self.chunk_pos - header_buf_size;
+            let align_offs = post_header_pos % ALIGN;
+            if align_offs != 0 {
+                flash
+                    .write(
+                        self.page_id as _,
+                        self.chunk_offset + ALIGN + post_header_pos - align_offs,
+                        &self.align_buf,
+                    )
+                    .await
+                    .map_err(Error::Flash)?;
+            }
         }
 
+        // Write ChunkHeader + first data bytes together as one aligned write.
         let h = ChunkHeader {
             magic: CHUNK_MAGIC,
             len: self.chunk_pos as u16,
@@ -557,14 +636,20 @@ impl<H: Header> PageWriter<H> {
             crc: self.crc.finish(),
         };
 
+        let mut combined_buf = [0u8; ALIGN];
+        combined_buf[..ChunkHeader::SIZE].copy_from_slice(&h.to_bytes());
+        combined_buf[ChunkHeader::SIZE..ChunkHeader::SIZE + self.chunk_header_buf_len]
+            .copy_from_slice(&self.chunk_header_buf[..self.chunk_header_buf_len]);
+
         flash
-            .write(self.page_id as _, self.chunk_offset, &h.to_bytes())
+            .write(self.page_id as _, self.chunk_offset, &combined_buf)
             .await
             .map_err(Error::Flash)?;
 
         // Prepare for next chunk.
-        self.chunk_offset += ChunkHeader::SIZE + align_up(self.chunk_pos);
+        self.chunk_offset += align_up(ChunkHeader::SIZE + self.chunk_pos);
         self.chunk_pos = 0;
+        self.chunk_header_buf_len = 0;
         #[cfg(feature = "crc")]
         self.crc.reset();
 
@@ -638,15 +723,29 @@ mod tests {
 
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     #[repr(C)]
+    #[cfg_attr(feature = "align-8", repr(align(8)))]
+    #[cfg_attr(feature = "align-16", repr(align(16)))]
     pub struct TestHeader {
         foo: u32,
+
+        // Padding for alignment
+        #[cfg(feature = "align-8")]
+        _padding: [u8; 4],
+        #[cfg(feature = "align-16")]
+        _padding: [u8; 12],
     }
 
     unsafe impl Header for TestHeader {
         const MAGIC: u32 = 0x470b635c;
     }
 
-    const HEADER: TestHeader = TestHeader { foo: 123456 };
+    const HEADER: TestHeader = TestHeader {
+        foo: 123456,
+        #[cfg(feature = "align-8")]
+        _padding: [0; 4],
+        #[cfg(feature = "align-16")]
+        _padding: [0; 12],
+    };
     const MAX_PAYLOAD: usize = PAGE_SIZE - PageHeader::SIZE - size_of::<TestHeader>() - ChunkHeader::SIZE;
 
     #[test_log::test]
@@ -973,36 +1072,44 @@ mod tests {
     async fn test_multichunk_append_no_commit_then_retry() {
         let f = &mut MemFlash::new();
 
+        // Calculate sizes that will work with any alignment
+        // We want to fill most of the page, leaving just a small amount of space
+        let initial_data_size = MAX_PAYLOAD / 3;
+        let append_data_size = MAX_PAYLOAD / 3;
+        let initial_data: Vec<u8> = (1..=initial_data_size).map(|i| i as u8).collect();
+        let append_data: Vec<u8> = (100..100 + append_data_size).map(|i| i as u8).collect();
+
         // Write
         let mut w = PageWriter::new();
         w.open(f, PAGE).await;
-        let n = w.write(f, &[1, 2, 3, 4, 5, 6, 7, 8, 9]).await.unwrap();
-        assert_eq!(n, 9);
+        let n = w.write(f, &initial_data).await.unwrap();
+        assert_eq!(n, initial_data_size);
         w.write_header(f, HEADER).await.unwrap();
         w.commit(f).await.unwrap();
 
         // Append but don't commit
         w.open_append(f, PAGE).await.unwrap();
-        let n = w.write(f, &[10, 11, 12, 13, 14, 15]).await.unwrap();
-        assert_eq!(n, 6);
+        let n = w.write(f, &append_data).await.unwrap();
+        assert_eq!(n, append_data_size);
         // no commit!
 
         // Even though we didn't commit the appended stuff, it did get written to flash.
-        // If there's "left over garbage" we can non longer append to this page. It must
+        // If there's "left over garbage" we can no longer append to this page. It must
         // behave as if it was full.
         w.open_append(f, PAGE).await.unwrap();
-        let n = w.write(f, &[13, 14, 15]).await.unwrap();
-        assert_eq!(n, 0);
+        let retry_data = vec![200u8; 10];
+        let n = w.write(f, &retry_data).await.unwrap();
+        assert_eq!(n, 0, "Page should reject writes after uncommitted append");
 
-        // Read
+        // Read - should only see the committed data
         let mut r = PageReader::new();
         let h = r.open::<_, TestHeader>(f, PAGE).await.unwrap();
         assert_eq!(h, HEADER);
         let mut buf = vec![0; MAX_PAYLOAD];
 
         let n = r.read(f, &mut buf).await.unwrap();
-        assert_eq!(n, 9);
-        assert_eq!(buf[..9], [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(n, initial_data_size);
+        assert_eq!(&buf[..initial_data_size], &initial_data[..]);
 
         let n = r.read(f, &mut buf).await.unwrap();
         assert_eq!(n, 0);
@@ -1152,6 +1259,29 @@ mod tests {
         r.rehydrate_from(f, &dehydrated_end).await.unwrap();
         let n = r.read(f, &mut buf).await.unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn test_header_alignment() {
+        use core::mem::size_of;
+        assert_eq!(size_of::<PageHeader>() % ALIGN, 0, "PageHeader not aligned to ALIGN");
+        // ChunkHeader does not need to be aligned - it is written together with
+        // the first bytes of data to form an aligned write.
+    }
+
+    #[test]
+    fn test_chunk_offset_alignment() {
+        use core::mem::size_of;
+
+        use crate::file::{DataHeader, MetaHeader};
+
+        // MetaHeader
+        let meta_offset = PageHeader::SIZE + size_of::<MetaHeader>();
+        assert_eq!(meta_offset % ALIGN, 0, "First chunk offset not aligned for MetaHeader");
+
+        // DataHeader
+        let data_offset = PageHeader::SIZE + size_of::<DataHeader>();
+        assert_eq!(data_offset % ALIGN, 0, "First chunk offset not aligned for DataHeader");
     }
 
     fn dummy_data(len: usize) -> Vec<u8> {
