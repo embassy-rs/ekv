@@ -90,12 +90,16 @@ fn main() {
     }
 
     // Check for conflicting align features
-    let align_features: Vec<_> = ["CARGO_FEATURE_ALIGN_1", "CARGO_FEATURE_ALIGN_2",
-                                   "CARGO_FEATURE_ALIGN_4", "CARGO_FEATURE_ALIGN_8",
-                                   "CARGO_FEATURE_ALIGN_16"]
-        .iter()
-        .filter(|f| env::var(f).is_ok())
-        .collect();
+    let align_features: Vec<_> = [
+        "CARGO_FEATURE_ALIGN_1",
+        "CARGO_FEATURE_ALIGN_2",
+        "CARGO_FEATURE_ALIGN_4",
+        "CARGO_FEATURE_ALIGN_8",
+        "CARGO_FEATURE_ALIGN_16",
+    ]
+    .iter()
+    .filter(|f| env::var(f).is_ok())
+    .collect();
 
     if align_features.len() > 1 {
         panic!("Multiple align features enabled: {:?}", align_features);

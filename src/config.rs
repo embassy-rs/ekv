@@ -26,7 +26,7 @@
 use core::mem::size_of;
 
 use crate::file::{DataHeader, MetaHeader, PAGE_MAX_PAYLOAD_SIZE};
-use crate::page::{ChunkHeader, PageHeader};
+use crate::page::PageHeader;
 use crate::record::RecordHeader;
 
 mod raw {
@@ -53,7 +53,7 @@ pub const CRC: bool = raw::CRC;
 /// multiples of this value. Useful when the flash supports writing with 16-bit
 /// or 32-bit word granularity.
 ///
-/// Supported values: 1, 2 or 4.
+/// Supported values: 1, 2, 4, 8 or 16.
 ///
 /// Default: 4
 pub const ALIGN: usize = raw::ALIGN;
@@ -206,10 +206,7 @@ const _CHECKS: () = {
 
     // Verify headers are properly aligned
     core::assert!(size_of::<PageHeader>() % ALIGN == 0, "PageHeader not aligned to ALIGN");
-    core::assert!(
-        size_of::<ChunkHeader>() % ALIGN == 0,
-        "ChunkHeader not aligned to ALIGN"
-    );
+    // Note: ChunkHeader no longer needs to be aligned because it's packed with data
     core::assert!(size_of::<MetaHeader>() % ALIGN == 0, "MetaHeader not aligned to ALIGN");
     core::assert!(size_of::<DataHeader>() % ALIGN == 0, "DataHeader not aligned to ALIGN");
 

@@ -7,16 +7,20 @@ use crate::errors::*;
 use crate::flash::Flash;
 use crate::page;
 pub use crate::page::ReadError;
-use crate::page::{ChunkHeader, DehydratedPageReader, Header, PageHeader, PageReader, PageWriter};
+use crate::page::{align_up, ChunkHeader, DehydratedPageReader, Header, PageHeader, PageReader, PageWriter};
 use crate::types::{OptionPageID, PageID};
 
-// Number of chunks + chunk headers per page.
-const CHUNKS_PER_PAGE: usize =
-    (PAGE_SIZE - PageHeader::SIZE - size_of::<DataHeader>()) / (page::MAX_CHUNK_SIZE + ChunkHeader::SIZE);
-// Size of the last chunk + chunk header.
-const CHUNKS_REMAINDER: usize =
-    (PAGE_SIZE - PageHeader::SIZE - size_of::<DataHeader>()) % (page::MAX_CHUNK_SIZE + ChunkHeader::SIZE);
-// Bytes in max chunks + remainder chunk without the last chunk header.
+// With the new packing approach, each chunk occupies align_up(ChunkHeader::SIZE + data_size) bytes.
+// For a full chunk: align_up(ChunkHeader::SIZE + MAX_CHUNK_SIZE).
+const BYTES_PER_FULL_CHUNK: usize = align_up(ChunkHeader::SIZE + page::MAX_CHUNK_SIZE);
+
+// Number of full chunks that fit in a page.
+const CHUNKS_PER_PAGE: usize = (PAGE_SIZE - PageHeader::SIZE - size_of::<DataHeader>()) / BYTES_PER_FULL_CHUNK;
+
+// Remaining space after full chunks.
+const CHUNKS_REMAINDER: usize = (PAGE_SIZE - PageHeader::SIZE - size_of::<DataHeader>()) % BYTES_PER_FULL_CHUNK;
+
+// Maximum payload: full chunks + whatever fits in remainder (minus header).
 pub const PAGE_MAX_PAYLOAD_SIZE: usize =
     (CHUNKS_PER_PAGE * page::MAX_CHUNK_SIZE) + CHUNKS_REMAINDER.saturating_sub(ChunkHeader::SIZE);
 
@@ -29,6 +33,7 @@ pub enum SeekDirection {
 }
 
 // Helper functions for calculating header padding based on alignment
+#[cfg(any(feature = "align-8", feature = "align-16"))]
 const fn dataheader_padding_align(n: usize) -> usize {
     let base = 4 + (2 * SKIPLIST_LEN) + 2;
     let aligned = ((n + base - 1) / base) * base;
@@ -1335,8 +1340,11 @@ impl FileWriter {
                 page_len += n;
             }
 
-            if page_len != PAGE_MAX_PAYLOAD_SIZE {
-                // Page is not full.
+            // Only copy if there's enough remaining space to write at least 1 byte of data.
+            // Minimum space needed: align_up(ChunkHeader::SIZE + 1)
+            // This avoids copying pages that are effectively full due to alignment constraints.
+            if PAGE_MAX_PAYLOAD_SIZE - page_len >= page::align_up(ChunkHeader::SIZE + 1) {
+                // Page has significant unused space.
                 // Open a new page, copy all the data over, and make that the last file page.
                 // TODO: if possible, use PageManager::write_append to avoid the copy.
 
