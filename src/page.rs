@@ -768,8 +768,19 @@ mod tests {
         // Write
         let mut w = PageWriter::new();
         w.open(f, PAGE).await;
-        let n = w.write(f, &data).await.unwrap();
-        assert_eq!(n, MAX_PAYLOAD);
+        let mut total = 0;
+        let mut writes = 0;
+        while total < data.len() {
+            let n = w.write(f, &data[total..]).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            total += n;
+            writes += 1;
+        }
+
+        let expected = PAGE_SIZE - PageHeader::SIZE - size_of::<TestHeader>() - (ChunkHeader::SIZE * writes);
+        assert_eq!(total, expected, "writes: {}", writes);
         w.write_header(f, HEADER).await.unwrap();
         w.commit(f).await.unwrap();
 
@@ -777,9 +788,16 @@ mod tests {
         let mut r = PageReader::new();
         let h = r.open::<_, TestHeader>(f, PAGE).await.unwrap();
         assert_eq!(h, HEADER);
-        let mut buf = vec![0; MAX_PAYLOAD];
-        let n = r.read(f, &mut buf).await.unwrap();
-        assert_eq!(n, MAX_PAYLOAD);
+        let mut buf = vec![];
+        loop {
+            let mut chunk = [0u8; MAX_CHUNK_SIZE];
+            let n = r.read(f, &mut chunk).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        assert_eq!(buf.len(), expected);
         assert_eq!(data[..13], buf[..13]);
     }
 

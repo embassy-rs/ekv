@@ -11,6 +11,8 @@ cargo fmt --check
 FEATURESET=(
     ekv/page-size-256,ekv/max-page-count-64,ekv/max-value-size-128,ekv/scratch-page-count-4,ekv/align-1
     ekv/page-size-256,ekv/max-page-count-256,ekv/max-value-size-1024,ekv/scratch-page-count-8,ekv/align-2
+    ekv/page-size-256,ekv/max-page-count-256,ekv/max-value-size-1024,ekv/scratch-page-count-8,ekv/align-4
+    ekv/page-size-4096,ekv/max-page-count-256,ekv/max-chunk-size-512,ekv/max-value-size-1024,ekv/scratch-page-count-4,ekv/crc,ekv/align-4
     ekv/page-size-1024,ekv/max-page-count-16,ekv/max-value-size-16,ekv/scratch-page-count-0
     ekv/page-size-128,ekv/max-page-count-32,ekv/max-value-size-16,ekv/scratch-page-count-0
     ekv/page-size-128,ekv/max-page-count-32,ekv/max-value-size-16,ekv/scratch-page-count-0,ekv/crc
