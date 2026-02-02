@@ -32,11 +32,15 @@ pub enum SeekDirection {
     Right,
 }
 
-// Helper functions for calculating header padding based on alignment
+// Helper function for calculating header padding based on alignment.
+// Returns the number of padding bytes needed to align `base` to a multiple of `n`.
+// Note: The repr(align(N)) attribute on DataHeader also ensures proper alignment,
+// but we keep explicit padding for clarity in the on-disk format.
 #[cfg(any(feature = "align-8", feature = "align-16"))]
 const fn dataheader_padding_align(n: usize) -> usize {
     let base = 4 + (2 * SKIPLIST_LEN) + 2;
-    let aligned = ((n + base - 1) / base) * base;
+    // Round base up to next multiple of n, then subtract base to get padding needed
+    let aligned = ((base + n - 1) / n) * n;
     aligned - base
 }
 
@@ -46,6 +50,10 @@ const fn dataheader_padding_align(n: usize) -> usize {
 pub struct MetaHeader {
     page_count: u32,
     seq: Seq,
+
+    // Note: The repr(align(16)) attribute above automatically pads the struct
+    // to ensure its size is a multiple of 16. The manual padding field below
+    // is technically redundant but kept for explicitness.
 
     // Base: 8 bytes → add 8 bytes for ALIGN=16
     #[cfg(feature = "align-16")]
@@ -72,6 +80,10 @@ pub struct DataHeader {
     /// u16::MAX if there's no boundary within the page. This can happen if a very big record
     /// starts at a previous page, and ends at a later page.
     record_boundary: u16,
+
+    // Note: The repr(align(N)) attributes above automatically pad the struct
+    // to ensure its size is a multiple of N. The manual padding fields below
+    // are technically redundant but kept for explicitness.
 
     // Dynamic padding based on SKIPLIST_LEN
     #[cfg(feature = "align-8")]
@@ -234,7 +246,7 @@ impl<F: Flash> FileManager<F> {
             page_count: self.page_count() as u32,
             seq: self.meta_seq,
             #[cfg(feature = "align-16")]
-            _padding: [0; 8],
+            _padding: [ERASE_VALUE; 8],
         };
         w.write_header(&mut self.flash, h).await.map_err(FormatError::Flash)?;
 
@@ -736,7 +748,7 @@ impl<'a, F: Flash> Transaction<'a, F> {
                     page_count: self.m.page_count() as _,
                     seq: self.m.meta_seq,
                     #[cfg(feature = "align-16")]
-                    _padding: [0; 8],
+                    _padding: [ERASE_VALUE; 8],
                 };
                 w.write_header(&mut self.m.flash, h).await.map_err(Error::Flash)?;
                 w.commit(&mut self.m.flash).await?;
@@ -1423,9 +1435,9 @@ impl FileWriter {
             skiplist,
             record_boundary,
             #[cfg(feature = "align-8")]
-            _padding: [0; dataheader_padding_align(8)],
+            _padding: [ERASE_VALUE; dataheader_padding_align(8)],
             #[cfg(feature = "align-16")]
-            _padding: [0; dataheader_padding_align(16)],
+            _padding: [ERASE_VALUE; dataheader_padding_align(16)],
         };
         w.write_header(&mut m.flash, header).await.map_err(Error::Flash)?;
         w.commit(&mut m.flash).await?;
