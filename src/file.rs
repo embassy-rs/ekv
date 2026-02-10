@@ -7,16 +7,20 @@ use crate::errors::*;
 use crate::flash::Flash;
 use crate::page;
 pub use crate::page::ReadError;
-use crate::page::{ChunkHeader, DehydratedPageReader, Header, PageHeader, PageReader, PageWriter};
+use crate::page::{align_up, ChunkHeader, DehydratedPageReader, Header, PageHeader, PageReader, PageWriter};
 use crate::types::{OptionPageID, PageID};
 
-// Number of chunks + chunk headers per page.
-const CHUNKS_PER_PAGE: usize =
-    (PAGE_SIZE - PageHeader::SIZE - size_of::<DataHeader>()) / (page::MAX_CHUNK_SIZE + ChunkHeader::SIZE);
-// Size of the last chunk + chunk header.
-const CHUNKS_REMAINDER: usize =
-    (PAGE_SIZE - PageHeader::SIZE - size_of::<DataHeader>()) % (page::MAX_CHUNK_SIZE + ChunkHeader::SIZE);
-// Bytes in max chunks + remainder chunk without the last chunk header.
+// With the new packing approach, each chunk occupies align_up(ChunkHeader::SIZE + data_size) bytes.
+// For a full chunk: align_up(ChunkHeader::SIZE + MAX_CHUNK_SIZE).
+const BYTES_PER_FULL_CHUNK: usize = align_up(ChunkHeader::SIZE + page::MAX_CHUNK_SIZE);
+
+// Number of full chunks that fit in a page.
+const CHUNKS_PER_PAGE: usize = (PAGE_SIZE - PageHeader::SIZE - size_of::<DataHeader>()) / BYTES_PER_FULL_CHUNK;
+
+// Remaining space after full chunks.
+const CHUNKS_REMAINDER: usize = (PAGE_SIZE - PageHeader::SIZE - size_of::<DataHeader>()) % BYTES_PER_FULL_CHUNK;
+
+// Maximum payload: full chunks + whatever fits in remainder (minus header).
 pub const PAGE_MAX_PAYLOAD_SIZE: usize =
     (CHUNKS_PER_PAGE * page::MAX_CHUNK_SIZE) + CHUNKS_REMAINDER.saturating_sub(ChunkHeader::SIZE);
 
@@ -28,11 +32,27 @@ pub enum SeekDirection {
     Right,
 }
 
+// Helper function for calculating padding to align a size to ALIGN.
+// Returns the number of padding bytes needed.
+// Works for any alignment value and evaluates to 0 when no padding is needed.
+const fn calc_padding(size: usize) -> usize {
+    let rem = size % ALIGN;
+    if rem == 0 {
+        0
+    } else {
+        ALIGN - rem
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(C)]
 pub struct MetaHeader {
     page_count: u32,
     seq: Seq,
+
+    // Padding to align struct size to ALIGN.
+    // Base size: 4 (page_count) + 4 (seq) = 8 bytes.
+    _padding: [u8; calc_padding(8)],
 }
 
 unsafe impl page::Header for MetaHeader {
@@ -53,6 +73,10 @@ pub struct DataHeader {
     /// u16::MAX if there's no boundary within the page. This can happen if a very big record
     /// starts at a previous page, and ends at a later page.
     record_boundary: u16,
+
+    // Padding to align struct size to ALIGN.
+    // Base size: 4 (seq) + 2*SKIPLIST_LEN (skiplist) + 2 (record_boundary).
+    _padding: [u8; calc_padding(4 + 2 * SKIPLIST_LEN + 2)],
 }
 
 unsafe impl page::Header for DataHeader {
@@ -207,6 +231,7 @@ impl<F: Flash> FileManager<F> {
         let h = MetaHeader {
             page_count: self.page_count() as u32,
             seq: self.meta_seq,
+            _padding: [ERASE_VALUE; calc_padding(8)],
         };
         w.write_header(&mut self.flash, h).await.map_err(FormatError::Flash)?;
 
@@ -707,6 +732,7 @@ impl<'a, F: Flash> Transaction<'a, F> {
                 let h = MetaHeader {
                     page_count: self.m.page_count() as _,
                     seq: self.m.meta_seq,
+                    _padding: [ERASE_VALUE; calc_padding(8)],
                 };
                 w.write_header(&mut self.m.flash, h).await.map_err(Error::Flash)?;
                 w.commit(&mut self.m.flash).await?;
@@ -1310,8 +1336,11 @@ impl FileWriter {
                 page_len += n;
             }
 
-            if page_len != PAGE_MAX_PAYLOAD_SIZE {
-                // Page is not full.
+            // Only copy if there's enough remaining space to write at least 1 byte of data.
+            // Minimum space needed: align_up(ChunkHeader::SIZE + 1)
+            // This avoids copying pages that are effectively full due to alignment constraints.
+            if PAGE_MAX_PAYLOAD_SIZE - page_len >= page::align_up(ChunkHeader::SIZE + 1) {
+                // Page has significant unused space.
                 // Open a new page, copy all the data over, and make that the last file page.
                 // TODO: if possible, use PageManager::write_append to avoid the copy.
 
@@ -1389,6 +1418,7 @@ impl FileWriter {
             seq: self.seq,
             skiplist,
             record_boundary,
+            _padding: [ERASE_VALUE; calc_padding(4 + 2 * SKIPLIST_LEN + 2)],
         };
         w.write_header(&mut m.flash, header).await.map_err(Error::Flash)?;
         w.commit(&mut m.flash).await?;
