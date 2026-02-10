@@ -32,32 +32,27 @@ pub enum SeekDirection {
     Right,
 }
 
-// Helper function for calculating header padding based on alignment.
-// Returns the number of padding bytes needed to align `base` to a multiple of `n`.
-// Note: The repr(align(N)) attribute on DataHeader also ensures proper alignment,
-// but we keep explicit padding for clarity in the on-disk format.
-#[cfg(any(feature = "align-8", feature = "align-16"))]
-const fn dataheader_padding_align(n: usize) -> usize {
-    let base = 4 + (2 * SKIPLIST_LEN) + 2;
-    // Round base up to next multiple of n, then subtract base to get padding needed
-    let aligned = ((base + n - 1) / n) * n;
-    aligned - base
+// Helper function for calculating padding to align a size to ALIGN.
+// Returns the number of padding bytes needed.
+// Works for any alignment value and evaluates to 0 when no padding is needed.
+const fn calc_padding(size: usize) -> usize {
+    let rem = size % ALIGN;
+    if rem == 0 {
+        0
+    } else {
+        ALIGN - rem
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(C)]
-#[cfg_attr(feature = "align-16", repr(align(16)))]
 pub struct MetaHeader {
     page_count: u32,
     seq: Seq,
 
-    // Note: The repr(align(16)) attribute above automatically pads the struct
-    // to ensure its size is a multiple of 16. The manual padding field below
-    // is technically redundant but kept for explicitness.
-
-    // Base: 8 bytes → add 8 bytes for ALIGN=16
-    #[cfg(feature = "align-16")]
-    _padding: [u8; 8],
+    // Padding to align struct size to ALIGN.
+    // Base size: 4 (page_count) + 4 (seq) = 8 bytes.
+    _padding: [u8; calc_padding(8)],
 }
 
 unsafe impl page::Header for MetaHeader {
@@ -67,8 +62,6 @@ unsafe impl page::Header for MetaHeader {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[repr(C)]
-#[cfg_attr(feature = "align-8", repr(align(8)))]
-#[cfg_attr(feature = "align-16", repr(align(16)))]
 pub struct DataHeader {
     seq: Seq,
 
@@ -81,16 +74,9 @@ pub struct DataHeader {
     /// starts at a previous page, and ends at a later page.
     record_boundary: u16,
 
-    // Note: The repr(align(N)) attributes above automatically pad the struct
-    // to ensure its size is a multiple of N. The manual padding fields below
-    // are technically redundant but kept for explicitness.
-
-    // Dynamic padding based on SKIPLIST_LEN
-    #[cfg(feature = "align-8")]
-    _padding: [u8; dataheader_padding_align(8)],
-
-    #[cfg(feature = "align-16")]
-    _padding: [u8; dataheader_padding_align(16)],
+    // Padding to align struct size to ALIGN.
+    // Base size: 4 (seq) + 2*SKIPLIST_LEN (skiplist) + 2 (record_boundary).
+    _padding: [u8; calc_padding(4 + 2 * SKIPLIST_LEN + 2)],
 }
 
 unsafe impl page::Header for DataHeader {
@@ -245,8 +231,7 @@ impl<F: Flash> FileManager<F> {
         let h = MetaHeader {
             page_count: self.page_count() as u32,
             seq: self.meta_seq,
-            #[cfg(feature = "align-16")]
-            _padding: [ERASE_VALUE; 8],
+            _padding: [ERASE_VALUE; calc_padding(8)],
         };
         w.write_header(&mut self.flash, h).await.map_err(FormatError::Flash)?;
 
@@ -747,8 +732,7 @@ impl<'a, F: Flash> Transaction<'a, F> {
                 let h = MetaHeader {
                     page_count: self.m.page_count() as _,
                     seq: self.m.meta_seq,
-                    #[cfg(feature = "align-16")]
-                    _padding: [ERASE_VALUE; 8],
+                    _padding: [ERASE_VALUE; calc_padding(8)],
                 };
                 w.write_header(&mut self.m.flash, h).await.map_err(Error::Flash)?;
                 w.commit(&mut self.m.flash).await?;
@@ -1434,10 +1418,7 @@ impl FileWriter {
             seq: self.seq,
             skiplist,
             record_boundary,
-            #[cfg(feature = "align-8")]
-            _padding: [ERASE_VALUE; dataheader_padding_align(8)],
-            #[cfg(feature = "align-16")]
-            _padding: [ERASE_VALUE; dataheader_padding_align(16)],
+            _padding: [ERASE_VALUE; calc_padding(4 + 2 * SKIPLIST_LEN + 2)],
         };
         w.write_header(&mut m.flash, header).await.map_err(Error::Flash)?;
         w.commit(&mut m.flash).await?;
