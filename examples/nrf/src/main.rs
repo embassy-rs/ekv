@@ -17,7 +17,7 @@ use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_time::Instant;
 use heapless::Vec;
 use panic_probe as _;
-use rand_core::RngCore;
+use rand_core::TryRngCore;
 
 bind_interrupts!(struct Irqs {
     QSPI => qspi::InterruptHandler<peripherals::QSPI>;
@@ -25,7 +25,7 @@ bind_interrupts!(struct Irqs {
 });
 
 struct Flash<'a> {
-    qspi: qspi::Qspi<'a, peripherals::QSPI>,
+    qspi: qspi::Qspi<'a>,
 }
 
 // Workaround for alignment requirements.
@@ -80,7 +80,7 @@ async fn main(_spawner: Spawner) -> ! {
 
     // Generate random seed.
     let mut rng = Rng::new(p.RNG, Irqs);
-    let random_seed = rng.next_u32();
+    let random_seed = rng.try_next_u32().unwrap();
 
     // Config for the MX25R64 present in the nRF52840 DK
     let mut config = qspi::Config::default();
@@ -89,7 +89,7 @@ async fn main(_spawner: Spawner) -> ! {
     config.write_page_size = qspi::WritePageSize::_256BYTES;
     config.frequency = qspi::Frequency::M32;
 
-    let mut q: qspi::Qspi<_> = qspi::Qspi::new(
+    let mut q: qspi::Qspi<'_> = qspi::Qspi::new(
         p.QSPI, Irqs, p.P0_19, p.P0_17, p.P0_20, p.P0_21, p.P0_22, p.P0_23, config,
     );
 

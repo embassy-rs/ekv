@@ -115,7 +115,7 @@ impl<'a, F: Flash + 'a, M: RawMutex + 'a> Cursor<'a, F, M> {
                     found = true;
                     match ordering {
                         Ordering::Less => {
-                            lowest_key = unwrap!(Vec::from_slice(got_key));
+                            lowest_key = unwrap!(Vec::from_slice(got_key).ok());
                             is_lowest.fill(false);
                             is_lowest[i] = true;
                         }

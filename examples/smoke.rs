@@ -4,7 +4,7 @@ use ekv::config::{MAX_PAGE_COUNT, PAGE_SIZE};
 use ekv::flash::MemFlash;
 use ekv::{Config, Database, ReadError, WriteError};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
-use rand::Rng;
+use rand::RngExt;
 
 const KEY_MIN_LEN: usize = 1;
 const KEY_MAX_LEN: usize = 10;
