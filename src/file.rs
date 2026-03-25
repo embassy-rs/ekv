@@ -1618,7 +1618,7 @@ fn skiplist_seq(curr: Seq, index: usize) -> Seq {
 
 #[cfg(test)]
 mod tests {
-    use rand::Rng;
+    use rand::RngExt;
 
     use super::*;
     use crate::flash::MemFlash;

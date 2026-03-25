@@ -2,7 +2,7 @@ use ekv::flash::MemFlash;
 use ekv::{Config, Database};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use plotters::prelude::*;
-use rand::Rng;
+use rand::RngExt;
 
 struct Params {
     key_count: usize,
