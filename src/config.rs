@@ -205,10 +205,19 @@ const _CHECKS: () = {
     core::assert!(ALIGN == 1 || ALIGN == 2 || ALIGN == 4 || ALIGN == 8 || ALIGN == 16);
 
     // Verify headers are properly aligned
-    core::assert!(size_of::<PageHeader>() % ALIGN == 0, "PageHeader not aligned to ALIGN");
+    core::assert!(
+        size_of::<PageHeader>().is_multiple_of(ALIGN),
+        "PageHeader not aligned to ALIGN"
+    );
     // Note: ChunkHeader no longer needs to be aligned because it's packed with data
-    core::assert!(size_of::<MetaHeader>() % ALIGN == 0, "MetaHeader not aligned to ALIGN");
-    core::assert!(size_of::<DataHeader>() % ALIGN == 0, "DataHeader not aligned to ALIGN");
+    core::assert!(
+        size_of::<MetaHeader>().is_multiple_of(ALIGN),
+        "MetaHeader not aligned to ALIGN"
+    );
+    core::assert!(
+        size_of::<DataHeader>().is_multiple_of(ALIGN),
+        "DataHeader not aligned to ALIGN"
+    );
 
     // assert MIN_FREE_PAGE_COUNT is reasonable.
     // If it's too big relative to the total flash size, we'll waste a lot of space!
@@ -222,7 +231,7 @@ const _CHECKS: () = {
 
     core::assert!(RECORD_HEADER_SIZE <= 4);
 
-    core::assert!(MAX_CHUNK_SIZE % ALIGN == 0);
+    core::assert!(MAX_CHUNK_SIZE.is_multiple_of(ALIGN));
 };
 
 /// Dump the compile-time configuration to `log` or `defmt`.

@@ -653,7 +653,7 @@ impl<H: Header> PageWriter<H> {
 
         // Pad header_buf to ALIGN if needed.
         let header_plus_data_len = ChunkHeader::SIZE + self.header_buf_len;
-        let aligned_len = if header_plus_data_len % ALIGN != 0 {
+        let aligned_len = if !header_plus_data_len.is_multiple_of(ALIGN) {
             header_plus_data_len + ALIGN - (header_plus_data_len % ALIGN)
         } else {
             header_plus_data_len
@@ -679,7 +679,7 @@ impl<H: Header> PageWriter<H> {
 }
 
 pub const fn align_up(n: usize) -> usize {
-    if n % ALIGN != 0 {
+    if !n.is_multiple_of(ALIGN) {
         n + ALIGN - n % ALIGN
     } else {
         n
