@@ -96,6 +96,11 @@ pub const ERASE_VALUE: u8 = match raw::ERASE_VALUE {
 /// The chunk size controls how big chunks of data is read and written from/to flash. A low
 /// value reduces the memory usage of EKV at the expense of more reads/writes.
 ///
+/// This is the maximum number of *data* bytes per chunk. The on-flash footprint of a chunk
+/// occupies more space on flash due to the chunk header which also needs to be aligned.
+///
+/// The total amount of space consumed on flash is `align_up(ChunkHeader::SIZE + data_len)`.
+///
 /// Default: 4096
 pub const MAX_CHUNK_SIZE: usize = raw::MAX_CHUNK_SIZE;
 

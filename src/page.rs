@@ -86,6 +86,17 @@ pub(crate) const MAX_CHUNK_SIZE: usize = if config::MAX_CHUNK_SIZE > (PAGE_SIZE 
     config::MAX_CHUNK_SIZE
 };
 
+/// Size of PageReader's chunk buffer.
+///
+/// A chunk's on-flash footprint is `align_up(ChunkHeader::SIZE + data_len)`
+/// (header + data + trailing alignment padding). load_chunk parses the header
+/// into a stack-local, so the in-memory buffer holds everything except the
+/// header — hence `footprint - ChunkHeader::SIZE`.
+///
+/// When ALIGN > ChunkHeader::SIZE this exceeds MAX_CHUNK_SIZE by up to
+/// ALIGN - ChunkHeader::SIZE bytes.
+const READ_BUF_SIZE: usize = align_up(ChunkHeader::SIZE + MAX_CHUNK_SIZE) - ChunkHeader::SIZE;
+
 async fn write_header<F: Flash, H: Header>(flash: &mut F, page_id: PageID, header: H) -> Result<(), F::Error> {
     assert!(size_of::<H>() <= MAX_HEADER_SIZE);
     let mut buf = [0u8; PageHeader::SIZE + MAX_HEADER_SIZE];
@@ -216,7 +227,9 @@ pub struct PageReader {
     chunk_pos: usize,
 
     /// Data in the current chunk.
-    buf: [u8; MAX_CHUNK_SIZE],
+    ///
+    /// Sized to fit load_chunk's worst-case aligned read, not MAX_CHUNK_SIZE.
+    buf: [u8; READ_BUF_SIZE],
 }
 
 #[derive(Clone)]
@@ -238,7 +251,7 @@ impl PageReader {
                 chunk_crc: 0,
             },
             chunk_pos: 0,
-            buf: [0u8; MAX_CHUNK_SIZE],
+            buf: [0u8; READ_BUF_SIZE],
         }
     }
 
@@ -856,6 +869,51 @@ mod tests {
         assert_eq!(data, buf);
     }
 
+    // Regression test for a buffer overflow in PageReader::load_chunk that fired when
+    // ALIGN > ChunkHeader::SIZE (so header padding overlays initial data bytes) and a
+    // chunk was written all the way up to MAX_CHUNK_SIZE.
+    //
+    // The writer's is_chunk_full() let chunk_pos reach MAX_CHUNK_SIZE, producing an
+    // auto-committed chunk with len == MAX_CHUNK_SIZE. On read, load_chunk tries to
+    // write `data_in_first_block + align_up(chunk_len - data_in_first_block)` bytes into
+    // `buf: [u8; MAX_CHUNK_SIZE]`. With align-16 + crc + max-chunk-size-512 that's
+    // `8 + align_up(504) = 520` bytes into a 512-byte buffer → panic.
+    #[test_log::test(tokio::test)]
+    #[cfg(all(feature = "align-16", feature = "crc", feature = "max-chunk-size-512"))]
+    async fn test_chunk_fills_to_max_chunk_size_no_buf_overflow() {
+        let f = &mut MemFlash::new();
+        let data = dummy_data(MAX_CHUNK_SIZE);
+
+        let mut w: PageWriter<TestHeader> = PageWriter::new();
+        w.open(f, PAGE).await;
+        let mut written = 0;
+        while written < data.len() {
+            let n = w.write(f, &data[written..]).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            written += n;
+        }
+        assert_eq!(written, data.len());
+        w.write_header(f, HEADER).await.unwrap();
+        w.commit(f).await.unwrap();
+
+        let mut r = PageReader::new();
+        let h = r.open::<_, TestHeader>(f, PAGE).await.unwrap();
+        assert_eq!(h, HEADER);
+        let mut buf = vec![0u8; data.len()];
+        let mut total = 0;
+        loop {
+            let n = r.read(f, &mut buf[total..]).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            total += n;
+        }
+        assert_eq!(total, data.len());
+        assert_eq!(buf, data);
+    }
+
     #[test_log::test(tokio::test)]
     async fn test_overread() {
         let f = &mut MemFlash::new();
@@ -899,7 +957,15 @@ mod tests {
             writes += 1;
         }
 
-        let expected = PAGE_SIZE - PageHeader::SIZE - size_of::<TestHeader>() - (ChunkHeader::SIZE * writes);
+        // Per-chunk flash footprint is align_up(ChunkHeader::SIZE + chunk_data);
+        // the alignment padding is overhead beyond the chunk header itself when
+        // ALIGN > ChunkHeader::SIZE. All but the last chunk are filled to MAX_CHUNK_SIZE.
+        const FULL_CHUNK_OVERHEAD: usize = align_up(ChunkHeader::SIZE + MAX_CHUNK_SIZE) - MAX_CHUNK_SIZE;
+        let expected = PAGE_SIZE
+            - PageHeader::SIZE
+            - size_of::<TestHeader>()
+            - FULL_CHUNK_OVERHEAD * (writes - 1)
+            - ChunkHeader::SIZE;
         assert_eq!(total, expected, "writes: {}", writes);
         w.write_header(f, HEADER).await.unwrap();
         w.commit(f).await.unwrap();
