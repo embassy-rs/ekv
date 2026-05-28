@@ -86,6 +86,17 @@ pub(crate) const MAX_CHUNK_SIZE: usize = if config::MAX_CHUNK_SIZE > (PAGE_SIZE 
     config::MAX_CHUNK_SIZE
 };
 
+/// Size of PageReader's chunk buffer.
+///
+/// A chunk's on-flash footprint is `align_up(ChunkHeader::SIZE + data_len)`
+/// (header + data + trailing alignment padding). load_chunk parses the header
+/// into a stack-local, so the in-memory buffer holds everything except the
+/// header — hence `footprint - ChunkHeader::SIZE`.
+///
+/// When ALIGN > ChunkHeader::SIZE this exceeds MAX_CHUNK_SIZE by up to
+/// ALIGN - ChunkHeader::SIZE bytes.
+const READ_BUF_SIZE: usize = align_up(ChunkHeader::SIZE + MAX_CHUNK_SIZE) - ChunkHeader::SIZE;
+
 async fn write_header<F: Flash, H: Header>(flash: &mut F, page_id: PageID, header: H) -> Result<(), F::Error> {
     assert!(size_of::<H>() <= MAX_HEADER_SIZE);
     let mut buf = [0u8; PageHeader::SIZE + MAX_HEADER_SIZE];
@@ -216,7 +227,9 @@ pub struct PageReader {
     chunk_pos: usize,
 
     /// Data in the current chunk.
-    buf: [u8; MAX_CHUNK_SIZE],
+    ///
+    /// Sized to fit load_chunk's worst-case aligned read, not MAX_CHUNK_SIZE.
+    buf: [u8; READ_BUF_SIZE],
 }
 
 #[derive(Clone)]
@@ -238,7 +251,7 @@ impl PageReader {
                 chunk_crc: 0,
             },
             chunk_pos: 0,
-            buf: [0u8; MAX_CHUNK_SIZE],
+            buf: [0u8; READ_BUF_SIZE],
         }
     }
 
